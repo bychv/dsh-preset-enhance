@@ -1,0 +1,12 @@
+# Shadow the deployment persona with an empty complete prompt and suppress the
+# runtime-context snapshot. The host interceptor also removes the empty prompt
+# node at the final request boundary before assembling the SillyTavern preset.
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    prefix: ''
+    complete: true
+    includeRuntimeContext: false
+
+- id: preset-enhance-mode
+  name: dsh-preset-enhance/mode

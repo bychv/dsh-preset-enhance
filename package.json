@@ -1,0 +1,17 @@
+{
+  "name": "dsh-preset-enhance",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "SillyTavern prompt presets, macros and editor for DeepSeek Harness",
+  "repository": "github:bychv/dsh-preset-enhance",
+  "homepage": "https://github.com/bychv/dsh-preset-enhance",
+  "main": "./index.mjs",
+  "exports": { ".": "./index.mjs", "./mode": "./mode.mjs", "./client": "./client.js", "./package.json": "./package.json" },
+  "files": ["index.mjs", "mode.mjs", "client.js", "agent-mode", "lib", "web", "cordis.patch.yml", "README.md"],
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": { "platform": "web", "inject": ["@deepseek-ai/dsh-client-ui-renderer", "@deepseek-ai/dsh-client-ui-layout", "@deepseek-ai/dsh-client-ui-sidebar", "@deepseek-ai/dsh-client-ui-conversation"] }
+  },
+  "engines": { "node": ">=22.19.0", "dsh": ">=0.1.5-rc.2 <0.1.6" },
+  "scripts": { "test": "node --test tests/*.test.mjs", "check": "node --check index.mjs && node --check web/editor.js && node --check client.js", "pack:check": "npm pack --dry-run" }
+}
