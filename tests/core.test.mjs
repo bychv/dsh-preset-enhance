@@ -49,12 +49,23 @@ test('depth insertion respects original positions and tool-call/result boundarie
   assert.deepEqual(result.messages.map(x => x.id), ['u', 'preset:preview:d', 'a', 't']);
   assert.ok(result.warnings[0].includes('配对'));
 });
-test('sample: both groups compile; active macros are fully resolved; extensions unchanged', async () => {
-  const preset = JSON.parse(await readFile(new URL('../sample/夏瑾 天琴座 V2 Beta 1.0.json', import.meta.url), 'utf8'));
+test('multiple order groups compile deterministically without changing extension data', () => {
+  const preset = {
+    prompts: [
+      { identifier: 'chatHistory', marker: true, role: 'user' },
+      { identifier: 'set', role: 'system', content: '{{setvar::tone::calm}}' },
+      { identifier: 'use', role: 'system', content: '{{getvar::tone}}' },
+    ],
+    prompt_order: [
+      { character_id: 100000, order: [{ identifier: 'chatHistory', enabled: true }, { identifier: 'use', enabled: true }] },
+      { character_id: 100001, order: [{ identifier: 'set', enabled: true }, { identifier: 'chatHistory', enabled: true }, { identifier: 'use', enabled: true }] },
+    ],
+    extensions: { untouched: { enabled: true } },
+  };
   const original = JSON.stringify(preset);
   for (const characterId of [100000, 100001]) {
     const result = compilePreset(preset, [msg('u', 'user', '测试消息')], { characterId });
-    assert.equal(result.messages.some(m => /\{\{/.test(m.content[0]?.text)), false);
+    assert.equal(result.messages.some(message => /\{\{/.test(message.content[0]?.text)), false);
     assert.deepEqual(result, compilePreset(preset, [msg('u', 'user', '测试消息')], { characterId }));
   }
   assert.equal(JSON.stringify(preset), original);
@@ -357,7 +368,7 @@ test('saved imports are global and the last library selection survives reopening
     assert.notEqual(first.id, second.id);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
-test('Liang-style negative order and trailing ordered assistant compile as a prefix', () => {
+test('negative order and trailing ordered assistant compile as a prefix', () => {
   const preset = {
     prompts: [
       { identifier: 'chatHistory', marker: true, role: 'user' },
@@ -385,16 +396,21 @@ test('Liang-style negative order and trailing ordered assistant compile as a pre
   assert.equal(ordinary.assistantPrefix.active, false);
 });
 
-test('DeepSeek Beta bridge rewrites only the activated official prefix request', () => {
+test('DeepSeek Beta bridge supplies reasoning fields only for the activated official prefix request', () => {
+  const prefix = '<think>\ncontinue the plan';
   const body = {
-    model: 'deepseek-chat',
+    model: 'deepseek-v4-flash',
     messages: [
       { role: 'user', content: 'hello' },
-      { role: 'assistant', content: '<think>continue' },
+      { role: 'assistant', content: 'previous answer' },
+      { role: 'user', content: 'continue' },
+      { role: 'assistant', content: prefix },
     ],
+    thinking: { type: 'enabled' },
+    tools: [{ type: 'function', function: { name: 'noop', parameters: { type: 'object' } } }],
     stream: true,
   };
-  const registry = new Map([['session-1', new Map([['<think>continue', 1]])]]);
+  const registry = new Map([['session-1', new Map([[prefix, 1], ['Answer: ', 1]])]]);
   const init = {
     method: 'POST',
     headers: { 'x-deepseek-harness-session-id': 'session-1', 'content-type': 'application/json' },
@@ -403,8 +419,34 @@ test('DeepSeek Beta bridge rewrites only the activated official prefix request',
   const rewritten = rewriteDeepSeekPrefixFetch('https://api.deepseek.com/chat/completions', init, [registry]);
   assert.equal(rewritten.changed, true);
   assert.equal(rewritten.input, 'https://api.deepseek.com/beta/chat/completions');
-  assert.equal(JSON.parse(rewritten.init.body).messages.at(-1).prefix, true);
-  assert.equal(JSON.parse(init.body).messages.at(-1).prefix, undefined);
+  const rewrittenBody = JSON.parse(rewritten.init.body);
+  const messages = rewrittenBody.messages;
+  assert.equal(rewrittenBody.tools, undefined);
+  assert.equal(messages[1].reasoning_content, '');
+  assert.deepEqual(messages.at(-1), {
+    role: 'assistant',
+    content: '',
+    reasoning_content: 'continue the plan',
+    prefix: true,
+  });
+  assert.equal(JSON.parse(init.body).messages.at(-1).reasoning_content, undefined);
+
+  const plainBody = { ...body, messages: [{ role: 'user', content: 'hello' }, { role: 'assistant', content: 'Answer: ' }] };
+  const plain = rewriteDeepSeekPrefixFetch('https://api.deepseek.com/v1/chat/completions', {
+    ...init,
+    body: JSON.stringify(plainBody),
+  }, [registry]);
+  assert.deepEqual(JSON.parse(plain.init.body).messages.at(-1), {
+    role: 'assistant', content: 'Answer: ', reasoning_content: '', prefix: true,
+  });
+
+  const disabledBody = { ...body, thinking: { type: 'disabled' } };
+  const disabled = rewriteDeepSeekPrefixFetch('https://api.deepseek.com/chat/completions', {
+    ...init,
+    body: JSON.stringify(disabledBody),
+  }, [registry]);
+  assert.equal(JSON.parse(disabled.init.body).messages.at(-1).content, prefix);
+  assert.equal(JSON.parse(disabled.init.body).messages.at(-1).reasoning_content, undefined);
 
   assert.equal(rewriteDeepSeekPrefixFetch('https://example.com/chat/completions', init, [registry]).changed, false);
   assert.equal(rewriteDeepSeekPrefixFetch('https://api.deepseek.com/chat/completions', {
