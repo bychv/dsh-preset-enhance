@@ -4,6 +4,20 @@
 
 ## 安装
 
+从 npm 安装当前发布版本：
+
+~~~powershell
+dsh plugin --profile web add dsh-preset-enhance
+~~~
+
+如需固定安装当前候选版本：
+
+~~~powershell
+dsh plugin --profile web add dsh-preset-enhance@0.3.1-rc.1
+~~~
+
+也可以直接从 GitHub 安装最新源码：
+
 ~~~powershell
 dsh plugin --profile web add github:bychv/dsh-preset-enhance
 ~~~
