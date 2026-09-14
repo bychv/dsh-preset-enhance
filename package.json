@@ -3,6 +3,7 @@
   "version": "0.3.0",
   "type": "module",
   "description": "SillyTavern prompt presets, macros and editor for DeepSeek Harness",
+  "license": "MIT",
   "repository": "github:bychv/dsh-preset-enhance",
   "homepage": "https://github.com/bychv/dsh-preset-enhance",
   "main": "./index.mjs",
