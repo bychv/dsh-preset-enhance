@@ -53,7 +53,7 @@ dsh plugin --profile web add github:bychv/dsh-preset-enhance
 
 - **DeepSeek 官方地址**：自动把官方 Chat Completion 地址切到 `https://api.deepseek.com/beta`。由于官方 Prefix 接口不接受函数调用，该次预填充请求会自动移除 `tools`、`tool_choice` 和 `parallel_tool_calls`。
 - **自定义中转**：在面板填写中转地址（例如 `https://your-relay.example.com/v1`，也可以直接填完整的 `.../chat/completions`）后，命中该地址的预填充请求只做上面的最小改写，**保留 `tools`、`tool_choice` 和 `parallel_tool_calls` 原样发送**，地址本身也不改写。填写了中转地址时，发往其它地址的请求不再处理。
-- **中转地址留空**：非官方接口按中转方式处理，同样保留工具。
+- **中转地址留空**：`deepseek-official` 提供方如果被指向非官方地址，按中转方式处理，同样保留工具；其它提供方需要显式填写中转地址，否则插件完全不介入该请求（请求原样发出，工具字段自然保留）。
 
 配置了中转地址后，只要该次请求被判定为预填充且命中中转地址，即使提供方 ID 不是 `deepseek-official` 也会执行上面的最小改写；之后的普通请求、非预填充请求和其他地址不受影响。接口要求见 [DeepSeek 对话前缀续写文档](https://api-docs.deepseek.com/zh-cn/guides/chat_prefix_completion)。
 

@@ -384,6 +384,9 @@ test('saved imports are global and the last library selection survives reopening
     const rejected = await postRaw({ revision: reopened.revision, action: 'save-deepseek-beta', enabled: true, relayUrl: 'ftp://relay.example.com' });
     assert.equal(rejected.statusCode, 400);
     assert.match(rejected.payload.error, /中转地址/);
+    const nullRelay = await postRaw({ revision: reopened.revision, action: 'save-deepseek-beta', enabled: true, relayUrl: null });
+    assert.equal(nullRelay.statusCode, 400);
+    assert.match(nullRelay.payload.error, /文本/);
     assert.equal((await new PresetStore(file).read()).prefixRelayUrl, 'https://relay.example.com/v1');
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
@@ -554,17 +557,37 @@ test('an empty relay field treats any forwarded chat-completion endpoint as the 
 });
 
 test('the relay address accepts base and full endpoints while rejecting unusable input', () => {
-  assert.equal(normalizeRelayUrl(), '');
-  assert.equal(normalizeRelayUrl(null), '');
+  assert.equal(normalizeRelayUrl(''), '');
   assert.equal(normalizeRelayUrl('   '), '');
   assert.equal(normalizeRelayUrl(' https://relay.example.com/v1/ '), 'https://relay.example.com/v1');
   assert.equal(normalizeRelayUrl('https://relay.example.com'), 'https://relay.example.com');
-  assert.equal(normalizeRelayUrl('http://127.0.0.1:8080/beta/chat/completions?x=1#y'), 'http://127.0.0.1:8080/beta/chat/completions');
+  assert.equal(normalizeRelayUrl('http://127.0.0.1:8080/beta/chat/completions'), 'http://127.0.0.1:8080/beta/chat/completions');
+  assert.throws(() => normalizeRelayUrl(), /文本/);
+  assert.throws(() => normalizeRelayUrl(null), /文本/);
+  assert.throws(() => normalizeRelayUrl(42), /文本/);
   assert.throws(() => normalizeRelayUrl('relay.example.com'), /合法的 URL/);
   assert.throws(() => normalizeRelayUrl('ftp://relay.example.com'), /中转地址必须使用/);
   assert.throws(() => normalizeRelayUrl('https://user:pass@relay.example.com'), /用户名或密码/);
   assert.throws(() => normalizeRelayUrl('https://relay example.com'), /空白字符/);
-  assert.throws(() => normalizeRelayUrl(42), /文本/);
+  assert.throws(() => normalizeRelayUrl('https://relay.example.com/v1?token=abc'), /查询参数/);
+  assert.throws(() => normalizeRelayUrl('https://relay.example.com/v1#frag'), /查询参数/);
+});
+
+test('the relay address comes from the activation that matched the outgoing text', () => {
+  const stale = 'https://old-relay.example.com/v1';
+  const current = 'https://new-relay.example.com/v1';
+  const registry = new Map([['s', new Map([
+    ['AAAA', { count: 1, relay: stale }],
+    ['PREFIX', { count: 1, relay: current }],
+  ])]]);
+  const init = content => ({ headers: { 'x-deepseek-harness-session-id': 's' },
+    body: JSON.stringify({ messages: [{ role: 'assistant', content }], tools: [{ type: 'function' }] }) });
+  const matched = rewriteDeepSeekPrefixFetch(`${current}/chat/completions`, init('PREFIX'), [registry]);
+  assert.equal(matched.changed, true);
+  assert.equal(matched.mode, 'relay');
+  // Another activation's relay must not decide where this request may go.
+  assert.equal(rewriteDeepSeekPrefixFetch(`${stale}/chat/completions`, init('PREFIX'), [registry]).changed, false);
+  assert.equal(rewriteDeepSeekPrefixFetch('https://anywhere.example.com/v1/chat/completions', init('PREFIX'), [registry]).changed, false);
 });
 
 test('the installed fetch bridge rewrites only the activated relay prefill request', async () => {
@@ -597,7 +620,7 @@ test('the installed fetch bridge rewrites only the activated relay prefill reque
   }
 });
 
-test('a configured relay activates prefix rewriting for a non-official provider request', async () => {
+test('relay configuration drives prefix rewriting end to end for the routed provider', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-preset-relay-'));
   resetFetchBridge();
   const previous = globalThis.fetch;
@@ -646,13 +669,37 @@ test('a configured relay activates prefix rewriting for a non-official provider 
       }) },
     };
     await apply(ctx, { dataFile: file, agentPresetRoot: join(dir, '.agent-presets') });
-    for await (const _ of ctx.llm.stream({ sessionId: 's', provider: 'relay-provider', model: 'relay-model',
-      messages: [msg('u', 'user', 'hi')] })) {}
-    assert.equal(posted.length, 1);
-    assert.equal(posted[0].input, 'https://relay.example.com/v1/chat/completions');
-    const body = JSON.parse(posted[0].init.body);
-    assert.deepEqual(body.messages.at(-1), { role: 'assistant', content: '', reasoning_content: '继续', prefix: true });
-    assert.deepEqual(body.tools, [{ type: 'function', function: { name: 'noop', parameters: { type: 'object' } } }]);
+    const send = async provider => {
+      const before = posted.length;
+      for await (const _ of ctx.llm.stream({ sessionId: 's', provider, model: 'relay-model',
+        messages: [msg('u', 'user', 'hi')] })) {}
+      assert.equal(posted.length, before + 1);
+      return JSON.parse(posted.at(-1).init.body);
+    };
+    const relax = async relay => {
+      await store.transaction(state => { state.prefixRelayUrl = relay; state.revision++; });
+    };
+
+    // A configured relay extends the rewrite to the provider routed through it.
+    const configured = await send('relay-provider');
+    assert.deepEqual(configured.messages.at(-1), { role: 'assistant', content: '', reasoning_content: '继续', prefix: true });
+    assert.deepEqual(configured.tools, [{ type: 'function', function: { name: 'noop', parameters: { type: 'object' } } }]);
+
+    // An empty relay keeps the official provider's non-official endpoint on the relay path.
+    await relax('');
+    const blankOfficial = await send('deepseek-official');
+    assert.deepEqual(blankOfficial.messages.at(-1), { role: 'assistant', content: '', reasoning_content: '继续', prefix: true });
+    assert.deepEqual(blankOfficial.tools, [{ type: 'function', function: { name: 'noop', parameters: { type: 'object' } } }]);
+
+    // Other providers stay untouched while the relay field is empty.
+    const untouched = await send('other-provider');
+    assert.equal(untouched.messages.at(-1).prefix, undefined);
+
+    // A hand-edited, unusable relay must not widen into a wildcard.
+    await relax('ftp://relay.example.com/v1');
+    const malformed = await send('relay-provider');
+    assert.equal(malformed.messages.at(-1).prefix, undefined);
+    assert.deepEqual(malformed.tools, [{ type: 'function', function: { name: 'noop', parameters: { type: 'object' } } }]);
   } finally {
     for (const dispose of disposers.reverse()) { try { dispose(); } catch {} }
     resetFetchBridge();

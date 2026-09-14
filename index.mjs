@@ -16,6 +16,9 @@ const PRESET_COMPILER_VERSION = 2;
 const ownGet = (object, key) => Object.hasOwn(object, key) ? object[key] : undefined;
 const assign = (object, key, value) => Object.defineProperty(object, key, { value, writable: true, enumerable: true, configurable: true });
 const isRecord = value => value && typeof value === 'object' && !Array.isArray(value);
+function normalizedRelayOrNull(value) {
+  try { return normalizeRelayUrl(value); } catch { return null; }
+}
 
 export async function apply(ctx, config = {}) {
   const home = process.env.DSH_HOME?.trim() || join(homedir(), '.dsh');
@@ -93,9 +96,11 @@ export async function apply(ctx, config = {}) {
     if (!toolsChanged && !messagesChanged) { yield* next(); return; }
 
     const request = routedRequest(options, messages, filteredTools);
-    const relay = String(initial.prefixRelayUrl ?? '').trim();
+    const relayField = String(initial.prefixRelayUrl ?? '').trim();
+    // A hand-edited, unusable relay must never fall back to the blank-field wildcard.
+    const relay = relayField ? normalizedRelayOrNull(relayField) : '';
     const betaPrefix = initial.deepseekBetaPrefix === true && compiled?.assistantPrefix?.active === true &&
-      (options.provider === DEEPSEEK_OFFICIAL_PROVIDER || relay.length > 0);
+      relay !== null && (options.provider === DEEPSEEK_OFFICIAL_PROVIDER || relay.length > 0);
     const releaseBeta = betaPrefix ? deepSeekBeta.activate(options.sessionId, messageText(messages.at(-1)), relay) : () => {};
     routed.add(request);
     try { yield* ctx.llm.stream(request); } finally { releaseBeta(); routed.delete(request); }
@@ -206,8 +211,11 @@ export async function apply(ctx, config = {}) {
             return { id: record.id };
           }
           if (body.action === 'save-deepseek-beta') {
-            if (typeof body.enabled !== 'boolean') throw new Error('DeepSeek Beta 开关值无效');
-            if (body.relayUrl !== undefined) state.prefixRelayUrl = normalizeRelayUrl(body.relayUrl);
+            if (typeof body.enabled !== 'boolean') throw new Error('预填充接口开关值无效');
+            if (body.relayUrl !== undefined) {
+              if (typeof body.relayUrl !== 'string') throw new Error('中转地址必须是文本');
+              state.prefixRelayUrl = normalizeRelayUrl(body.relayUrl);
+            }
             state.deepseekBetaPrefix = body.enabled;
             state.revision++;
             return { enabled: state.deepseekBetaPrefix, relayUrl: state.prefixRelayUrl };

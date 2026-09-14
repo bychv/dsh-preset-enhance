@@ -116,7 +116,7 @@ async function refreshPrefillWarning() {
     $('prefill-warning-text').textContent = state.deepseekBetaPrefix === true ?
       state.prefixRelayUrl ?
         `此预设的最终注入消息是 assistant，属于预填充续写。预填充自动兼容已开启：命中 ${state.prefixRelayUrl} 的请求只做最小改写并保留工具原样发送。` :
-        '此预设的最终注入消息是 assistant，属于预填充续写。预填充自动兼容已开启：官方地址会移除工具字段，非官方接口按中转方式保留工具。' :
+        '此预设的最终注入消息是 assistant，属于预填充续写。预填充自动兼容已开启：官方地址会移除工具字段，deepseek-official 指向的非官方地址按中转方式保留工具。' :
       '此预设的最终注入消息是 assistant，属于预填充续写。请使用支持 assistant prefix 的接口；可在下方开启预填充自动兼容，或填写自定义中转地址。';
   } catch {
     if (recordId === selectedId) $('prefill-warning').hidden = true;
