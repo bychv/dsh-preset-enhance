@@ -379,6 +379,11 @@ $('save-auto-modes').onclick = guard(async () => {
 });
 $('tool-scope').onchange = renderToolPanel;
 $('tool-mode').onchange = renderToolPanel;
+for (const [id, checked] of [['select-all-tools', true], ['clear-all-tools', false]]) {
+  $(id).onclick = () => {
+    for (const input of $('tool-list').querySelectorAll('input[data-tool]')) input.checked = checked;
+  };
+}
 $('save-tools').onclick = guard(async () => {
   const policy = collectToolPolicy();
   if ($('tool-scope').value === 'session') {
