@@ -84,6 +84,7 @@ function loadDraft(id) {
   renderList();
   renderEditor();
   updateDefaultButton();
+  void refreshPrefillWarning();
 }
 async function reload(id) {
   const previousToolMode = $('tool-mode').value;
@@ -95,11 +96,28 @@ async function reload(id) {
   $('user').value = binding.values?.user ?? 'User';
   $('char').value = binding.values?.char ?? 'Assistant';
   $('markers').value = JSON.stringify(binding.markers ?? {}, null, 2);
+  $('deepseek-beta-prefix').checked = state.deepseekBetaPrefix === true;
   renderAutoModes();
   renderToolModes(previousToolMode);
   loadDraft(id ?? state.selectedPresetId ?? binding.presetId ?? '');
   updateSessionNote();
   status('已加载');
+}
+
+async function refreshPrefillWarning() {
+  const recordId = selectedId;
+  try {
+    const result = await api({ action: 'preview', sessionId, preset, input: '预填充检测', options: options() });
+    if (recordId !== selectedId) return;
+    const active = result.assistantPrefix?.active === true;
+    $('prefill-warning').hidden = !active;
+    if (!active) return;
+    $('prefill-warning-text').textContent = state.deepseekBetaPrefix === true ?
+      '此预设的最终注入消息是 assistant，属于预填充续写。DeepSeek 官方 Beta 自动兼容已开启。' :
+      '此预设的最终注入消息是 assistant，属于预填充续写。请使用支持 assistant prefix 的接口；使用 DeepSeek 官方接口时请开启下方 Beta 开关。';
+  } catch {
+    if (recordId === selectedId) $('prefill-warning').hidden = true;
+  }
 }
 
 function renderAutoModes() {
@@ -293,6 +311,7 @@ $('prefill').oninput = () => {
   preset.assistant_prefill = $('prefill').value;
   markDirty();
 };
+$('deepseek-beta-prefix').onchange = () => status('DeepSeek Beta 接口开关尚未保存');
 for (const [id, delta] of [['up', -1], ['down', 1]]) $(id).onclick = () => {
   const items = order();
   const index = items.findIndex(item => item.identifier === selectedPrompt);
@@ -376,6 +395,11 @@ $('bind').onclick = guard(async () => {
   await reload(selectedId);
   status('会话设置已应用，下一次请求生效');
 });
+$('save-deepseek-beta').onclick = guard(async () => {
+  await api({ action: 'save-deepseek-beta', enabled: $('deepseek-beta-prefix').checked });
+  await reload(selectedId);
+  status(`DeepSeek 官方 Beta 前缀续写已${$('deepseek-beta-prefix').checked ? '开启' : '关闭'}`);
+});
 $('save-auto-modes').onclick = guard(async () => {
   const modes = [...$('auto-mode-list').querySelectorAll('input[data-mode]:checked')].map(input => input.dataset.mode);
   await api({ action: 'save-auto-modes', modes });
@@ -421,7 +445,8 @@ function show(result) {
     const box = document.createElement('div');
     box.className = 'message';
     const label = document.createElement('b');
-    label.textContent = `${message.role} · ${message.source?.plugin === 'dsh-preset-enhance' ? '预设注入' : '会话消息'}`;
+    const prefix = result.assistantPrefix?.active && result.assistantPrefix.messageId === message.id ? ' · Assistant Prefix' : '';
+    label.textContent = `${message.role} · ${message.source?.plugin === 'dsh-preset-enhance' ? '预设注入' : '会话消息'}${prefix}`;
     const pre = document.createElement('pre');
     pre.textContent = message.content.map(block => block.type === 'text' ? block.text : `[${block.type}]`).join('\n');
     box.append(label, pre);

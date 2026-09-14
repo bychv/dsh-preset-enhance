@@ -7,6 +7,7 @@ import { Readable } from 'node:stream';
 import { createMacroContext, renderMacros } from '../lib/macros.mjs';
 import { compilePreset } from '../lib/preset.mjs';
 import { PresetStore } from '../lib/store.mjs';
+import { rewriteDeepSeekPrefixFetch } from '../lib/deepseek-beta.mjs';
 import { AGENT_PRESET_ID, apply, buildPresetModeComposition, discoverModeToolCatalogs, ensurePresetAgentMode } from '../index.mjs';
 
 test('variables resolve in textual order, nested values preserve delimiters, comments are inert', () => {
@@ -346,11 +347,68 @@ test('saved imports are global and the last library selection survives reopening
     const first = await post({ revision: 0, action: 'save', name: 'A', preset });
     const second = await post({ revision: 1, action: 'save', name: 'B', preset });
     await post({ revision: 2, action: 'select-preset', id: first.id });
+    await post({ revision: 3, action: 'save-deepseek-beta', enabled: true });
 
     const reopened = await new PresetStore(file).read();
     assert.deepEqual(reopened.presets.map(item => item.name), ['A', 'B']);
     assert.equal(reopened.selectedPresetId, first.id);
     assert.equal(reopened.defaultPresetId, first.id);
+    assert.equal(reopened.deepseekBetaPrefix, true);
     assert.notEqual(first.id, second.id);
   } finally { await rm(dir, { recursive: true, force: true }); }
+});
+test('Liang-style negative order and trailing ordered assistant compile as a prefix', () => {
+  const preset = {
+    prompts: [
+      { identifier: 'chatHistory', marker: true, role: 'user' },
+      { identifier: 'negative', role: 'system', content: '', injection_order: -999 },
+      { identifier: 'prefix', role: 'model', content: '<think>continue here' },
+    ],
+    prompt_order: [{ character_id: 100001, order: [
+      { identifier: 'chatHistory', enabled: true },
+      { identifier: 'negative', enabled: true },
+      { identifier: 'prefix', enabled: true },
+    ] }],
+  };
+  const result = compilePreset(preset, [msg('u', 'user', 'hello')], { characterId: 100001 });
+  assert.deepEqual(result.messages.map(message => message.role), ['user', 'assistant']);
+  assert.deepEqual(result.assistantPrefix, {
+    active: true,
+    kind: 'ordered-prompt',
+    messageId: 'preset:preview:prefix',
+  });
+  assert.match(result.warnings.at(-1), /assistant prefix/);
+
+  const ordinary = compilePreset({ prompts: [] }, [
+    { ...msg('a', 'assistant', 'answer'), source: { kind: 'model', provider: 'mock', model: 'mock' } },
+  ]);
+  assert.equal(ordinary.assistantPrefix.active, false);
+});
+
+test('DeepSeek Beta bridge rewrites only the activated official prefix request', () => {
+  const body = {
+    model: 'deepseek-chat',
+    messages: [
+      { role: 'user', content: 'hello' },
+      { role: 'assistant', content: '<think>continue' },
+    ],
+    stream: true,
+  };
+  const registry = new Map([['session-1', new Map([['<think>continue', 1]])]]);
+  const init = {
+    method: 'POST',
+    headers: { 'x-deepseek-harness-session-id': 'session-1', 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  };
+  const rewritten = rewriteDeepSeekPrefixFetch('https://api.deepseek.com/chat/completions', init, [registry]);
+  assert.equal(rewritten.changed, true);
+  assert.equal(rewritten.input, 'https://api.deepseek.com/beta/chat/completions');
+  assert.equal(JSON.parse(rewritten.init.body).messages.at(-1).prefix, true);
+  assert.equal(JSON.parse(init.body).messages.at(-1).prefix, undefined);
+
+  assert.equal(rewriteDeepSeekPrefixFetch('https://example.com/chat/completions', init, [registry]).changed, false);
+  assert.equal(rewriteDeepSeekPrefixFetch('https://api.deepseek.com/chat/completions', {
+    ...init,
+    headers: { ...init.headers, 'x-deepseek-harness-session-id': 'another-session' },
+  }, [registry]).changed, false);
 });

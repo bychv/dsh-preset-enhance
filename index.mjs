@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 import { PresetStore } from './lib/store.mjs';
 import { compilePreset, validatePreset, getOrder } from './lib/preset.mjs';
+import { DEEPSEEK_OFFICIAL_PROVIDER, installDeepSeekBetaBridge } from './lib/deepseek-beta.mjs';
 
 export const name = 'preset-enhance';
 export const inject = ['llm', 'sessions', 'webServer', 'commands', 'tools', 'agentPresets', 'agents'];
@@ -11,6 +12,7 @@ export const AGENT_PRESET_ID = 'st-preset';
 const BASE = '/preset-enhance';
 const DSH_SYSTEM_PROMPT = '@deepseek-ai/dsh-system-prompt';
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const PRESET_COMPILER_VERSION = 2;
 const ownGet = (object, key) => Object.hasOwn(object, key) ? object[key] : undefined;
 const assign = (object, key, value) => Object.defineProperty(object, key, { value, writable: true, enumerable: true, configurable: true });
 const isRecord = value => value && typeof value === 'object' && !Array.isArray(value);
@@ -19,6 +21,7 @@ export async function apply(ctx, config = {}) {
   const home = process.env.DSH_HOME?.trim() || join(homedir(), '.dsh');
   const store = new PresetStore(resolve(config.dataFile ?? join(home, 'preset-enhance', 'state.json')));
   const routed = new WeakSet();
+  const deepSeekBeta = installDeepSeekBetaBridge(ctx);
   const standard = config.standardComposition ??
     (ctx.agentPresets ? (await ctx.agentPresets.readDocument('standard')).content : undefined);
   await ensurePresetAgentMode(resolve(config.agentPresetRoot ?? join(home, '.agent-presets')), standard);
@@ -67,7 +70,7 @@ export async function apply(ctx, config = {}) {
         if (!binding?.enabled) return null;
         const record = current.presets.find(p => p.id === binding.presetId);
         if (!record) throw new Error('当前会话启用的预设不存在');
-        const key = digest({ messages: history, preset: record, binding });
+        const key = digest({ compiler: PRESET_COMPILER_VERSION, messages: history, preset: record, binding });
         const prior = ownGet(current.sessions, options.sessionId);
         if (prior?.key === key) return prior.result;
         const result = compilePreset(record.preset, history, {
@@ -90,8 +93,11 @@ export async function apply(ctx, config = {}) {
     if (!toolsChanged && !messagesChanged) { yield* next(); return; }
 
     const request = routedRequest(options, messages, filteredTools);
+    const betaPrefix = initial.deepseekBetaPrefix === true && options.provider === DEEPSEEK_OFFICIAL_PROVIDER &&
+      compiled?.assistantPrefix?.active === true;
+    const releaseBeta = betaPrefix ? deepSeekBeta.activate(options.sessionId, messageText(messages.at(-1))) : () => {};
     routed.add(request);
-    try { yield* ctx.llm.stream(request); } finally { routed.delete(request); }
+    try { yield* ctx.llm.stream(request); } finally { releaseBeta(); routed.delete(request); }
   });
 
   const assets = new Map([
@@ -135,6 +141,7 @@ export async function apply(ctx, config = {}) {
             presets: state.presets,
             binding: ownGet(state.bindings, sessionId) ?? fallback ?? { enabled: false },
             selectedPresetId: state.selectedPresetId ?? modeDefault?.id ?? null,
+            deepseekBetaPrefix: state.deepseekBetaPrefix === true,
             modeDefaultPresetId: modeDefault?.id ?? null,
             modeDefaultName: modeDefault?.name ?? null,
             presetMode: liveMode === AGENT_PRESET_ID,
@@ -196,6 +203,12 @@ export async function apply(ctx, config = {}) {
             state.revision++;
             return { id: record.id };
           }
+          if (body.action === 'save-deepseek-beta') {
+            if (typeof body.enabled !== 'boolean') throw new Error('DeepSeek Beta 开关值无效');
+            state.deepseekBetaPrefix = body.enabled;
+            state.revision++;
+            return { enabled: state.deepseekBetaPrefix };
+          }
           if (body.action === 'save-auto-modes') {
             if (!Array.isArray(body.modes) || body.modes.some(id => typeof id !== 'string' || !knownModes.has(id))) {
               throw new Error('自动启用模式列表包含未知模式');
@@ -243,6 +256,10 @@ export async function apply(ctx, config = {}) {
       }
     },
   }), 'preset-enhance: API');
+}
+
+function messageText(message) {
+  return message?.content?.filter(block => block.type === 'text').map(block => block.text).join('') ?? '';
 }
 
 function validateBinding(state, body) {

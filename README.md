@@ -33,6 +33,10 @@ dsh plugin --profile web add github:bychv/dsh-preset-enhance
 
 支持顺序表中 `chatHistory` 前后的 system、user、assistant/model 消息，以及按聊天深度注入。支持常用 SillyTavern 变量宏，包括 `setvar`、`getvar`、global 变量、数值修改、随机选择与骰子。`extensions` 会原样保留在预设 JSON 中，当前版本不执行其中的扩展行为。
 
+当编译后的最后一条预设消息是 assistant 时（包括顶层 `assistant_prefill`，以及梁元类预设在 `chatHistory` 后安排的 assistant/model 条目），工作台会显示预填充续写提醒，消息预览也会标出 `Assistant Prefix`。这类预设必须使用支持 assistant prefix 的接口。
+
+使用 DSH 的 `deepseek-official` 提供方时，可以在“Assistant 预填充接口”面板开启“DeepSeek 官方 Beta 前缀续写”。开启后，插件只对当前请求中匹配到的末条预填充自动执行两项转换：将官方 Chat Completion 地址切到 `https://api.deepseek.com/beta`，并为最后一条 assistant 消息发送 `prefix: true`。普通对话、非预填充请求和其他提供方不受影响。接口要求见 [DeepSeek 对话前缀续写文档](https://api-docs.deepseek.com/zh-cn/guides/chat_prefix_completion)。
+
 ## 工具预设
 
 工具面板支持两层配置：
