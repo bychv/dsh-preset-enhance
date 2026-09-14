@@ -62,7 +62,7 @@ try {
     purpose: 'session-title', messages: [createUserMessage({ content: [{ type: 'text', text: 'title' }], source: { kind: 'user' } })] })) {}
   assert.equal(calls.at(-1).messages.length, 1, 'background title requests bypass injection');
   assert.equal((await store.read()).sessions['preset-runtime'].result.local.count, '2');
-  console.log('PASS real DSH preset mode: only preset + chat history, no DSH prompt/tools, stable two-turn routing');
+  console.log('PASS real DSH preset mode: preset + chat history only, DSH prompts removed, stable two-turn routing');
 } finally {
   await ctx.fiber.dispose();
   await rm(dir, { recursive: true, force: true });

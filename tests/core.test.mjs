@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { createMacroContext, renderMacros } from '../lib/macros.mjs';
 import { compilePreset } from '../lib/preset.mjs';
 import { PresetStore } from '../lib/store.mjs';
-import { AGENT_PRESET_ID, apply, ensurePresetAgentMode } from '../index.mjs';
+import { AGENT_PRESET_ID, apply, buildPresetModeComposition, discoverModeToolCatalogs, ensurePresetAgentMode } from '../index.mjs';
 
 test('variables resolve in textual order, nested values preserve delimiters, comments are inert', () => {
   const ctx = createMacroContext({ values: { user: 'A::B' } });
@@ -125,7 +125,7 @@ test('new conversations in preset mode inherit and then pin the mode default pre
     for await (const _ of ctx.llm.stream(request('normal'))) {}
     assert.equal(calls[0].messages[0].content[0].text, 'MODE');
     assert.deepEqual(calls[0].messages.map(x => x.content[0].text), ['MODE', 'hello']);
-    assert.equal(Object.hasOwn(calls[0], 'tools'), false);
+    assert.deepEqual(calls[0].tools.map(tool => tool.name), ['shell']);
     assert.equal(calls[1].messages.length, 3); assert.equal(calls[1].tools[0].name, 'shell');
     assert.deepEqual((await store.read()).bindings.auto, { enabled: true, presetId: 'default', characterId: null, values: {}, markers: {} });
   } finally { await rm(dir, { recursive: true, force: true }); }
@@ -149,4 +149,157 @@ test('client registers the conversation view, main panel and sidebar button thro
       ['conversation.view', 'preset-enhance-editor'], ['main', 'preset-enhance-editor'], ['sidebar.panellist', 'preset-enhance-editor'],
     ]);
   } finally { delete globalThis.window; }
+});
+
+test('preset mode composition inherits standard tools while replacing its persona', () => {
+  const standard = [
+    '- id: persona',
+    "  name: '@deepseek-ai/dsh-persona'",
+    '  config:',
+    '    prefix: coding',
+    '    includeRuntimeContext: true',
+    '- id: filesystem',
+    "  name: '@deepseek-ai/dsh-tool-fs'",
+    '  config:',
+    '    root: .',
+    '',
+  ].join('\n');
+  const generated = buildPresetModeComposition(standard);
+  assert.match(generated, /prefix: ''/);
+  assert.match(generated, /complete: true/);
+  assert.match(generated, /includeRuntimeContext: false/);
+  assert.match(generated, /name: '@deepseek-ai\/dsh-tool-fs'/);
+  assert.doesNotMatch(generated, /prefix: coding/);
+  assert.match(generated, /name: dsh-preset-enhance\/mode/);
+});
+
+test('tool policies apply to every mode and session overrides take effect on the next request', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-preset-tools-'));
+  try {
+    const file = join(dir, 'state.json'), store = new PresetStore(file), listeners = {}, calls = [];
+    let guard;
+    const session = { id: 's', header: { agentPreset: 'standard' }, snapshotEvents: () => [] };
+    await store.transaction(state => {
+      state.modeToolPolicies.standard = { shell: false, read: true };
+    });
+    const ctx = {
+      sessions: { get: id => id === 's' ? session : undefined },
+      on: (name, fn) => listeners[name] = fn,
+      effect: fn => fn(),
+      webServer: { register: () => () => {} },
+      tools: { guard: fn => { guard = fn; return () => {}; } },
+      llm: { stream: options => listeners['llm/stream'](options, async function* () {
+        calls.push(options);
+        yield { type: 'finish', reason: { kind: 'completed' } };
+      }) },
+    };
+    await apply(ctx, { dataFile: file, agentPresetRoot: join(dir, '.agent-presets') });
+    const request = () => ({ sessionId: 's', provider: 'mock', model: 'mock',
+      messages: [msg('u', 'user', 'hello')],
+      tools: [{ name: 'shell', description: 'shell' }, { name: 'read', description: 'read' }] });
+    for await (const _ of ctx.llm.stream(request())) {}
+    assert.deepEqual(calls[0].tools.map(tool => tool.name), ['read']);
+    assert.match(guard({ name: 'shell', agent: { session } }), /已在预设工作台中关闭/);
+    assert.equal(guard({ name: 'read', agent: { session } }), undefined);
+
+    await store.transaction(state => {
+      state.sessionToolPolicies.s = { shell: true, read: false };
+      state.revision++;
+    });
+    for await (const _ of ctx.llm.stream(request())) {}
+    assert.deepEqual(calls[1].tools.map(tool => tool.name), ['shell']);
+    assert.equal(guard({ name: 'shell', agent: { session } }), undefined);
+    assert.match(guard({ name: 'read', agent: { session } }), /已在预设工作台中关闭/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('/preset toggles injection for the current session without sending a model message', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-preset-command-'));
+  try {
+    const file = join(dir, 'state.json'), store = new PresetStore(file), listeners = {};
+    let command;
+    const session = { id: 's', header: { agentPreset: 'standard' }, snapshotEvents: () => [] };
+    await store.transaction(state => {
+      state.presets.push({ id: 'p', name: 'Command preset', preset: { prompts: [] } });
+      state.defaultPresetId = 'p';
+    });
+    const ctx = {
+      sessions: { get: id => id === 's' ? session : undefined },
+      on: (name, fn) => listeners[name] = fn,
+      effect: fn => fn(),
+      webServer: { register: () => () => {} },
+      commands: { register: definition => { command = definition; return () => {}; } },
+      llm: { stream: options => listeners['llm/stream'](options, async function* () {}) },
+    };
+    await apply(ctx, { dataFile: file, agentPresetRoot: join(dir, '.agent-presets') });
+    assert.equal(command.name, 'preset');
+    assert.match((await command.handler({ rawInput: 'on', agent: { session } })).text, /已开启/);
+    assert.equal((await store.read()).bindings.s.enabled, true);
+    assert.match((await command.handler({ rawInput: 'status', agent: { session } })).text, /已开启/);
+    assert.match((await command.handler({ rawInput: '', agent: { session } })).text, /已关闭/);
+    assert.equal((await store.read()).bindings.s.enabled, false);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('auto-enabled modes only affect conversations created after the mode was selected', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-preset-mode-time-'));
+  try {
+    const file = join(dir, 'state.json'), store = new PresetStore(file), listeners = {}, calls = [];
+    await store.transaction(state => {
+      state.presets.push({ id: 'p', name: 'Auto', preset: { prompts: [{ identifier: 'p', role: 'system', content: 'AUTO' }] } });
+      state.defaultPresetId = 'p';
+      state.autoEnableModes.push('standard');
+      state.autoEnableSince.standard = 100;
+    });
+    const sessions = {
+      old: { id: 'old', header: { agentPreset: 'standard', createdAt: 99 }, snapshotEvents: () => [] },
+      fresh: { id: 'fresh', header: { agentPreset: 'standard', createdAt: 100 }, snapshotEvents: () => [] },
+    };
+    const ctx = {
+      sessions: { get: id => sessions[id] },
+      on: (name, fn) => listeners[name] = fn,
+      effect: fn => fn(),
+      webServer: { register: () => () => {} },
+      llm: { stream: options => listeners['llm/stream'](options, async function* () {
+        calls.push(options);
+        yield { type: 'finish', reason: { kind: 'completed' } };
+      }) },
+    };
+    await apply(ctx, { dataFile: file, agentPresetRoot: join(dir, '.agent-presets') });
+    for (const sessionId of ['old', 'fresh']) {
+      for await (const _ of ctx.llm.stream({ sessionId, provider: 'mock', model: 'mock',
+        messages: [msg('u', 'user', 'hello')] })) {}
+    }
+    assert.deepEqual(calls[0].messages.map(item => item.content[0].text), ['hello']);
+    assert.deepEqual(calls[1].messages.map(item => item.content[0].text), ['AUTO', 'hello']);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+test('tool catalogs are resolved independently for every built-in and plugin-provided mode', async () => {
+  const mounted = [];
+  const ctx = {
+    agentPresets: {
+      standingKeyFor: async id => {
+        mounted.push(id);
+        if (id === 'mount-fails') throw new Error('plugin dependency unavailable');
+        return 'scope:' + id;
+      },
+    },
+    tools: {
+      schemas: scope => scope === 'scope:standard'
+        ? [{ name: 'shell', description: 'Shell' }, { name: 'read', description: 'Read' }]
+        : [{ name: 'plugin.custom', description: 'Third-party tool' }],
+    },
+  };
+  const modes = [
+    { id: 'standard', name: 'Standard' },
+    { id: 'third-party-mode', name: 'Plugin mode' },
+    { id: 'declared-broken', name: 'Broken', broken: 'invalid composition' },
+    { id: 'mount-fails', name: 'Mount fails' },
+  ];
+  const result = await discoverModeToolCatalogs(ctx, modes);
+  assert.deepEqual(mounted, ['standard', 'third-party-mode', 'mount-fails']);
+  assert.deepEqual(result.catalogs.standard.map(tool => tool.name), ['read', 'shell']);
+  assert.deepEqual(result.catalogs['third-party-mode'].map(tool => tool.name), ['plugin.custom']);
+  assert.equal(result.errors['declared-broken'], 'invalid composition');
+  assert.equal(result.errors['mount-fails'], 'plugin dependency unavailable');
 });
