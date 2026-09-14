@@ -7,8 +7,17 @@ import { Readable } from 'node:stream';
 import { createMacroContext, renderMacros } from '../lib/macros.mjs';
 import { compilePreset } from '../lib/preset.mjs';
 import { PresetStore } from '../lib/store.mjs';
-import { rewriteDeepSeekPrefixFetch } from '../lib/deepseek-beta.mjs';
+import { installDeepSeekBetaBridge, normalizeRelayUrl, rewriteDeepSeekPrefixFetch } from '../lib/deepseek-beta.mjs';
 import { AGENT_PRESET_ID, apply, buildPresetModeComposition, discoverModeToolCatalogs, ensurePresetAgentMode } from '../index.mjs';
+
+const FETCH_BRIDGE = Symbol.for('dsh-preset-enhance.deepseek-beta-fetch-bridge');
+/** Earlier tests may leave the shared fetch wrapper installed; restore the real fetch. */
+function resetFetchBridge() {
+  const host = globalThis[FETCH_BRIDGE];
+  if (!host) return;
+  globalThis.fetch = host.original;
+  delete globalThis[FETCH_BRIDGE];
+}
 
 test('variables resolve in textual order, nested values preserve delimiters, comments are inert', () => {
   const ctx = createMacroContext({ values: { user: 'A::B' } });
@@ -337,7 +346,7 @@ test('saved imports are global and the last library selection survives reopening
       llm: { stream: options => listeners['llm/stream'](options, async function* () {}) },
     };
     await apply(ctx, { dataFile: file, agentPresetRoot: join(dir, '.agent-presets') });
-    const post = async body => {
+    const postRaw = async body => {
       const req = Readable.from([JSON.stringify(body)]);
       req.method = 'POST';
       req.url = '/preset-enhance/api';
@@ -348,6 +357,10 @@ test('saved imports are global and the last library selection survives reopening
         end(value) { payload = JSON.parse(String(value)); },
       };
       await apiHandler(req, res);
+      return { statusCode, payload };
+    };
+    const post = async body => {
+      const { statusCode, payload } = await postRaw(body);
       assert.equal(statusCode, 200, payload?.error);
       return payload;
     };
@@ -358,14 +371,20 @@ test('saved imports are global and the last library selection survives reopening
     const first = await post({ revision: 0, action: 'save', name: 'A', preset });
     const second = await post({ revision: 1, action: 'save', name: 'B', preset });
     await post({ revision: 2, action: 'select-preset', id: first.id });
-    await post({ revision: 3, action: 'save-deepseek-beta', enabled: true });
+    await post({ revision: 3, action: 'save-deepseek-beta', enabled: true, relayUrl: ' https://relay.example.com/v1/ ' });
 
     const reopened = await new PresetStore(file).read();
     assert.deepEqual(reopened.presets.map(item => item.name), ['A', 'B']);
     assert.equal(reopened.selectedPresetId, first.id);
     assert.equal(reopened.defaultPresetId, first.id);
     assert.equal(reopened.deepseekBetaPrefix, true);
+    assert.equal(reopened.prefixRelayUrl, 'https://relay.example.com/v1');
     assert.notEqual(first.id, second.id);
+
+    const rejected = await postRaw({ revision: reopened.revision, action: 'save-deepseek-beta', enabled: true, relayUrl: 'ftp://relay.example.com' });
+    assert.equal(rejected.statusCode, 400);
+    assert.match(rejected.payload.error, /中转地址/);
+    assert.equal((await new PresetStore(file).read()).prefixRelayUrl, 'https://relay.example.com/v1');
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 test('negative order and trailing ordered assistant compile as a prefix', () => {
@@ -448,9 +467,196 @@ test('DeepSeek Beta bridge supplies reasoning fields only for the activated offi
   assert.equal(JSON.parse(disabled.init.body).messages.at(-1).content, prefix);
   assert.equal(JSON.parse(disabled.init.body).messages.at(-1).reasoning_content, undefined);
 
-  assert.equal(rewriteDeepSeekPrefixFetch('https://example.com/chat/completions', init, [registry]).changed, false);
+  // Without an activation nothing is rewritten, and non chat-completion URLs are never touched.
+  assert.equal(rewriteDeepSeekPrefixFetch('https://relay.example.com/v1/chat/completions', init, []).changed, false);
+  assert.equal(rewriteDeepSeekPrefixFetch('https://relay.example.com/v1/files', init, [registry]).changed, false);
   assert.equal(rewriteDeepSeekPrefixFetch('https://api.deepseek.com/chat/completions', {
     ...init,
     headers: { ...init.headers, 'x-deepseek-harness-session-id': 'another-session' },
   }, [registry]).changed, false);
+});
+
+test('a configured relay keeps tools while the official endpoint still drops them', () => {
+  const prefix = '<think>\ncontinue the plan';
+  const body = {
+    model: 'deepseek-v4-flash',
+    messages: [
+      { role: 'user', content: 'hello' },
+      { role: 'assistant', content: 'previous answer' },
+      { role: 'assistant', content: prefix },
+    ],
+    thinking: { type: 'enabled' },
+    tools: [{ type: 'function', function: { name: 'noop', parameters: { type: 'object' } } }],
+    tool_choice: 'auto',
+    parallel_tool_calls: false,
+    stream: true,
+  };
+  const relay = 'https://relay.example.com/v1';
+  const init = {
+    method: 'POST',
+    headers: { 'x-deepseek-harness-session-id': 'session-1', 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  };
+  const registry = new Map([['session-1', new Map([[prefix, { count: 1, relay }]])]]);
+
+  const relayed = rewriteDeepSeekPrefixFetch(`${relay}/chat/completions`, init, [registry]);
+  assert.equal(relayed.changed, true);
+  assert.equal(relayed.mode, 'relay');
+  assert.equal(relayed.input, `${relay}/chat/completions`);
+  const relayedBody = JSON.parse(relayed.init.body);
+  assert.deepEqual(relayedBody.tools, body.tools);
+  assert.equal(relayedBody.tool_choice, 'auto');
+  assert.equal(relayedBody.parallel_tool_calls, false);
+  assert.deepEqual(relayedBody.messages.at(-1), {
+    role: 'assistant', content: '', reasoning_content: 'continue the plan', prefix: true,
+  });
+  assert.equal(relayedBody.messages[1].reasoning_content, '');
+  assert.equal(JSON.parse(init.body).messages.at(-1).reasoning_content, undefined);
+
+  const disabled = rewriteDeepSeekPrefixFetch(`${relay}/chat/completions`, {
+    ...init,
+    body: JSON.stringify({ ...body, thinking: { type: 'disabled' } }),
+  }, [registry]);
+  assert.equal(JSON.parse(disabled.init.body).messages.at(-1).content, prefix);
+  assert.equal(JSON.parse(disabled.init.body).messages.at(-1).reasoning_content, undefined);
+
+  // The official endpoint keeps the tool surgery no matter what relay is configured.
+  const official = rewriteDeepSeekPrefixFetch('https://api.deepseek.com/chat/completions', init, [registry]);
+  assert.equal(official.mode, 'official');
+  assert.equal(official.input, 'https://api.deepseek.com/beta/chat/completions');
+  assert.equal(JSON.parse(official.init.body).tools, undefined);
+
+  // A configured relay never touches a different endpoint.
+  const elsewhere = rewriteDeepSeekPrefixFetch('https://other.example.com/v1/chat/completions', init, [registry]);
+  assert.equal(elsewhere.changed, false);
+  assert.equal(elsewhere.input, 'https://other.example.com/v1/chat/completions');
+  assert.equal(elsewhere.init, init);
+});
+
+test('an empty relay field treats any forwarded chat-completion endpoint as the relay', () => {
+  const prefix = 'Answer: ';
+  const body = {
+    messages: [{ role: 'user', content: 'hi' }, { role: 'assistant', content: prefix }],
+    tools: [{ type: 'function', function: { name: 'noop' } }],
+  };
+  const init = { method: 'POST', headers: { 'x-deepseek-harness-session-id': 's' }, body: JSON.stringify(body) };
+  const activated = new Map([['s', new Map([[prefix, 1]])]]);
+
+  const rewritten = rewriteDeepSeekPrefixFetch('https://relay.example.com/v1/chat/completions', init, [activated]);
+  assert.equal(rewritten.changed, true);
+  assert.equal(rewritten.mode, 'relay');
+  assert.equal(rewritten.input, 'https://relay.example.com/v1/chat/completions');
+  const rewrittenBody = JSON.parse(rewritten.init.body);
+  assert.deepEqual(rewrittenBody.tools, body.tools);
+  assert.deepEqual(rewrittenBody.messages.at(-1), { role: 'assistant', content: 'Answer: ', reasoning_content: '', prefix: true });
+
+  assert.equal(rewriteDeepSeekPrefixFetch('https://relay.example.com/v1/chat/completions', init, []).changed, false);
+});
+
+test('the relay address accepts base and full endpoints while rejecting unusable input', () => {
+  assert.equal(normalizeRelayUrl(), '');
+  assert.equal(normalizeRelayUrl(null), '');
+  assert.equal(normalizeRelayUrl('   '), '');
+  assert.equal(normalizeRelayUrl(' https://relay.example.com/v1/ '), 'https://relay.example.com/v1');
+  assert.equal(normalizeRelayUrl('https://relay.example.com'), 'https://relay.example.com');
+  assert.equal(normalizeRelayUrl('http://127.0.0.1:8080/beta/chat/completions?x=1#y'), 'http://127.0.0.1:8080/beta/chat/completions');
+  assert.throws(() => normalizeRelayUrl('relay.example.com'), /合法的 URL/);
+  assert.throws(() => normalizeRelayUrl('ftp://relay.example.com'), /中转地址必须使用/);
+  assert.throws(() => normalizeRelayUrl('https://user:pass@relay.example.com'), /用户名或密码/);
+  assert.throws(() => normalizeRelayUrl('https://relay example.com'), /空白字符/);
+  assert.throws(() => normalizeRelayUrl(42), /文本/);
+});
+
+test('the installed fetch bridge rewrites only the activated relay prefill request', async () => {
+  resetFetchBridge();
+  const previous = globalThis.fetch;
+  const calls = [];
+  const stub = async (input, init) => { calls.push({ input: String(input), init }); return { ok: true, status: 200 }; };
+  globalThis.fetch = stub;
+  try {
+    const controller = installDeepSeekBetaBridge({ effect: fn => { fn(); } });
+    const init = { method: 'POST', headers: { 'x-deepseek-harness-session-id': 's' },
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }, { role: 'assistant', content: '<think>\ncontinue' }],
+        tools: [{ type: 'function', function: { name: 'noop' } }] }) };
+    const release = controller.activate('s', '<think>\ncontinue', 'https://relay.example.com/v1/');
+    await globalThis.fetch('https://relay.example.com/v1/chat/completions', init);
+    assert.equal(calls.length, 1);
+    const body = JSON.parse(calls[0].init.body);
+    assert.equal(body.messages.at(-1).prefix, true);
+    assert.deepEqual(body.tools, [{ type: 'function', function: { name: 'noop' } }]);
+
+    release();
+    await globalThis.fetch('https://relay.example.com/v1/chat/completions', init);
+    assert.equal(calls[1].init, init);
+
+    controller.dispose();
+    assert.equal(globalThis.fetch, stub);
+  } finally {
+    resetFetchBridge();
+    globalThis.fetch = previous;
+  }
+});
+
+test('a configured relay activates prefix rewriting for a non-official provider request', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-preset-relay-'));
+  resetFetchBridge();
+  const previous = globalThis.fetch;
+  const posted = [], disposers = [], listeners = {};
+  try {
+    globalThis.fetch = async (input, init) => { posted.push({ input: String(input), init }); return { ok: true, status: 200 }; };
+    const file = join(dir, 'state.json'), store = new PresetStore(file);
+    await store.transaction(state => {
+      state.presets.push({ id: 'p', name: 'Prefix', preset: {
+        prompts: [
+          { identifier: 'chatHistory', marker: true, role: 'user' },
+          { identifier: 'prefix', role: 'assistant', content: '<think>\n继续' },
+        ],
+        prompt_order: [{ character_id: 100001, order: [
+          { identifier: 'chatHistory', enabled: true },
+          { identifier: 'prefix', enabled: true },
+        ] }],
+      } });
+      state.selectedPresetId = 'p';
+      state.defaultPresetId = 'p';
+      state.bindings.s = { enabled: true, presetId: 'p', characterId: null, values: {}, markers: {} };
+      state.deepseekBetaPrefix = true;
+      state.prefixRelayUrl = 'https://relay.example.com/v1';
+    });
+    const session = { id: 's', header: { agentPreset: 'standard' }, snapshotEvents: () => [] };
+    const ctx = {
+      sessions: { get: id => id === 's' ? session : undefined },
+      on: (name, fn) => listeners[name] = fn,
+      effect: fn => { const disposer = fn(); if (typeof disposer === 'function') disposers.push(disposer); return disposer; },
+      webServer: { register: () => () => {} },
+      llm: { stream: options => listeners['llm/stream'](options, async function* () {
+        await globalThis.fetch('https://relay.example.com/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'x-deepseek-harness-session-id': options.sessionId, 'content-type': 'application/json' },
+          body: JSON.stringify({
+            model: 'relay-model',
+            messages: options.messages.map(message => ({
+              role: message.role,
+              content: message.content.map(block => block.type === 'text' ? block.text : '').join(''),
+            })),
+            thinking: { type: 'enabled' },
+            tools: [{ type: 'function', function: { name: 'noop', parameters: { type: 'object' } } }],
+          }),
+        });
+        yield { type: 'finish', reason: { kind: 'completed' } };
+      }) },
+    };
+    await apply(ctx, { dataFile: file, agentPresetRoot: join(dir, '.agent-presets') });
+    for await (const _ of ctx.llm.stream({ sessionId: 's', provider: 'relay-provider', model: 'relay-model',
+      messages: [msg('u', 'user', 'hi')] })) {}
+    assert.equal(posted.length, 1);
+    assert.equal(posted[0].input, 'https://relay.example.com/v1/chat/completions');
+    const body = JSON.parse(posted[0].init.body);
+    assert.deepEqual(body.messages.at(-1), { role: 'assistant', content: '', reasoning_content: '继续', prefix: true });
+    assert.deepEqual(body.tools, [{ type: 'function', function: { name: 'noop', parameters: { type: 'object' } } }]);
+  } finally {
+    for (const dispose of disposers.reverse()) { try { dispose(); } catch {} }
+    resetFetchBridge();
+    globalThis.fetch = previous;
+    await rm(dir, { recursive: true, force: true });
+  }
 });

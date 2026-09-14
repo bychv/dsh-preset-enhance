@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 import { PresetStore } from './lib/store.mjs';
 import { compilePreset, validatePreset, getOrder } from './lib/preset.mjs';
-import { DEEPSEEK_OFFICIAL_PROVIDER, installDeepSeekBetaBridge } from './lib/deepseek-beta.mjs';
+import { DEEPSEEK_OFFICIAL_PROVIDER, installDeepSeekBetaBridge, normalizeRelayUrl } from './lib/deepseek-beta.mjs';
 
 export const name = 'preset-enhance';
 export const inject = ['llm', 'sessions', 'webServer', 'commands', 'tools', 'agentPresets', 'agents'];
@@ -93,9 +93,10 @@ export async function apply(ctx, config = {}) {
     if (!toolsChanged && !messagesChanged) { yield* next(); return; }
 
     const request = routedRequest(options, messages, filteredTools);
-    const betaPrefix = initial.deepseekBetaPrefix === true && options.provider === DEEPSEEK_OFFICIAL_PROVIDER &&
-      compiled?.assistantPrefix?.active === true;
-    const releaseBeta = betaPrefix ? deepSeekBeta.activate(options.sessionId, messageText(messages.at(-1))) : () => {};
+    const relay = String(initial.prefixRelayUrl ?? '').trim();
+    const betaPrefix = initial.deepseekBetaPrefix === true && compiled?.assistantPrefix?.active === true &&
+      (options.provider === DEEPSEEK_OFFICIAL_PROVIDER || relay.length > 0);
+    const releaseBeta = betaPrefix ? deepSeekBeta.activate(options.sessionId, messageText(messages.at(-1)), relay) : () => {};
     routed.add(request);
     try { yield* ctx.llm.stream(request); } finally { releaseBeta(); routed.delete(request); }
   });
@@ -142,6 +143,7 @@ export async function apply(ctx, config = {}) {
             binding: ownGet(state.bindings, sessionId) ?? fallback ?? { enabled: false },
             selectedPresetId: state.selectedPresetId ?? modeDefault?.id ?? null,
             deepseekBetaPrefix: state.deepseekBetaPrefix === true,
+            prefixRelayUrl: state.prefixRelayUrl ?? '',
             modeDefaultPresetId: modeDefault?.id ?? null,
             modeDefaultName: modeDefault?.name ?? null,
             presetMode: liveMode === AGENT_PRESET_ID,
@@ -205,9 +207,10 @@ export async function apply(ctx, config = {}) {
           }
           if (body.action === 'save-deepseek-beta') {
             if (typeof body.enabled !== 'boolean') throw new Error('DeepSeek Beta 开关值无效');
+            if (body.relayUrl !== undefined) state.prefixRelayUrl = normalizeRelayUrl(body.relayUrl);
             state.deepseekBetaPrefix = body.enabled;
             state.revision++;
-            return { enabled: state.deepseekBetaPrefix };
+            return { enabled: state.deepseekBetaPrefix, relayUrl: state.prefixRelayUrl };
           }
           if (body.action === 'save-auto-modes') {
             if (!Array.isArray(body.modes) || body.modes.some(id => typeof id !== 'string' || !knownModes.has(id))) {

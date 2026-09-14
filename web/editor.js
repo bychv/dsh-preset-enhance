@@ -97,6 +97,7 @@ async function reload(id) {
   $('char').value = binding.values?.char ?? 'Assistant';
   $('markers').value = JSON.stringify(binding.markers ?? {}, null, 2);
   $('deepseek-beta-prefix').checked = state.deepseekBetaPrefix === true;
+  $('prefix-relay-url').value = state.prefixRelayUrl ?? '';
   renderAutoModes();
   renderToolModes(previousToolMode);
   loadDraft(id ?? state.selectedPresetId ?? binding.presetId ?? '');
@@ -113,8 +114,10 @@ async function refreshPrefillWarning() {
     $('prefill-warning').hidden = !active;
     if (!active) return;
     $('prefill-warning-text').textContent = state.deepseekBetaPrefix === true ?
-      '此预设的最终注入消息是 assistant，属于预填充续写。DeepSeek 官方 Beta 自动兼容已开启。' :
-      '此预设的最终注入消息是 assistant，属于预填充续写。请使用支持 assistant prefix 的接口；使用 DeepSeek 官方接口时请开启下方 Beta 开关。';
+      state.prefixRelayUrl ?
+        `此预设的最终注入消息是 assistant，属于预填充续写。预填充自动兼容已开启：命中 ${state.prefixRelayUrl} 的请求只做最小改写并保留工具原样发送。` :
+        '此预设的最终注入消息是 assistant，属于预填充续写。预填充自动兼容已开启：官方地址会移除工具字段，非官方接口按中转方式保留工具。' :
+      '此预设的最终注入消息是 assistant，属于预填充续写。请使用支持 assistant prefix 的接口；可在下方开启预填充自动兼容，或填写自定义中转地址。';
   } catch {
     if (recordId === selectedId) $('prefill-warning').hidden = true;
   }
@@ -311,7 +314,8 @@ $('prefill').oninput = () => {
   preset.assistant_prefill = $('prefill').value;
   markDirty();
 };
-$('deepseek-beta-prefix').onchange = () => status('DeepSeek Beta 接口开关尚未保存');
+$('deepseek-beta-prefix').onchange = () => status('预填充接口设置尚未保存');
+$('prefix-relay-url').oninput = () => status('预填充接口设置尚未保存');
 for (const [id, delta] of [['up', -1], ['down', 1]]) $(id).onclick = () => {
   const items = order();
   const index = items.findIndex(item => item.identifier === selectedPrompt);
@@ -396,9 +400,14 @@ $('bind').onclick = guard(async () => {
   status('会话设置已应用，下一次请求生效');
 });
 $('save-deepseek-beta').onclick = guard(async () => {
-  await api({ action: 'save-deepseek-beta', enabled: $('deepseek-beta-prefix').checked });
+  await api({
+    action: 'save-deepseek-beta',
+    enabled: $('deepseek-beta-prefix').checked,
+    relayUrl: $('prefix-relay-url').value,
+  });
   await reload(selectedId);
-  status(`DeepSeek 官方 Beta 前缀续写已${$('deepseek-beta-prefix').checked ? '开启' : '关闭'}`);
+  const relay = $('prefix-relay-url').value.trim();
+  status(`预填充接口设置已保存${relay ? `（中转：${relay}）` : '（中转留空，非官方接口自动按中转处理）'}`);
 });
 $('save-auto-modes').onclick = guard(async () => {
   const modes = [...$('auto-mode-list').querySelectorAll('input[data-mode]:checked')].map(input => input.dataset.mode);
