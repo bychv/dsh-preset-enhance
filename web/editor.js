@@ -14,8 +14,8 @@ function status(text, error = false) {
   $('status').className = error ? 'error' : '';
 }
 function updateDefaultButton() {
-  const active = !!selectedId && selectedId === state.modeDefaultPresetId;
-  $('mode-default').textContent = active ? '模式默认 ✓' : '设为模式默认';
+  const active = !!selectedId && selectedId === state.selectedPresetId;
+  $('mode-default').textContent = active ? '当前默认 ✓' : '设为当前默认';
   $('mode-default').disabled = !selectedId || dirty || active;
 }
 function modeName(id) {
@@ -89,7 +89,7 @@ async function reload(id) {
   const previousToolMode = $('tool-mode').value;
   state = await api();
   $('library').replaceChildren(new Option('新预设', ''), ...state.presets.map(item =>
-    new Option(`${item.id === state.modeDefaultPresetId ? '★ ' : ''}${item.name}`, item.id)));
+    new Option(`${item.id === state.selectedPresetId ? '★ ' : ''}${item.name}`, item.id)));
   const binding = state.binding ?? {};
   $('enabled').checked = binding.enabled === true;
   $('user').value = binding.values?.user ?? 'User';
@@ -97,7 +97,7 @@ async function reload(id) {
   $('markers').value = JSON.stringify(binding.markers ?? {}, null, 2);
   renderAutoModes();
   renderToolModes(previousToolMode);
-  loadDraft(id ?? binding.presetId ?? state.modeDefaultPresetId ?? '');
+  loadDraft(id ?? state.selectedPresetId ?? binding.presetId ?? '');
   updateSessionNote();
   status('已加载');
 }
@@ -324,30 +324,35 @@ function discardOkay() {
   return !dirty || confirm('放弃尚未保存的预设草稿？');
 }
 $('new').onclick = () => { if (discardOkay()) loadDraft(''); };
-$('library').onchange = () => {
-  if (discardOkay()) loadDraft($('library').value);
-  else $('library').value = selectedId;
-};
+$('library').onchange = guard(async () => {
+  const id = $('library').value;
+  if (!discardOkay()) {
+    $('library').value = selectedId;
+    return;
+  }
+  if (!id) {
+    loadDraft('');
+    return;
+  }
+  await api({ action: 'select-preset', id });
+  await reload(id);
+  status('已切换全局默认注入预设');
+});
 $('reload').onclick = guard(async () => { if (discardOkay()) await reload(selectedId); });
 $('import').onchange = guard(async () => {
   const file = $('import').files[0];
   if (!file || !discardOkay()) return;
-  if (file.size > 8_000_000) throw new Error('预设文件不能超过 8 MB');
-  const parsed = JSON.parse(await file.text());
-  if (!Array.isArray(parsed.prompts)) throw new Error('文件不是 SillyTavern 提示词预设');
-  loadDraft('');
-  preset = parsed;
-  ensureGroups();
-  $('name').value = file.name.replace(/\.json$/i, '');
-  $('order').replaceChildren(...preset.prompt_order.map(group => new Option(String(group.character_id), String(group.character_id))));
-  $('order').value = String(preset.prompt_order.find(group => String(group.character_id) === '100001')?.character_id ??
-    preset.prompt_order[0].character_id);
-  $('prefill').value = preset.assistant_prefill ?? '';
-  selectedPrompt = order()[0]?.identifier ?? '';
-  markDirty();
-  renderList();
-  renderEditor();
-  $('import').value = '';
+  try {
+    if (file.size > 8_000_000) throw new Error('预设文件不能超过 8 MB');
+    const parsed = JSON.parse(await file.text());
+    if (!Array.isArray(parsed.prompts)) throw new Error('文件不是 SillyTavern 提示词预设');
+    const name = file.name.replace(/\.json$/i, '');
+    const result = await api({ action: 'save', id: '', name, preset: parsed });
+    await reload(result.id);
+    status('预设已导入、全局保存并设为当前默认');
+  } finally {
+    $('import').value = '';
+  }
 });
 $('save').onclick = guard(async () => {
   const result = await api({ action: 'save', id: selectedId, name: $('name').value, preset });
@@ -358,7 +363,7 @@ $('mode-default').onclick = guard(async () => {
   if (dirty) throw new Error('请先保存预设草稿');
   await api({ action: 'set-default', id: selectedId });
   await reload(selectedId);
-  status('已设为自动注入的默认预设');
+  status('已设为当前默认注入预设');
 });
 $('bind').disabled = !sessionId;
 $('bind').onclick = guard(async () => {

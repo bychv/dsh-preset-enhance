@@ -134,6 +134,7 @@ export async function apply(ctx, config = {}) {
             revision: state.revision,
             presets: state.presets,
             binding: ownGet(state.bindings, sessionId) ?? fallback ?? { enabled: false },
+            selectedPresetId: state.selectedPresetId ?? modeDefault?.id ?? null,
             modeDefaultPresetId: modeDefault?.id ?? null,
             modeDefaultName: modeDefault?.name ?? null,
             presetMode: liveMode === AGENT_PRESET_ID,
@@ -174,13 +175,23 @@ export async function apply(ctx, config = {}) {
             };
             if (old) state.presets[state.presets.indexOf(old)] = record;
             else state.presets.push(record);
-            state.defaultPresetId ||= record.id;
+            state.selectedPresetId = record.id;
+            state.defaultPresetId = record.id;
             state.revision++;
             return { id: record.id };
           }
           if (body.action === 'set-default') {
             const record = state.presets.find(p => p.id === body.id);
             if (!record) throw new Error('请先保存并选择预设');
+            state.selectedPresetId = record.id;
+            state.defaultPresetId = record.id;
+            state.revision++;
+            return { id: record.id };
+          }
+          if (body.action === 'select-preset') {
+            const record = state.presets.find(p => p.id === body.id);
+            if (!record) throw new Error('请选择有效的预设');
+            state.selectedPresetId = record.id;
             state.defaultPresetId = record.id;
             state.revision++;
             return { id: record.id };
@@ -295,7 +306,8 @@ function presetCommand(store) {
 }
 
 function defaultRecord(state) {
-  return state.presets.find(p => p.id === state.defaultPresetId) ?? state.presets[0];
+  return state.presets.find(p => p.id === state.selectedPresetId) ??
+    state.presets.find(p => p.id === state.defaultPresetId) ?? state.presets[0];
 }
 function defaultBinding(state) {
   const record = defaultRecord(state);

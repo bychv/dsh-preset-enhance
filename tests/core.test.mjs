@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Readable } from 'node:stream';
 import { createMacroContext, renderMacros } from '../lib/macros.mjs';
 import { compilePreset } from '../lib/preset.mjs';
 import { PresetStore } from '../lib/store.mjs';
@@ -101,13 +102,17 @@ test('routing: frozen input preserved, once-only injection, retries stable, isol
     assert.equal(calls.at(-1).messages, request.messages);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
-test('new conversations in preset mode inherit and then pin the mode default preset', async () => {
+test('new conversations inject and pin the globally selected preset after reopening the store', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-preset-auto-'));
   try {
     const file = join(dir, 'state.json'), store = new PresetStore(file), listeners = {}, calls = [];
     await store.transaction(s => {
-      s.presets.push({ id: 'default', name: 'Default', preset: { prompts: [{ identifier: 'a', role: 'system', content: 'MODE' }] } });
+      s.presets.push(
+        { id: 'default', name: 'Old default', preset: { prompts: [{ identifier: 'a', role: 'system', content: 'OLD' }] } },
+        { id: 'selected', name: 'Last selected', preset: { prompts: [{ identifier: 'b', role: 'system', content: 'SELECTED' }] } },
+      );
       s.defaultPresetId = 'default';
+      s.selectedPresetId = 'selected';
     });
     const modeSession = { header: { agentPreset: AGENT_PRESET_ID }, snapshotEvents: () => [] };
     const normalSession = { header: { agentPreset: 'standard' }, snapshotEvents: () => [] };
@@ -123,11 +128,11 @@ test('new conversations in preset mode inherit and then pin the mode default pre
       messages: [dshSystem, msg('u', 'user', 'hello'), dshRuntime] });
     for await (const _ of ctx.llm.stream(request('auto'))) {}
     for await (const _ of ctx.llm.stream(request('normal'))) {}
-    assert.equal(calls[0].messages[0].content[0].text, 'MODE');
-    assert.deepEqual(calls[0].messages.map(x => x.content[0].text), ['MODE', 'hello']);
+    assert.equal(calls[0].messages[0].content[0].text, 'SELECTED');
+    assert.deepEqual(calls[0].messages.map(x => x.content[0].text), ['SELECTED', 'hello']);
     assert.deepEqual(calls[0].tools.map(tool => tool.name), ['shell']);
     assert.equal(calls[1].messages.length, 3); assert.equal(calls[1].tools[0].name, 'shell');
-    assert.deepEqual((await store.read()).bindings.auto, { enabled: true, presetId: 'default', characterId: null, values: {}, markers: {} });
+    assert.deepEqual((await new PresetStore(file).read()).bindings.auto, { enabled: true, presetId: 'selected', characterId: null, values: {}, markers: {} });
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 test('client registers the conversation view, main panel and sidebar button through slot injection', async () => {
@@ -302,4 +307,50 @@ test('tool catalogs are resolved independently for every built-in and plugin-pro
   assert.deepEqual(result.catalogs['third-party-mode'].map(tool => tool.name), ['plugin.custom']);
   assert.equal(result.errors['declared-broken'], 'invalid composition');
   assert.equal(result.errors['mount-fails'], 'plugin dependency unavailable');
+});
+
+test('saved imports are global and the last library selection survives reopening', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-preset-selection-'));
+  try {
+    const file = join(dir, 'state.json'), listeners = {};
+    let apiHandler;
+    const ctx = {
+      sessions: { get: () => undefined },
+      on: (name, fn) => listeners[name] = fn,
+      effect: fn => fn(),
+      webServer: { register: definition => {
+        if (definition.path === '/preset-enhance/api') apiHandler = definition.handler;
+        return () => {};
+      } },
+      llm: { stream: options => listeners['llm/stream'](options, async function* () {}) },
+    };
+    await apply(ctx, { dataFile: file, agentPresetRoot: join(dir, '.agent-presets') });
+    const post = async body => {
+      const req = Readable.from([JSON.stringify(body)]);
+      req.method = 'POST';
+      req.url = '/preset-enhance/api';
+      req.headers = { 'content-type': 'application/json', host: 'localhost' };
+      let statusCode, payload;
+      const res = {
+        writeHead(code) { statusCode = code; },
+        end(value) { payload = JSON.parse(String(value)); },
+      };
+      await apiHandler(req, res);
+      assert.equal(statusCode, 200, payload?.error);
+      return payload;
+    };
+    const preset = {
+      prompts: [{ identifier: 'chatHistory', marker: true, role: 'user' }],
+      prompt_order: [{ character_id: 100001, order: [{ identifier: 'chatHistory', enabled: true }] }],
+    };
+    const first = await post({ revision: 0, action: 'save', name: 'A', preset });
+    const second = await post({ revision: 1, action: 'save', name: 'B', preset });
+    await post({ revision: 2, action: 'select-preset', id: first.id });
+
+    const reopened = await new PresetStore(file).read();
+    assert.deepEqual(reopened.presets.map(item => item.name), ['A', 'B']);
+    assert.equal(reopened.selectedPresetId, first.id);
+    assert.equal(reopened.defaultPresetId, first.id);
+    assert.notEqual(first.id, second.id);
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });
