@@ -536,6 +536,44 @@ test('a configured relay keeps tools while the official endpoint still drops the
   assert.equal(elsewhere.init, init);
 });
 
+test('relay replays historical tool reasoning from tags and compatible aliases', () => {
+  const prefix = 'Answer: ';
+  const relay = 'https://relay.example.com/v1';
+  const toolCalls = [{
+    id: 'call-weather',
+    type: 'function',
+    function: { name: 'lookup_weather', arguments: '{"city":"Shanghai"}' },
+  }];
+  const body = {
+    messages: [
+      { role: 'user', content: 'Check the weather.' },
+      { role: 'assistant', content: '<think>\nI should call the weather tool.</think>\n', tool_calls: toolCalls },
+      { role: 'tool', tool_call_id: 'call-weather', content: '{"temperature":22}' },
+      { role: 'assistant', content: 'Earlier answer.', reasoning: 'Summarize the tool result.' },
+      { role: 'user', content: 'Continue.' },
+      { role: 'assistant', content: prefix },
+    ],
+    thinking: { type: 'enabled' },
+    tools: [{ type: 'function', function: { name: 'lookup_weather' } }],
+  };
+  const init = {
+    headers: { 'x-deepseek-harness-session-id': 's' },
+    body: JSON.stringify(body),
+  };
+  const registry = new Map([['s', new Map([[prefix, { count: 1, relay }]])]]);
+
+  const rewritten = rewriteDeepSeekPrefixFetch(`${relay}/chat/completions`, init, [registry]);
+  const messages = JSON.parse(rewritten.init.body).messages;
+  assert.deepEqual(messages[1], {
+    role: 'assistant',
+    content: '',
+    reasoning_content: 'I should call the weather tool.',
+    tool_calls: toolCalls,
+  });
+  assert.equal(messages[3].reasoning, 'Summarize the tool result.');
+  assert.equal(messages[3].reasoning_content, 'Summarize the tool result.');
+  assert.deepEqual(JSON.parse(rewritten.init.body).tools, body.tools);
+});
 test('an empty relay field treats any forwarded chat-completion endpoint as the relay', () => {
   const prefix = 'Answer: ';
   const body = {
