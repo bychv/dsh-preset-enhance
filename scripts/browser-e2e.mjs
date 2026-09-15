@@ -396,7 +396,7 @@ try {
       const clone = seed.cloneNode(true);
       clone.id = 'mcp-stress-tab-' + index;
       clone.dataset.group = '@mcp:stress_' + index;
-      clone.querySelector('.tab-label').textContent = 'MCP · stress_server_with_a_long_name_' + index + ' · 1/1';
+      clone.querySelector('.tab-label').textContent = 'stress_server_w…long_name_' + index + ' · MCP · 1/1';
       clone.setAttribute('aria-selected', 'false');
       clone.tabIndex = -1;
       list.append(clone);

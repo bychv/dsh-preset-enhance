@@ -1,3 +1,5 @@
+import { mcpTabNames } from './tool-labels.js';
+
 const $ = id => document.getElementById(id);
 const sessionId = new URLSearchParams(location.search).get('sessionId') ?? '';
 let state = { presets: [], revision: 0 }, selectedId = '', selectedPrompt = '', dirty = false;
@@ -450,9 +452,11 @@ function toolTabsFor(modeId) {
     const tools = [...new Set((group.tools ?? []).filter(name => known.has(name)))];
     if (!tools.length) continue;
     for (const name of tools) mcpClaimed.add(name);
+    const names = mcpTabNames(group.serverName);
     mcpTabs.push({
       id: '@mcp:' + group.serverName,
-      name: 'MCP · ' + group.serverName,
+      name: names.display,
+      fullName: names.full,
       tools,
     });
   }
@@ -475,8 +479,8 @@ function toolPanelElementId(tabId) {
 function toolGroupEnabledCount(tab) {
   return tab.tools.filter(name => toolDraft.policy[name] !== false).length;
 }
-function toolTabLabel(tab) {
-  return `${tab.name} · ${toolGroupEnabledCount(tab)}/${tab.tools.length}`;
+function toolTabLabel(tab, full = false) {
+  return `${full ? tab.fullName ?? tab.name : tab.name} · ${toolGroupEnabledCount(tab)}/${tab.tools.length}`;
 }
 function activeToolPanel() {
   return [...$('tool-group-panels').children].find(panel => panel.dataset.group === toolView.active) ?? null;
@@ -639,13 +643,14 @@ function renderToolTabs() {
     const label = document.createElement('span');
     label.className = 'tab-label';
     label.textContent = toolTabLabel(tab);
-    button.title = label.textContent;
+    button.title = toolTabLabel(tab, true);
+    button.setAttribute('aria-label', button.title);
     button.append(label);
     button.onclick = () => activateToolGroup(tab.id);
     return button;
   }));
   $('tool-group-select-wrap').hidden = !collapsed;
-  $('tool-group-select').replaceChildren(...tabs.map(tab => new Option(toolTabLabel(tab), tab.id)));
+  $('tool-group-select').replaceChildren(...tabs.map(tab => new Option(toolTabLabel(tab, true), tab.id)));
   $('tool-group-select').value = toolView.active;
   $('tool-tabs-toggle').setAttribute('aria-expanded', String(!collapsed));
   $('tool-tabs-toggle').textContent = collapsed ? '展开标签栏' : '收起标签栏';
@@ -794,8 +799,12 @@ function refreshToolTabLabels() {
     const button = $('tool-tablist').querySelector(`[role="tab"][data-group="${CSS.escape(tab.id)}"]`);
     const span = button?.querySelector('.tab-label');
     if (span) span.textContent = label;
+    if (button) {
+      button.title = toolTabLabel(tab, true);
+      button.setAttribute('aria-label', button.title);
+    }
     const option = [...$('tool-group-select').options].find(item => item.value === tab.id);
-    if (option) option.textContent = label;
+    if (option) option.textContent = toolTabLabel(tab, true);
   }
 }
 function rerenderToolGroup() {

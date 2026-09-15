@@ -118,6 +118,7 @@ export async function apply(ctx, config = {}) {
   const assets = new Map([
     [BASE, ['web/index.html', 'text/html']],
     [`${BASE}/editor.js`, ['web/editor.js', 'text/javascript']],
+    [`${BASE}/tool-labels.js`, ['web/tool-labels.js', 'text/javascript']],
     [`${BASE}/editor.css`, ['web/editor.css', 'text/css']],
   ]);
   for (const [path, [file, mime]] of assets) ctx.effect(() => ctx.webServer.register({
