@@ -191,6 +191,30 @@ export async function apply(ctx, config = {}) {
             state.revision++;
             return { id: record.id };
           }
+          if (body.action === 'delete-preset') {
+            const index = state.presets.findIndex(preset => preset.id === body.id);
+            if (index < 0) throw new Error('请选择要删除的已保存预设');
+            const [removed] = state.presets.splice(index, 1);
+            const fallback = state.presets.find(preset => preset.id === state.selectedPresetId) ??
+              state.presets.find(preset => preset.id === state.defaultPresetId) ??
+              state.presets[index] ?? state.presets[index - 1] ?? state.presets[0];
+            if (state.selectedPresetId === removed.id) state.selectedPresetId = fallback?.id ?? null;
+            if (state.defaultPresetId === removed.id) state.defaultPresetId = fallback?.id ?? null;
+            for (const [sessionId, binding] of Object.entries(state.bindings)) {
+              if (binding?.presetId !== removed.id) continue;
+              assign(state.bindings, sessionId, {
+                ...binding,
+                enabled: !!fallback && binding.enabled === true,
+                presetId: fallback?.id ?? '',
+                characterId: null,
+              });
+            }
+            for (const [sessionId, cached] of Object.entries(state.sessions)) {
+              if (cached?.presetId === removed.id) delete state.sessions[sessionId];
+            }
+            state.revision++;
+            return { id: fallback?.id ?? null };
+          }
           if (body.action === 'set-default') {
             const record = state.presets.find(p => p.id === body.id);
             if (!record) throw new Error('请先保存并选择预设');

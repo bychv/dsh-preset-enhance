@@ -156,14 +156,42 @@ test('new conversations inject and pin the globally selected preset after reopen
     assert.deepEqual((await new PresetStore(file).read()).bindings.auto, { enabled: true, presetId: 'selected', characterId: null, values: {}, markers: {} });
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
-test('client registers the conversation view, main panel and sidebar button through slot injection', async () => {
+test('client registers the workbench and locks both DSH resize handles while mounted', async () => {
   let definition;
+  const cleanups = [];
+  const rootAttributes = new Set();
+  const styles = [];
   globalThis.window = { __ModuleLoader__: { load(value) { definition = value; } } };
+  globalThis.document = {
+    documentElement: {
+      setAttribute(name) { rootAttributes.add(name); },
+      removeAttribute(name) { rootAttributes.delete(name); },
+    },
+    head: { appendChild(style) { styles.push(style); } },
+    querySelector(selector) {
+      return selector === 'style[data-preset-enhance-resize-lock]' ? styles[0] ?? null : null;
+    },
+    createElement(tag) {
+      assert.equal(tag, 'style');
+      const attributes = new Set();
+      return {
+        textContent: '',
+        setAttribute(name) { attributes.add(name); },
+        remove() {
+          const index = styles.indexOf(this);
+          if (index >= 0) styles.splice(index, 1);
+        },
+      };
+    },
+  };
   try {
-    await import(`../client.js?test=${Date.now()}`);
+    await import('../client.js?test=' + Date.now());
     const plugin = definition.factory(name => {
       assert.equal(name, 'react');
-      return { createElement: (type, props, ...children) => ({ type, props, children }) };
+      return {
+        createElement: (type, props, ...children) => ({ type, props, children }),
+        useEffect(effect) { cleanups.push(effect()); },
+      };
     });
     const injected = [], registered = [];
     plugin.apply({ slots: {
@@ -174,7 +202,25 @@ test('client registers the conversation view, main panel and sidebar button thro
     assert.deepEqual(registered.map(x => [x.options.name, x.options.id ?? x.options.key]), [
       ['conversation.view', 'preset-enhance-editor'], ['main', 'preset-enhance-editor'], ['sidebar.panellist', 'preset-enhance-editor'],
     ]);
-  } finally { delete globalThis.window; }
+
+    registered.find(entry => entry.options.name === 'conversation.view').component({ sessionId: 's' });
+    const frame = registered.find(entry => entry.options.name === 'main').component({ sessionId: 's' });
+    assert.equal(frame.type, 'iframe');
+    assert.equal(rootAttributes.has('data-preset-enhance-workbench'), true);
+    assert.equal(styles.length, 1);
+    assert.match(styles[0].textContent, /data-side="sidebar"/);
+    assert.match(styles[0].textContent, /data-side="rightbar"/);
+    assert.match(styles[0].textContent, /display:none!important/);
+
+    cleanups.shift()();
+    assert.equal(rootAttributes.has('data-preset-enhance-workbench'), true);
+    cleanups.shift()();
+    assert.equal(rootAttributes.has('data-preset-enhance-workbench'), false);
+    assert.equal(styles.length, 0);
+  } finally {
+    delete globalThis.document;
+    delete globalThis.window;
+  }
 });
 
 test('preset mode composition inherits standard tools while replacing its persona', () => {
@@ -392,6 +438,38 @@ test('saved imports are global and the last library selection survives reopening
     assert.equal(rejected.statusCode, 400);
     assert.match(rejected.payload.error, /工具移除开关/);
     assert.equal((await new PresetStore(file).read()).prefixNonOfficialRemoveTools, false);
+
+    const external = new PresetStore(file);
+    await external.transaction(state => {
+      state.bindings.bound = {
+        enabled: true,
+        presetId: first.id,
+        characterId: 100001,
+        values: { user: 'User' },
+        markers: {},
+      };
+      state.sessions.bound = { presetId: first.id, key: 'stale' };
+      state.revision++;
+    });
+    const deleted = await post({ revision: 5, action: 'delete-preset', id: first.id });
+    assert.equal(deleted.id, second.id);
+    const afterFirstDelete = await external.read();
+    assert.deepEqual(afterFirstDelete.presets.map(item => item.name), ['B']);
+    assert.equal(afterFirstDelete.selectedPresetId, second.id);
+    assert.equal(afterFirstDelete.defaultPresetId, second.id);
+    assert.equal(afterFirstDelete.bindings.bound.enabled, true);
+    assert.equal(afterFirstDelete.bindings.bound.presetId, second.id);
+    assert.equal(afterFirstDelete.bindings.bound.characterId, null);
+    assert.equal(afterFirstDelete.sessions.bound, undefined);
+
+    const deletedLast = await post({ revision: 6, action: 'delete-preset', id: second.id });
+    assert.equal(deletedLast.id, null);
+    const empty = await external.read();
+    assert.equal(empty.presets.length, 0);
+    assert.equal(empty.selectedPresetId, null);
+    assert.equal(empty.defaultPresetId, null);
+    assert.equal(empty.bindings.bound.enabled, false);
+    assert.equal(empty.bindings.bound.presetId, '');
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 test('negative order and trailing ordered assistant compile as a prefix', () => {

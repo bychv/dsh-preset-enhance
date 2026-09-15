@@ -17,6 +17,7 @@ function updateDefaultButton() {
   const active = !!selectedId && selectedId === state.selectedPresetId;
   $('mode-default').textContent = active ? '当前默认 ✓' : '设为当前默认';
   $('mode-default').disabled = !selectedId || dirty || active;
+  $('delete-preset').disabled = !selectedId || dirty;
 }
 function modeName(id) {
   return state.agentModes?.find(mode => mode.id === id)?.name ?? (id || '未选择');
@@ -379,6 +380,15 @@ $('library').onchange = guard(async () => {
   status('已切换全局默认注入预设');
 });
 $('reload').onclick = guard(async () => { if (discardOkay()) await reload(selectedId); });
+$('delete-preset').onclick = guard(async () => {
+  if (!selectedId) throw new Error('请选择要删除的已保存预设');
+  if (dirty) throw new Error('请先保存或放弃预设草稿');
+  const record = state.presets.find(item => item.id === selectedId);
+  if (!record || !confirm('确定删除预设“' + record.name + '”？此操作无法撤销。')) return;
+  const result = await api({ action: 'delete-preset', id: selectedId });
+  await reload(result.id ?? '');
+  status('预设已删除');
+});
 $('import').onchange = guard(async () => {
   const file = $('import').files[0];
   if (!file || !discardOkay()) return;
