@@ -125,7 +125,21 @@ try {
   await reloaded;
   for (let i = 0; i < 40; i++) { if (await evaluate('!!document.getElementById("tool-tablist") && !!document.querySelector("#tool-list input[data-tool]")')) break; await sleep(300); }
   await sleep(1800);
-  await snapshot('6-after-reload');
+  const afterReload = await snapshot('6-after-reload');
+  await load(`${BASE}/`);
+  await sleep(800);
+  await load(`${BASE}/preset-enhance?sessionId=`);
+  for (let i = 0; i < 40; i++) {
+    if (await evaluate('!!document.getElementById("tool-tablist") && !!document.querySelector("#tool-list input[data-tool]")')) break;
+    await sleep(300);
+  }
+  await sleep(1800);
+  const afterReentry = await snapshot('7-after-leave-and-reenter');
+  for (const [label, result] of [['reload', afterReload], ['leave-and-reenter', afterReentry]]) {
+    if (result.ui.mode !== MODE || targets.some(tool => !result.ui.off.includes(tool))) {
+      throw new Error(`${label} lost saved switches: mode=${result.ui.mode} off=${JSON.stringify(result.ui.off)}`);
+    }
+  }
   writeFileSync(join(OUT, 'repro.json'), JSON.stringify({ mode: MODE, targets, trace }, null, 2));
   console.log('targets (should stay disabled):', JSON.stringify(targets));
 } catch (error) {

@@ -263,23 +263,31 @@ try {
   check('返回工具列表 closes the group page', groupPageOpen === false, `groupPageHidden=${!groupPageOpen}`);
 
   // 9. user group batch operation (draft only): 仅启用此组
-  const groupMode = await evaluate(`(() => {
+  const groupMode = await evaluate(`(async () => {
     const select = document.getElementById('tool-mode');
-    const tabs = [...document.querySelectorAll('#tool-tablist [role="tab"]')].filter(b => !b.dataset.group.startsWith('@'));
-    for (const option of select.options) {
-      select.value = option.value;
-      select.dispatchEvent(new Event('change'));
-      const list = [...document.querySelectorAll('#tool-tablist [role="tab"]')].filter(b => !b.dataset.group.startsWith('@'));
-      const match = list.find(tab => Number((tab.textContent.split('·')[1] ?? '0/0').trim().split('/')[1]) > 0);
-      if (match) return { mode: option.value, group: match.dataset.group, label: match.textContent.trim(), groups: tabs.length };
+    const available = new Set([...select.options].map(option => option.value));
+    const state = await fetch('/preset-enhance/api').then(response => response.json());
+    for (const group of state.toolGroups ?? []) {
+      const member = (group.members ?? []).find(item => available.has(item.modeId) &&
+        (state.toolCatalogs?.[item.modeId] ?? []).some(tool => tool.name === item.toolName));
+      if (member) return { mode: member.modeId, group: group.id, label: group.name };
     }
     return null;
   })()`);
-  await settle(600);
   const userTab = groupMode ? await (async () => {
-    await evaluate(`document.querySelector('#tool-tablist [data-group=${JSON.stringify(groupMode.group)}]').click()`);
+    await evaluate(`(() => {
+      const select = document.getElementById('tool-mode');
+      select.value = ${JSON.stringify(groupMode.mode)};
+      select.dispatchEvent(new Event('change'));
+    })()`);
+    await settle(1200);
+    const label = await evaluate(`(() => {
+      const tab = document.querySelector('#tool-tablist [data-group=${JSON.stringify(groupMode.group)}]');
+      tab?.click();
+      return tab?.textContent.trim() ?? '';
+    })()`);
     await settle(500);
-    return groupMode;
+    return { ...groupMode, label };
   })() : null;
   if (userTab) {
     const clicked = await evaluate(`(() => {
@@ -429,10 +437,14 @@ try {
     return target.value;
   })()`);
   await settle(1400);
-  const uncheckedTools = await evaluate(`(() => {
-    const boxes = [...document.querySelectorAll('#tool-list input[data-tool]')].filter(box => box.checked).slice(0, 2);
-    for (const box of boxes) box.click();
-    return boxes.map(box => box.dataset.tool);
+  const persistenceDraft = await evaluate(`(() => {
+    const all = [...document.querySelectorAll('#tool-list input[data-tool]')];
+    const beforeOff = all.filter(box => !box.checked).map(box => box.dataset.tool);
+    const targets = all.filter(box => box.checked).slice(0, 2);
+    for (const box of targets) box.click();
+    return { targets: targets.map(box => box.dataset.tool), expectedOff: [...new Set([
+      ...beforeOff, ...targets.map(box => box.dataset.tool),
+    ])] };
   })()`);
   await settle(600);
   await evaluate(`document.getElementById('save-deepseek-beta').click()`);
@@ -442,14 +454,16 @@ try {
     return { off: boxes.filter(box => !box.checked).map(box => box.dataset.tool), status: document.getElementById('status').textContent };
   })()`);
   check('an unrelated save keeps the unsaved tool-switch draft',
-    JSON.stringify([...afterUnrelated.off].sort()) === JSON.stringify([...uncheckedTools].sort()) && /尚未保存/.test(afterUnrelated.status),
+    JSON.stringify([...afterUnrelated.off].sort()) === JSON.stringify([...persistenceDraft.expectedOff].sort()) &&
+      /尚未保存/.test(afterUnrelated.status),
     `off=[${afterUnrelated.off.join(',')}] status=${afterUnrelated.status}`);
   await evaluate(`document.getElementById('save-tools').click()`);
   await settle(2200);
   const persistedPolicy = await evaluate(`fetch('/preset-enhance/api').then(r => r.json()).then(s => s.modeToolPolicies[${JSON.stringify(persistMode)}] ?? null)`);
   const persistedOff = Object.entries(persistedPolicy ?? {}).filter(([, value]) => value === false).map(([name]) => name);
   check('保存工具开关 persists exactly the unchecked tools',
-    uncheckedTools.length > 0 && uncheckedTools.every(name => persistedPolicy?.[name] === false) && persistedOff.length === uncheckedTools.length,
+    persistenceDraft.targets.length > 0 && persistenceDraft.expectedOff.every(name => persistedPolicy?.[name] === false) &&
+      persistedOff.length === persistenceDraft.expectedOff.length,
     `${persistMode}: off=[${persistedOff.join(',')}]`);
   const persistReload = once('Page.loadEventFired');
   await send('Page.reload', {});
@@ -462,7 +476,7 @@ try {
   })()`);
   check('a page reload remembers the configured mode and renders its saved switches',
     afterPersistReload.mode === persistMode &&
-    JSON.stringify([...afterPersistReload.off].sort()) === JSON.stringify([...uncheckedTools].sort()),
+    JSON.stringify([...afterPersistReload.off].sort()) === JSON.stringify([...persistenceDraft.expectedOff].sort()),
     `mode=${afterPersistReload.mode} off=[${afterPersistReload.off.join(',')}]`);
 
   // 13. auto-save switch: one edit = one request, no manual save; OFF keeps the draft behaviour
