@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 import { PresetStore } from './lib/store.mjs';
 import { compilePreset, validatePreset, getOrder } from './lib/preset.mjs';
-import { DEEPSEEK_OFFICIAL_PROVIDER, installDeepSeekBetaBridge, normalizeRelayUrl } from './lib/deepseek-beta.mjs';
+import { installDeepSeekBetaBridge } from './lib/deepseek-beta.mjs';
 
 export const name = 'preset-enhance';
 export const inject = ['llm', 'sessions', 'webServer', 'commands', 'tools', 'agentPresets', 'agents'];
@@ -16,9 +16,6 @@ const PRESET_COMPILER_VERSION = 2;
 const ownGet = (object, key) => Object.hasOwn(object, key) ? object[key] : undefined;
 const assign = (object, key, value) => Object.defineProperty(object, key, { value, writable: true, enumerable: true, configurable: true });
 const isRecord = value => value && typeof value === 'object' && !Array.isArray(value);
-function normalizedRelayOrNull(value) {
-  try { return normalizeRelayUrl(value); } catch { return null; }
-}
 
 export async function apply(ctx, config = {}) {
   const home = process.env.DSH_HOME?.trim() || join(homedir(), '.dsh');
@@ -96,12 +93,11 @@ export async function apply(ctx, config = {}) {
     if (!toolsChanged && !messagesChanged) { yield* next(); return; }
 
     const request = routedRequest(options, messages, filteredTools);
-    const relayField = String(initial.prefixRelayUrl ?? '').trim();
-    // A hand-edited, unusable relay must never fall back to the blank-field wildcard.
-    const relay = relayField ? normalizedRelayOrNull(relayField) : '';
-    const betaPrefix = initial.deepseekBetaPrefix === true && compiled?.assistantPrefix?.active === true &&
-      relay !== null && (options.provider === DEEPSEEK_OFFICIAL_PROVIDER || relay.length > 0);
-    const releaseBeta = betaPrefix ? deepSeekBeta.activate(options.sessionId, messageText(messages.at(-1)), relay) : () => {};
+    const betaPrefix = initial.deepseekBetaPrefix === true && compiled?.assistantPrefix?.active === true;
+    const releaseBeta = betaPrefix ? deepSeekBeta.activate(options.sessionId, messageText(messages.at(-1)), {
+      toolCalls: initial.prefixToolCalls === true,
+      removeNonOfficialTools: initial.prefixNonOfficialRemoveTools !== false,
+    }) : () => {};
     routed.add(request);
     try { yield* ctx.llm.stream(request); } finally { releaseBeta(); routed.delete(request); }
   });
@@ -148,7 +144,8 @@ export async function apply(ctx, config = {}) {
             binding: ownGet(state.bindings, sessionId) ?? fallback ?? { enabled: false },
             selectedPresetId: state.selectedPresetId ?? modeDefault?.id ?? null,
             deepseekBetaPrefix: state.deepseekBetaPrefix === true,
-            prefixRelayUrl: state.prefixRelayUrl ?? '',
+            prefixToolCalls: state.prefixToolCalls === true,
+            prefixNonOfficialRemoveTools: state.prefixNonOfficialRemoveTools !== false,
             modeDefaultPresetId: modeDefault?.id ?? null,
             modeDefaultName: modeDefault?.name ?? null,
             presetMode: liveMode === AGENT_PRESET_ID,
@@ -212,13 +209,21 @@ export async function apply(ctx, config = {}) {
           }
           if (body.action === 'save-deepseek-beta') {
             if (typeof body.enabled !== 'boolean') throw new Error('预填充接口开关值无效');
-            if (body.relayUrl !== undefined) {
-              if (typeof body.relayUrl !== 'string') throw new Error('中转地址必须是文本');
-              state.prefixRelayUrl = normalizeRelayUrl(body.relayUrl);
+            if (body.toolCalls !== undefined) {
+              if (typeof body.toolCalls !== 'boolean') throw new Error('工具调用处理开关值无效');
+              state.prefixToolCalls = body.toolCalls;
+            }
+            if (body.removeNonOfficialTools !== undefined) {
+              if (typeof body.removeNonOfficialTools !== 'boolean') throw new Error('非官方接口工具移除开关值无效');
+              state.prefixNonOfficialRemoveTools = body.removeNonOfficialTools;
             }
             state.deepseekBetaPrefix = body.enabled;
             state.revision++;
-            return { enabled: state.deepseekBetaPrefix, relayUrl: state.prefixRelayUrl };
+            return {
+              enabled: state.deepseekBetaPrefix,
+              toolCalls: state.prefixToolCalls === true,
+              removeNonOfficialTools: state.prefixNonOfficialRemoveTools !== false,
+            };
           }
           if (body.action === 'save-auto-modes') {
             if (!Array.isArray(body.modes) || body.modes.some(id => typeof id !== 'string' || !knownModes.has(id))) {

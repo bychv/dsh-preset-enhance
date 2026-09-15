@@ -49,13 +49,13 @@ dsh plugin --profile web add github:bychv/dsh-preset-enhance
 
 当编译后的最后一条预设消息是 assistant 时（包括顶层 `assistant_prefill`，以及预设顺序表在 `chatHistory` 后安排的 assistant/model 条目），工作台会显示预填充续写提醒，消息预览也会标出 `Assistant Prefix`。这类预设必须使用支持 assistant prefix 的接口。
 
-使用 DSH 的 `deepseek-official` 提供方时，可以在“Assistant 预填充接口”面板开启“预填充自动兼容”。开启后，插件只对当前请求中匹配到的末条预填充自动执行转换：为最后一条 assistant 消息发送 `prefix: true`；在思考模式下，开放的 `<think>` 前缀会映射到 `reasoning_content`，其他 assistant 消息也会补齐接口要求的思考字段。请求发往哪里决定这次是否保留工具：
+可以在“Assistant 预填充接口”面板开启“预填充自动兼容”。插件只处理当前请求中匹配到的末条 assistant 预填充：为最后一条 assistant 消息发送 `prefix: true`；在思考模式下，把 `<think>` 前缀和兼容接口使用的 `reasoning` / `reasoning_text` 映射到 `reasoning_content`，并保留工具调用历史中的真实思考内容。
 
-- **DeepSeek 官方地址**：自动把官方 Chat Completion 地址切到 `https://api.deepseek.com/beta`。由于官方 Prefix 接口不接受函数调用，该次预填充请求会自动移除 `tools`、`tool_choice` 和 `parallel_tool_calls`。
-- **自定义中转**：在面板填写中转地址（例如 `https://your-relay.example.com/v1`，也可以直接填完整的 `.../chat/completions`）后，命中该地址的预填充请求只做上面的最小改写，**保留 `tools`、`tool_choice` 和 `parallel_tool_calls` 原样发送**，地址本身也不改写。填写了中转地址时，发往其它地址的请求不再处理。
-- **中转地址留空**：`deepseek-official` 提供方如果被指向非官方地址，按中转方式处理，同样保留工具；其它提供方需要显式填写中转地址，否则插件完全不介入该请求（请求原样发出，工具字段自然保留）。
+- **DeepSeek 官方地址**：自动把官方 Chat Completion 地址切到 `https://api.deepseek.com/beta`。官方 Beta 不接受原生工具字段，因此未开启 DSML 处理时也会移除 `tools`、`tool_choice` 和 `parallel_tool_calls`。
+- **非官方适配器地址**：直接处理适配器实际请求的 Chat Completion 地址，不改写地址，也不需要在工作台重复填写。关闭 DSML 处理时，可用“非官方接口移除原生工具字段”开关选择移除或原样发送工具字段。
+- **工具调用处理开启**：对官方和非官方地址都生效。插件把可用工具定义注入 system 提示，把历史 `tool_calls` 和工具结果转换为 DSML，再移除原生工具字段。模型返回的 DSML 会在流式或非流式响应中恢复为标准 `tool_calls`，交回 DSH 执行；工具结果中的常见 base64 图片也会转换为兼容的图片内容块。
 
-配置了中转地址后，只要该次请求被判定为预填充且命中中转地址，即使提供方 ID 不是 `deepseek-official` 也会执行上面的最小改写；之后的普通请求、非预填充请求和其他地址不受影响。接口要求见 [DeepSeek 对话前缀续写文档](https://api-docs.deepseek.com/zh-cn/guides/chat_prefix_completion)。
+普通请求、非预填充请求和没有命中当前会话末条 assistant 前缀的请求不受影响。接口要求见 [DeepSeek 对话前缀续写文档](https://api-docs.deepseek.com/zh-cn/guides/chat_prefix_completion)。
 
 ## 工具预设
 

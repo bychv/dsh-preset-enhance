@@ -7,7 +7,7 @@ import { Readable } from 'node:stream';
 import { createMacroContext, renderMacros } from '../lib/macros.mjs';
 import { compilePreset } from '../lib/preset.mjs';
 import { PresetStore } from '../lib/store.mjs';
-import { installDeepSeekBetaBridge, normalizeRelayUrl, rewriteDeepSeekPrefixFetch } from '../lib/deepseek-beta.mjs';
+import { installDeepSeekBetaBridge, rewriteDeepSeekPrefixFetch } from '../lib/deepseek-beta.mjs';
 import { AGENT_PRESET_ID, apply, buildPresetModeComposition, discoverModeToolCatalogs, ensurePresetAgentMode } from '../index.mjs';
 
 const FETCH_BRIDGE = Symbol.for('dsh-preset-enhance.deepseek-beta-fetch-bridge');
@@ -371,23 +371,27 @@ test('saved imports are global and the last library selection survives reopening
     const first = await post({ revision: 0, action: 'save', name: 'A', preset });
     const second = await post({ revision: 1, action: 'save', name: 'B', preset });
     await post({ revision: 2, action: 'select-preset', id: first.id });
-    await post({ revision: 3, action: 'save-deepseek-beta', enabled: true, relayUrl: ' https://relay.example.com/v1/ ' });
+    await post({ revision: 3, action: 'save-deepseek-beta', enabled: true, toolCalls: true, removeNonOfficialTools: false });
 
     const reopened = await new PresetStore(file).read();
     assert.deepEqual(reopened.presets.map(item => item.name), ['A', 'B']);
     assert.equal(reopened.selectedPresetId, first.id);
     assert.equal(reopened.defaultPresetId, first.id);
     assert.equal(reopened.deepseekBetaPrefix, true);
-    assert.equal(reopened.prefixRelayUrl, 'https://relay.example.com/v1');
+    assert.equal(reopened.prefixToolCalls, true);
+    assert.equal(reopened.prefixNonOfficialRemoveTools, false);
+    assert.equal(Object.hasOwn(reopened, 'prefixRelayUrl'), false);
     assert.notEqual(first.id, second.id);
 
-    const rejected = await postRaw({ revision: reopened.revision, action: 'save-deepseek-beta', enabled: true, relayUrl: 'ftp://relay.example.com' });
+    const rejected = await postRaw({
+      revision: reopened.revision,
+      action: 'save-deepseek-beta',
+      enabled: true,
+      removeNonOfficialTools: null,
+    });
     assert.equal(rejected.statusCode, 400);
-    assert.match(rejected.payload.error, /中转地址/);
-    const nullRelay = await postRaw({ revision: reopened.revision, action: 'save-deepseek-beta', enabled: true, relayUrl: null });
-    assert.equal(nullRelay.statusCode, 400);
-    assert.match(nullRelay.payload.error, /文本/);
-    assert.equal((await new PresetStore(file).read()).prefixRelayUrl, 'https://relay.example.com/v1');
+    assert.match(rejected.payload.error, /工具移除开关/);
+    assert.equal((await new PresetStore(file).read()).prefixNonOfficialRemoveTools, false);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 test('negative order and trailing ordered assistant compile as a prefix', () => {
@@ -471,74 +475,87 @@ test('DeepSeek Beta bridge supplies reasoning fields only for the activated offi
   assert.equal(JSON.parse(disabled.init.body).messages.at(-1).reasoning_content, undefined);
 
   // Without an activation nothing is rewritten, and non chat-completion URLs are never touched.
-  assert.equal(rewriteDeepSeekPrefixFetch('https://relay.example.com/v1/chat/completions', init, []).changed, false);
-  assert.equal(rewriteDeepSeekPrefixFetch('https://relay.example.com/v1/files', init, [registry]).changed, false);
+  assert.equal(rewriteDeepSeekPrefixFetch('https://adapter.example.com/v1/chat/completions', init, []).changed, false);
+  assert.equal(rewriteDeepSeekPrefixFetch('https://adapter.example.com/v1/files', init, [registry]).changed, false);
   assert.equal(rewriteDeepSeekPrefixFetch('https://api.deepseek.com/chat/completions', {
     ...init,
     headers: { ...init.headers, 'x-deepseek-harness-session-id': 'another-session' },
   }, [registry]).changed, false);
 });
 
-test('a configured relay keeps tools while the official endpoint still drops them', () => {
+test('non-official adapter supports pass-through, removal and DSML tool handling', () => {
   const prefix = '<think>\ncontinue the plan';
+  const tools = [{ type: 'function', function: { name: 'noop', parameters: { type: 'object' } } }];
   const body = {
-    model: 'deepseek-v4-flash',
+    model: 'adapter-model',
     messages: [
       { role: 'user', content: 'hello' },
       { role: 'assistant', content: 'previous answer' },
       { role: 'assistant', content: prefix },
     ],
     thinking: { type: 'enabled' },
-    tools: [{ type: 'function', function: { name: 'noop', parameters: { type: 'object' } } }],
+    tools,
     tool_choice: 'auto',
     parallel_tool_calls: false,
     stream: true,
   };
-  const relay = 'https://relay.example.com/v1';
   const init = {
     method: 'POST',
     headers: { 'x-deepseek-harness-session-id': 'session-1', 'content-type': 'application/json' },
     body: JSON.stringify(body),
   };
-  const registry = new Map([['session-1', new Map([[prefix, { count: 1, relay }]])]]);
+  const endpoint = 'https://adapter.example.com/v1/chat/completions';
 
-  const relayed = rewriteDeepSeekPrefixFetch(`${relay}/chat/completions`, init, [registry]);
-  assert.equal(relayed.changed, true);
-  assert.equal(relayed.mode, 'relay');
-  assert.equal(relayed.input, `${relay}/chat/completions`);
-  const relayedBody = JSON.parse(relayed.init.body);
-  assert.deepEqual(relayedBody.tools, body.tools);
-  assert.equal(relayedBody.tool_choice, 'auto');
-  assert.equal(relayedBody.parallel_tool_calls, false);
-  assert.deepEqual(relayedBody.messages.at(-1), {
+  const removingRegistry = new Map([['session-1', new Map([[
+    prefix, { count: 1, removeNonOfficialTools: true },
+  ]])]]);
+  const removed = rewriteDeepSeekPrefixFetch(endpoint, init, [removingRegistry]);
+  assert.equal(removed.changed, true);
+  assert.equal(removed.mode, 'adapter');
+  assert.equal(removed.input, endpoint);
+  const removedBody = JSON.parse(removed.init.body);
+  assert.equal(removedBody.tools, undefined);
+  assert.equal(removedBody.tool_choice, undefined);
+  assert.equal(removedBody.parallel_tool_calls, undefined);
+  assert.deepEqual(removedBody.messages.at(-1), {
     role: 'assistant', content: '', reasoning_content: 'continue the plan', prefix: true,
   });
-  assert.equal(relayedBody.messages[1].reasoning_content, '');
-  assert.equal(JSON.parse(init.body).messages.at(-1).reasoning_content, undefined);
+  assert.equal(removedBody.messages[1].reasoning_content, '');
 
-  const disabled = rewriteDeepSeekPrefixFetch(`${relay}/chat/completions`, {
-    ...init,
-    body: JSON.stringify({ ...body, thinking: { type: 'disabled' } }),
-  }, [registry]);
-  assert.equal(JSON.parse(disabled.init.body).messages.at(-1).content, prefix);
-  assert.equal(JSON.parse(disabled.init.body).messages.at(-1).reasoning_content, undefined);
+  const passThroughRegistry = new Map([['session-1', new Map([[
+    prefix, { count: 1, removeNonOfficialTools: false },
+  ]])]]);
+  const passThrough = rewriteDeepSeekPrefixFetch(endpoint, init, [passThroughRegistry]);
+  const passThroughBody = JSON.parse(passThrough.init.body);
+  assert.deepEqual(passThroughBody.tools, tools);
+  assert.equal(passThroughBody.tool_choice, 'auto');
+  assert.equal(passThroughBody.parallel_tool_calls, false);
+  assert.equal(passThroughBody.messages.at(-1).prefix, true);
 
-  // The official endpoint keeps the tool surgery no matter what relay is configured.
-  const official = rewriteDeepSeekPrefixFetch('https://api.deepseek.com/chat/completions', init, [registry]);
+  const emulatingRegistry = new Map([['session-1', new Map([[
+    prefix, { count: 1, toolCalls: true, removeNonOfficialTools: false },
+  ]])]]);
+  const emulated = rewriteDeepSeekPrefixFetch(endpoint, init, [emulatingRegistry]);
+  const emulatedBody = JSON.parse(emulated.init.body);
+  assert.equal(emulatedBody.tools, undefined);
+  assert.equal(emulatedBody.tool_choice, undefined);
+  assert.match(emulatedBody.messages[0].content, /## Tools/);
+  assert.match(emulatedBody.messages[0].content, /noop/);
+  assert.deepEqual(emulated.responseTransform, {
+    contentPrefix: '',
+    reasoningPrefix: 'continue the plan',
+  });
+
+  const official = rewriteDeepSeekPrefixFetch('https://api.deepseek.com/chat/completions', init, [passThroughRegistry]);
   assert.equal(official.mode, 'official');
   assert.equal(official.input, 'https://api.deepseek.com/beta/chat/completions');
   assert.equal(JSON.parse(official.init.body).tools, undefined);
 
-  // A configured relay never touches a different endpoint.
-  const elsewhere = rewriteDeepSeekPrefixFetch('https://other.example.com/v1/chat/completions', init, [registry]);
-  assert.equal(elsewhere.changed, false);
-  assert.equal(elsewhere.input, 'https://other.example.com/v1/chat/completions');
-  assert.equal(elsewhere.init, init);
+  assert.equal(rewriteDeepSeekPrefixFetch('https://adapter.example.com/v1/files', init, [passThroughRegistry]).changed, false);
 });
 
-test('relay replays historical tool reasoning from tags and compatible aliases', () => {
+test('adapter replays historical tool reasoning from tags and compatible aliases', () => {
   const prefix = 'Answer: ';
-  const relay = 'https://relay.example.com/v1';
   const toolCalls = [{
     id: 'call-weather',
     type: 'function',
@@ -560,9 +577,11 @@ test('relay replays historical tool reasoning from tags and compatible aliases',
     headers: { 'x-deepseek-harness-session-id': 's' },
     body: JSON.stringify(body),
   };
-  const registry = new Map([['s', new Map([[prefix, { count: 1, relay }]])]]);
+  const registry = new Map([['s', new Map([[
+    prefix, { count: 1, removeNonOfficialTools: true },
+  ]])]]);
 
-  const rewritten = rewriteDeepSeekPrefixFetch(`${relay}/chat/completions`, init, [registry]);
+  const rewritten = rewriteDeepSeekPrefixFetch('https://adapter.example.com/v1/chat/completions', init, [registry]);
   const messages = JSON.parse(rewritten.init.body).messages;
   assert.deepEqual(messages[1], {
     role: 'assistant',
@@ -572,63 +591,44 @@ test('relay replays historical tool reasoning from tags and compatible aliases',
   });
   assert.equal(messages[3].reasoning, 'Summarize the tool result.');
   assert.equal(messages[3].reasoning_content, 'Summarize the tool result.');
-  assert.deepEqual(JSON.parse(rewritten.init.body).tools, body.tools);
+  assert.equal(JSON.parse(rewritten.init.body).tools, undefined);
 });
-test('an empty relay field treats any forwarded chat-completion endpoint as the relay', () => {
+
+test('active assistant prefix is detected on any non-official adapter address', () => {
   const prefix = 'Answer: ';
-  const body = {
-    messages: [{ role: 'user', content: 'hi' }, { role: 'assistant', content: prefix }],
-    tools: [{ type: 'function', function: { name: 'noop' } }],
-  };
-  const init = { method: 'POST', headers: { 'x-deepseek-harness-session-id': 's' }, body: JSON.stringify(body) };
-  const activated = new Map([['s', new Map([[prefix, 1]])]]);
+  const makeInit = content => ({
+    method: 'POST',
+    headers: { 'x-deepseek-harness-session-id': 's' },
+    body: JSON.stringify({
+      messages: [{ role: 'user', content: 'hi' }, { role: 'assistant', content }],
+      tools: [{ type: 'function', function: { name: 'noop' } }],
+    }),
+  });
+  const activated = new Map([['s', new Map([[
+    prefix, { count: 1, removeNonOfficialTools: false },
+  ]])]]);
 
-  const rewritten = rewriteDeepSeekPrefixFetch('https://relay.example.com/v1/chat/completions', init, [activated]);
-  assert.equal(rewritten.changed, true);
-  assert.equal(rewritten.mode, 'relay');
-  assert.equal(rewritten.input, 'https://relay.example.com/v1/chat/completions');
-  const rewrittenBody = JSON.parse(rewritten.init.body);
-  assert.deepEqual(rewrittenBody.tools, body.tools);
-  assert.deepEqual(rewrittenBody.messages.at(-1), { role: 'assistant', content: 'Answer: ', reasoning_content: '', prefix: true });
-
-  assert.equal(rewriteDeepSeekPrefixFetch('https://relay.example.com/v1/chat/completions', init, []).changed, false);
+  for (const endpoint of [
+    'https://first.example.com/v1/chat/completions',
+    'http://127.0.0.1:8080/chat/completions',
+  ]) {
+    const rewritten = rewriteDeepSeekPrefixFetch(endpoint, makeInit(prefix), [activated]);
+    assert.equal(rewritten.changed, true);
+    assert.equal(rewritten.mode, 'adapter');
+    assert.equal(rewritten.input, endpoint);
+    assert.deepEqual(JSON.parse(rewritten.init.body).tools, [
+      { type: 'function', function: { name: 'noop' } },
+    ]);
+  }
+  assert.equal(rewriteDeepSeekPrefixFetch(
+    'https://first.example.com/v1/chat/completions', makeInit('different'), [activated],
+  ).changed, false);
+  assert.equal(rewriteDeepSeekPrefixFetch(
+    'https://first.example.com/v1/chat/completions', makeInit(prefix), [],
+  ).changed, false);
 });
 
-test('the relay address accepts base and full endpoints while rejecting unusable input', () => {
-  assert.equal(normalizeRelayUrl(''), '');
-  assert.equal(normalizeRelayUrl('   '), '');
-  assert.equal(normalizeRelayUrl(' https://relay.example.com/v1/ '), 'https://relay.example.com/v1');
-  assert.equal(normalizeRelayUrl('https://relay.example.com'), 'https://relay.example.com');
-  assert.equal(normalizeRelayUrl('http://127.0.0.1:8080/beta/chat/completions'), 'http://127.0.0.1:8080/beta/chat/completions');
-  assert.throws(() => normalizeRelayUrl(), /文本/);
-  assert.throws(() => normalizeRelayUrl(null), /文本/);
-  assert.throws(() => normalizeRelayUrl(42), /文本/);
-  assert.throws(() => normalizeRelayUrl('relay.example.com'), /合法的 URL/);
-  assert.throws(() => normalizeRelayUrl('ftp://relay.example.com'), /中转地址必须使用/);
-  assert.throws(() => normalizeRelayUrl('https://user:pass@relay.example.com'), /用户名或密码/);
-  assert.throws(() => normalizeRelayUrl('https://relay example.com'), /空白字符/);
-  assert.throws(() => normalizeRelayUrl('https://relay.example.com/v1?token=abc'), /查询参数/);
-  assert.throws(() => normalizeRelayUrl('https://relay.example.com/v1#frag'), /查询参数/);
-});
-
-test('the relay address comes from the activation that matched the outgoing text', () => {
-  const stale = 'https://old-relay.example.com/v1';
-  const current = 'https://new-relay.example.com/v1';
-  const registry = new Map([['s', new Map([
-    ['AAAA', { count: 1, relay: stale }],
-    ['PREFIX', { count: 1, relay: current }],
-  ])]]);
-  const init = content => ({ headers: { 'x-deepseek-harness-session-id': 's' },
-    body: JSON.stringify({ messages: [{ role: 'assistant', content }], tools: [{ type: 'function' }] }) });
-  const matched = rewriteDeepSeekPrefixFetch(`${current}/chat/completions`, init('PREFIX'), [registry]);
-  assert.equal(matched.changed, true);
-  assert.equal(matched.mode, 'relay');
-  // Another activation's relay must not decide where this request may go.
-  assert.equal(rewriteDeepSeekPrefixFetch(`${stale}/chat/completions`, init('PREFIX'), [registry]).changed, false);
-  assert.equal(rewriteDeepSeekPrefixFetch('https://anywhere.example.com/v1/chat/completions', init('PREFIX'), [registry]).changed, false);
-});
-
-test('the installed fetch bridge rewrites only the activated relay prefill request', async () => {
+test('the installed fetch bridge rewrites only an activated adapter prefill request', async () => {
   resetFetchBridge();
   const previous = globalThis.fetch;
   const calls = [];
@@ -639,15 +639,15 @@ test('the installed fetch bridge rewrites only the activated relay prefill reque
     const init = { method: 'POST', headers: { 'x-deepseek-harness-session-id': 's' },
       body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }, { role: 'assistant', content: '<think>\ncontinue' }],
         tools: [{ type: 'function', function: { name: 'noop' } }] }) };
-    const release = controller.activate('s', '<think>\ncontinue', 'https://relay.example.com/v1/');
-    await globalThis.fetch('https://relay.example.com/v1/chat/completions', init);
+    const release = controller.activate('s', '<think>\ncontinue', { removeNonOfficialTools: true });
+    await globalThis.fetch('https://adapter.example.com/v1/chat/completions', init);
     assert.equal(calls.length, 1);
     const body = JSON.parse(calls[0].init.body);
     assert.equal(body.messages.at(-1).prefix, true);
-    assert.deepEqual(body.tools, [{ type: 'function', function: { name: 'noop' } }]);
+    assert.equal(body.tools, undefined);
 
     release();
-    await globalThis.fetch('https://relay.example.com/v1/chat/completions', init);
+    await globalThis.fetch('https://adapter.example.com/v1/chat/completions', init);
     assert.equal(calls[1].init, init);
 
     controller.dispose();
@@ -658,13 +658,71 @@ test('the installed fetch bridge rewrites only the activated relay prefill reque
   }
 });
 
-test('relay configuration drives prefix rewriting end to end for the routed provider', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'dsh-preset-relay-'));
+test('installed fetch bridge converts an emulated adapter response back to tool calls', async () => {
+  resetFetchBridge();
+  const previous = globalThis.fetch;
+  const calls = [];
+  const dsml = [
+    '<｜｜DSML｜｜ calls>',
+    '<｜｜DSML｜｜ invoke name="noop">',
+    '<｜｜DSML｜｜ parameter name="value" string="false">7</｜｜DSML｜｜ parameter>',
+    '</｜｜DSML｜｜ invoke>',
+    '</｜｜DSML｜｜ calls>',
+  ].join('\n');
+  globalThis.fetch = async (input, init) => {
+    calls.push({ input: String(input), init });
+    return new Response(JSON.stringify({
+      choices: [{
+        index: 0,
+        message: { role: 'assistant', content: dsml, reasoning_content: '' },
+        finish_reason: 'stop',
+      }],
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  try {
+    const controller = installDeepSeekBetaBridge({ effect: fn => fn() });
+    const release = controller.activate('s', 'Prefix: ', { toolCalls: true });
+    const response = await globalThis.fetch('https://adapter.example.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'x-deepseek-harness-session-id': 's', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        messages: [{ role: 'user', content: 'use a tool' }, { role: 'assistant', content: 'Prefix: ' }],
+        tools: [{ type: 'function', function: { name: 'noop', parameters: { type: 'object' } } }],
+        tool_choice: 'auto',
+      }),
+    });
+    const outgoing = JSON.parse(calls[0].init.body);
+    assert.equal(outgoing.tools, undefined);
+    assert.equal(outgoing.tool_choice, undefined);
+    assert.match(outgoing.messages[0].content, /## Tools/);
+
+    const data = await response.json();
+    assert.equal(data.choices[0].finish_reason, 'tool_calls');
+    assert.equal(data.choices[0].message.content, 'Prefix: ');
+    assert.equal(data.choices[0].message.tool_calls[0].function.name, 'noop');
+    assert.deepEqual(JSON.parse(data.choices[0].message.tool_calls[0].function.arguments), { value: 7 });
+
+    release();
+    controller.dispose();
+  } finally {
+    resetFetchBridge();
+    globalThis.fetch = previous;
+  }
+});
+
+
+test('adapter tool settings drive prefix rewriting end to end', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-preset-adapter-'));
   resetFetchBridge();
   const previous = globalThis.fetch;
   const posted = [], disposers = [], listeners = {};
   try {
-    globalThis.fetch = async (input, init) => { posted.push({ input: String(input), init }); return { ok: true, status: 200 }; };
+    globalThis.fetch = async (input, init) => {
+      posted.push({ input: String(input), init });
+      return new Response(JSON.stringify({ choices: [] }), {
+        status: 200, headers: { 'content-type': 'application/json' },
+      });
+    };
     const file = join(dir, 'state.json'), store = new PresetStore(file);
     await store.transaction(state => {
       state.presets.push({ id: 'p', name: 'Prefix', preset: {
@@ -681,63 +739,73 @@ test('relay configuration drives prefix rewriting end to end for the routed prov
       state.defaultPresetId = 'p';
       state.bindings.s = { enabled: true, presetId: 'p', characterId: null, values: {}, markers: {} };
       state.deepseekBetaPrefix = true;
-      state.prefixRelayUrl = 'https://relay.example.com/v1';
+      state.prefixToolCalls = true;
+      state.prefixNonOfficialRemoveTools = true;
     });
     const session = { id: 's', header: { agentPreset: 'standard' }, snapshotEvents: () => [] };
+    const nativeTools = [{ type: 'function', function: { name: 'noop', parameters: { type: 'object' } } }];
     const ctx = {
       sessions: { get: id => id === 's' ? session : undefined },
       on: (name, fn) => listeners[name] = fn,
       effect: fn => { const disposer = fn(); if (typeof disposer === 'function') disposers.push(disposer); return disposer; },
       webServer: { register: () => () => {} },
       llm: { stream: options => listeners['llm/stream'](options, async function* () {
-        await globalThis.fetch('https://relay.example.com/v1/chat/completions', {
+        await globalThis.fetch('https://adapter.example.com/v1/chat/completions', {
           method: 'POST',
           headers: { 'x-deepseek-harness-session-id': options.sessionId, 'content-type': 'application/json' },
           body: JSON.stringify({
-            model: 'relay-model',
+            model: 'adapter-model',
             messages: options.messages.map(message => ({
               role: message.role,
               content: message.content.map(block => block.type === 'text' ? block.text : '').join(''),
             })),
             thinking: { type: 'enabled' },
-            tools: [{ type: 'function', function: { name: 'noop', parameters: { type: 'object' } } }],
+            tools: nativeTools,
+            tool_choice: 'auto',
+            parallel_tool_calls: false,
           }),
         });
         yield { type: 'finish', reason: { kind: 'completed' } };
       }) },
     };
     await apply(ctx, { dataFile: file, agentPresetRoot: join(dir, '.agent-presets') });
-    const send = async provider => {
+    const send = async () => {
       const before = posted.length;
-      for await (const _ of ctx.llm.stream({ sessionId: 's', provider, model: 'relay-model',
-        messages: [msg('u', 'user', 'hi')] })) {}
+      for await (const _ of ctx.llm.stream({
+        sessionId: 's',
+        provider: 'plugin-provided-adapter',
+        model: 'adapter-model',
+        messages: [msg('u', 'user', 'hi')],
+      })) {}
       assert.equal(posted.length, before + 1);
       return JSON.parse(posted.at(-1).init.body);
     };
-    const relax = async relay => {
-      await store.transaction(state => { state.prefixRelayUrl = relay; state.revision++; });
+    const configure = async values => {
+      await store.transaction(state => {
+        Object.assign(state, values);
+        state.revision++;
+      });
     };
 
-    // A configured relay extends the rewrite to the provider routed through it.
-    const configured = await send('relay-provider');
-    assert.deepEqual(configured.messages.at(-1), { role: 'assistant', content: '', reasoning_content: '继续', prefix: true });
-    assert.deepEqual(configured.tools, [{ type: 'function', function: { name: 'noop', parameters: { type: 'object' } } }]);
+    const emulated = await send();
+    assert.deepEqual(emulated.messages.at(-1), {
+      role: 'assistant', content: '', reasoning_content: '继续', prefix: true,
+    });
+    assert.equal(emulated.tools, undefined);
+    assert.match(emulated.messages[0].content, /## Tools/);
 
-    // An empty relay keeps the official provider's non-official endpoint on the relay path.
-    await relax('');
-    const blankOfficial = await send('deepseek-official');
-    assert.deepEqual(blankOfficial.messages.at(-1), { role: 'assistant', content: '', reasoning_content: '继续', prefix: true });
-    assert.deepEqual(blankOfficial.tools, [{ type: 'function', function: { name: 'noop', parameters: { type: 'object' } } }]);
+    await configure({ prefixToolCalls: false, prefixNonOfficialRemoveTools: false });
+    const passedThrough = await send();
+    assert.deepEqual(passedThrough.tools, nativeTools);
+    assert.equal(passedThrough.tool_choice, 'auto');
+    assert.equal(passedThrough.parallel_tool_calls, false);
+    assert.doesNotMatch(passedThrough.messages[0].content, /## Tools/);
 
-    // Other providers stay untouched while the relay field is empty.
-    const untouched = await send('other-provider');
-    assert.equal(untouched.messages.at(-1).prefix, undefined);
-
-    // A hand-edited, unusable relay must not widen into a wildcard.
-    await relax('ftp://relay.example.com/v1');
-    const malformed = await send('relay-provider');
-    assert.equal(malformed.messages.at(-1).prefix, undefined);
-    assert.deepEqual(malformed.tools, [{ type: 'function', function: { name: 'noop', parameters: { type: 'object' } } }]);
+    await configure({ prefixNonOfficialRemoveTools: true });
+    const removed = await send();
+    assert.equal(removed.tools, undefined);
+    assert.equal(removed.tool_choice, undefined);
+    assert.equal(removed.parallel_tool_calls, undefined);
   } finally {
     for (const dispose of disposers.reverse()) { try { dispose(); } catch {} }
     resetFetchBridge();

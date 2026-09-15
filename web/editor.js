@@ -97,12 +97,18 @@ async function reload(id) {
   $('char').value = binding.values?.char ?? 'Assistant';
   $('markers').value = JSON.stringify(binding.markers ?? {}, null, 2);
   $('deepseek-beta-prefix').checked = state.deepseekBetaPrefix === true;
-  $('prefix-relay-url').value = state.prefixRelayUrl ?? '';
+  $('prefix-tool-calls').checked = state.prefixToolCalls === true;
+  $('prefix-nonofficial-remove-tools').checked = state.prefixNonOfficialRemoveTools !== false;
+  syncPrefixToolControls();
   renderAutoModes();
   renderToolModes(previousToolMode);
   loadDraft(id ?? state.selectedPresetId ?? binding.presetId ?? '');
   updateSessionNote();
   status('已加载');
+}
+
+function syncPrefixToolControls() {
+  $('prefix-nonofficial-remove-tools').disabled = $('prefix-tool-calls').checked;
 }
 
 async function refreshPrefillWarning() {
@@ -113,11 +119,18 @@ async function refreshPrefillWarning() {
     const active = result.assistantPrefix?.active === true;
     $('prefill-warning').hidden = !active;
     if (!active) return;
-    $('prefill-warning-text').textContent = state.deepseekBetaPrefix === true ?
-      state.prefixRelayUrl ?
-        `此预设的最终注入消息是 assistant，属于预填充续写。预填充自动兼容已开启：命中 ${state.prefixRelayUrl} 的请求只做最小改写并保留工具原样发送。` :
-        '此预设的最终注入消息是 assistant，属于预填充续写。预填充自动兼容已开启：官方地址会移除工具字段，deepseek-official 指向的非官方地址按中转方式保留工具。' :
-      '此预设的最终注入消息是 assistant，属于预填充续写。请使用支持 assistant prefix 的接口；可在下方开启预填充自动兼容，或填写自定义中转地址。';
+    if (state.deepseekBetaPrefix === true) {
+      const tools = state.prefixToolCalls ?
+        '工具调用会通过 DSML 转换并恢复为标准 tool_calls。' :
+        state.prefixNonOfficialRemoveTools !== false ?
+          '官方与非官方接口都会移除原生工具字段。' :
+          '官方 Beta 会移除原生工具字段，非官方接口会将其原样发送。';
+      $('prefill-warning-text').textContent =
+        '此预设的最终注入消息是 assistant，属于预填充续写。官方地址会切换到 Beta，非官方适配器地址保持不变。' + tools;
+    } else {
+      $('prefill-warning-text').textContent =
+        '此预设的最终注入消息是 assistant，属于预填充续写。请使用支持 assistant prefix 的接口，或在下方开启预填充自动兼容。';
+    }
   } catch {
     if (recordId === selectedId) $('prefill-warning').hidden = true;
   }
@@ -315,7 +328,11 @@ $('prefill').oninput = () => {
   markDirty();
 };
 $('deepseek-beta-prefix').onchange = () => status('预填充接口设置尚未保存');
-$('prefix-relay-url').oninput = () => status('预填充接口设置尚未保存');
+$('prefix-tool-calls').onchange = () => {
+  syncPrefixToolControls();
+  status('预填充接口设置尚未保存');
+};
+$('prefix-nonofficial-remove-tools').onchange = () => status('预填充接口设置尚未保存');
 for (const [id, delta] of [['up', -1], ['down', 1]]) $(id).onclick = () => {
   const items = order();
   const index = items.findIndex(item => item.identifier === selectedPrompt);
@@ -403,11 +420,11 @@ $('save-deepseek-beta').onclick = guard(async () => {
   await api({
     action: 'save-deepseek-beta',
     enabled: $('deepseek-beta-prefix').checked,
-    relayUrl: $('prefix-relay-url').value,
+    toolCalls: $('prefix-tool-calls').checked,
+    removeNonOfficialTools: $('prefix-nonofficial-remove-tools').checked,
   });
   await reload(selectedId);
-  const relay = $('prefix-relay-url').value.trim();
-  status(`预填充接口设置已保存${relay ? `（中转：${relay}）` : '（中转留空，非官方接口自动按中转处理）'}`);
+  status('预填充接口设置已保存');
 });
 $('save-auto-modes').onclick = guard(async () => {
   const modes = [...$('auto-mode-list').querySelectorAll('input[data-mode]:checked')].map(input => input.dataset.mode);
