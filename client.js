@@ -30,10 +30,13 @@ window.__ModuleLoader__.load({
 
     const Frame = props => {
       useDshResizeLock();
+      const currentSessionId = typeof props.useSessions === 'function'
+        ? props.useSessions(state => state.current)
+        : undefined;
+      const sessionId = props.sessionId ?? props.injected?.sessionId ?? currentSessionId ?? '';
       return React.createElement('iframe', {
         title: '预设查看与编辑',
-        src: '/preset-enhance?sessionId=' +
-          encodeURIComponent(props.sessionId ?? props.injected?.sessionId ?? ''),
+        src: '/preset-enhance?sessionId=' + encodeURIComponent(sessionId),
         style: { width: '100%', height: '100%', minHeight: '640px', border: 0 },
       });
     };
@@ -46,7 +49,7 @@ window.__ModuleLoader__.load({
     return { inject: ['slots', 'conversation'], apply(ctx) {
       ctx.slots.inject('conversation.view', () => ctx.slots.register({
         name: 'conversation.view', id: 'preset-enhance-editor', order: 25,
-        label: '预设', inject: sessionId => ({ sessionId }),
+        label: '预设',
       }, Frame));
       ctx.slots.inject('main', () => ctx.slots.register({
         name: 'main', key: 'preset-enhance-editor',

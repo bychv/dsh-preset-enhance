@@ -203,9 +203,18 @@ test('client registers the workbench and locks both DSH resize handles while mou
       ['conversation.view', 'preset-enhance-editor'], ['main', 'preset-enhance-editor'], ['sidebar.panellist', 'preset-enhance-editor'],
     ]);
 
-    registered.find(entry => entry.options.name === 'conversation.view').component({ sessionId: 's' });
-    const frame = registered.find(entry => entry.options.name === 'main').component({ sessionId: 's' });
+    const conversationEntry = registered.find(entry => entry.options.name === 'conversation.view');
+    assert.equal(conversationEntry.options.inject, undefined);
+    const conversationFrame = conversationEntry.component({
+      sessionId: 'conversation-session',
+      useSessions(selector) { return selector({ current: 'other-session' }); },
+    });
+    assert.equal(conversationFrame.props.src, '/preset-enhance?sessionId=conversation-session');
+    const frame = registered.find(entry => entry.options.name === 'main').component({
+      useSessions(selector) { return selector({ current: 'current-session' }); },
+    });
     assert.equal(frame.type, 'iframe');
+    assert.equal(frame.props.src, '/preset-enhance?sessionId=current-session');
     assert.equal(rootAttributes.has('data-preset-enhance-workbench'), true);
     assert.equal(styles.length, 1);
     assert.match(styles[0].textContent, /data-side="sidebar"/);
