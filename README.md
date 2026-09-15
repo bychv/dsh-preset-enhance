@@ -55,6 +55,8 @@ dsh plugin --profile web add github:bychv/dsh-preset-enhance#alpha
 - **非官方适配器地址**：直接处理适配器实际请求的 Chat Completion 地址，不改写地址，也不需要在工作台重复填写。关闭 DSML 处理时，可用“非官方接口移除原生工具字段”开关选择移除或原样发送工具字段。
 - **工具调用处理开启**：对官方和非官方地址都生效。插件把可用工具定义注入 system 提示，把历史 `tool_calls` 和工具结果转换为 DSML，再移除原生工具字段。模型返回的 DSML 会在流式或非流式响应中恢复为标准 `tool_calls`，交回 DSH 执行；工具结果中的常见 base64 图片也会转换为兼容的图片内容块。
 
+“工具调用后继续请求的预填充”默认继承原预设，也可设置独立提示词（支持变量宏与 `<think>` 前缀）。开启预填充自动兼容时，该设置仅替换同一轮工具执行后继续请求的末条 assistant 预填充；新一轮用户消息仍使用原预设。自定义文本留空或展开为空时继承原预设。设置全局保存，修改后从下一次请求生效。
+
 普通请求、非预填充请求和没有命中当前会话末条 assistant 前缀的请求不受影响。接口要求见 [DeepSeek 对话前缀续写文档](https://api-docs.deepseek.com/zh-cn/guides/chat_prefix_completion)。
 
 ## 工具预设

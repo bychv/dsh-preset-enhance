@@ -417,7 +417,7 @@ test('saved imports are global and the last library selection survives reopening
     const first = await post({ revision: 0, action: 'save', name: 'A', preset });
     const second = await post({ revision: 1, action: 'save', name: 'B', preset });
     await post({ revision: 2, action: 'select-preset', id: first.id });
-    await post({ revision: 3, action: 'save-deepseek-beta', enabled: true, toolCalls: true, removeNonOfficialTools: false });
+    await post({ revision: 3, action: 'save-deepseek-beta', enabled: true, toolCalls: true, removeNonOfficialTools: false, postToolPrefixMode: 'custom', postToolPrefixText: 'Review results' });
 
     const reopened = await new PresetStore(file).read();
     assert.deepEqual(reopened.presets.map(item => item.name), ['A', 'B']);
@@ -425,6 +425,8 @@ test('saved imports are global and the last library selection survives reopening
     assert.equal(reopened.defaultPresetId, first.id);
     assert.equal(reopened.deepseekBetaPrefix, true);
     assert.equal(reopened.prefixToolCalls, true);
+    assert.equal(reopened.postToolPrefixMode, 'custom');
+    assert.equal(reopened.postToolPrefixText, 'Review results');
     assert.equal(reopened.prefixNonOfficialRemoveTools, false);
     assert.equal(Object.hasOwn(reopened, 'prefixRelayUrl'), false);
     assert.notEqual(first.id, second.id);
@@ -438,6 +440,13 @@ test('saved imports are global and the last library selection survives reopening
     assert.equal(rejected.statusCode, 400);
     assert.match(rejected.payload.error, /工具移除开关/);
     assert.equal((await new PresetStore(file).read()).prefixNonOfficialRemoveTools, false);
+
+    for (const invalid of [{ postToolPrefixMode: 'unknown' }, { postToolPrefixText: null }]) {
+      const response = await postRaw({ revision: reopened.revision,
+        action: 'save-deepseek-beta', enabled: true, ...invalid });
+      assert.equal(response.statusCode, 400);
+      assert.equal((await new PresetStore(file).read()).postToolPrefixText, 'Review results');
+    }
 
     const external = new PresetStore(file);
     await external.transaction(state => {
@@ -847,13 +856,13 @@ test('adapter tool settings drive prefix rewriting end to end', async () => {
       }) },
     };
     await apply(ctx, { dataFile: file, agentPresetRoot: join(dir, '.agent-presets') });
-    const send = async () => {
+    const send = async (messages = [msg('u', 'user', 'hi')]) => {
       const before = posted.length;
       for await (const _ of ctx.llm.stream({
         sessionId: 's',
         provider: 'plugin-provided-adapter',
         model: 'adapter-model',
-        messages: [msg('u', 'user', 'hi')],
+        messages,
       })) {}
       assert.equal(posted.length, before + 1);
       return JSON.parse(posted.at(-1).init.body);
@@ -871,6 +880,26 @@ test('adapter tool settings drive prefix rewriting end to end', async () => {
     });
     assert.equal(emulated.tools, undefined);
     assert.match(emulated.messages[0].content, /## Tools/);
+
+    const toolHistory = [msg('u', 'user', 'hi'), {
+      ...msg('result', 'user', 'tool output'), source: { kind: 'tool' },
+    }];
+    assert.equal((await send(toolHistory)).messages.at(-1).reasoning_content, '继续');
+    await configure({ postToolPrefixMode: 'custom', postToolPrefixText: '<think>\nReview {{lastmessage}}' });
+    assert.equal((await new PresetStore(file).read()).postToolPrefixText, '<think>\nReview {{lastmessage}}');
+    assert.equal((await send(toolHistory)).messages.at(-1).reasoning_content, 'Review tool output');
+    assert.equal((await send([...toolHistory, {
+      ...msg('result2', 'user', 'second output'), source: { kind: 'tool' },
+    }])).messages.at(-1).reasoning_content, 'Review second output');
+    assert.equal((await send([...toolHistory, msg('new', 'user', 'next turn')])).messages.at(-1).reasoning_content, '继续');
+    await configure({ postToolPrefixText: 'Updated continuation' });
+    assert.equal((await send(toolHistory)).messages.at(-1).content, 'Updated continuation');
+    await configure({ deepseekBetaPrefix: false });
+    assert.equal((await send(toolHistory)).messages.at(-1).content, '<think>\n继续');
+    await configure({ deepseekBetaPrefix: true, postToolPrefixText: '' });
+    assert.equal((await send(toolHistory)).messages.at(-1).reasoning_content, '继续');
+    await configure({ postToolPrefixMode: 'inherit', postToolPrefixText: 'unused' });
+    assert.equal((await send(toolHistory)).messages.at(-1).reasoning_content, '继续');
 
     await configure({ prefixToolCalls: false, prefixNonOfficialRemoveTools: false });
     const passedThrough = await send();

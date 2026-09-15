@@ -100,6 +100,8 @@ async function reload(id) {
   $('deepseek-beta-prefix').checked = state.deepseekBetaPrefix === true;
   $('prefix-tool-calls').checked = state.prefixToolCalls === true;
   $('prefix-nonofficial-remove-tools').checked = state.prefixNonOfficialRemoveTools !== false;
+  $('post-tool-prefix-mode').value = state.postToolPrefixMode ?? 'inherit';
+  $('post-tool-prefix-text').value = state.postToolPrefixText ?? '';
   syncPrefixToolControls();
   renderAutoModes();
   renderToolModes(previousToolMode);
@@ -109,6 +111,7 @@ async function reload(id) {
 }
 
 function syncPrefixToolControls() {
+  $('post-tool-prefix-field').hidden = $('post-tool-prefix-mode').value !== 'custom';
   $('prefix-nonofficial-remove-tools').disabled = $('prefix-tool-calls').checked;
 }
 
@@ -328,6 +331,11 @@ $('prefill').oninput = () => {
   preset.assistant_prefill = $('prefill').value;
   markDirty();
 };
+$('post-tool-prefix-mode').onchange = () => {
+  syncPrefixToolControls();
+  status('预填充接口设置尚未保存');
+};
+$('post-tool-prefix-text').oninput = () => status('预填充接口设置尚未保存');
 $('deepseek-beta-prefix').onchange = () => status('预填充接口设置尚未保存');
 $('prefix-tool-calls').onchange = () => {
   syncPrefixToolControls();
@@ -429,6 +437,8 @@ $('bind').onclick = guard(async () => {
 $('save-deepseek-beta').onclick = guard(async () => {
   await api({
     action: 'save-deepseek-beta',
+    postToolPrefixMode: $('post-tool-prefix-mode').value,
+    postToolPrefixText: $('post-tool-prefix-text').value,
     enabled: $('deepseek-beta-prefix').checked,
     toolCalls: $('prefix-tool-calls').checked,
     removeNonOfficialTools: $('prefix-nonofficial-remove-tools').checked,

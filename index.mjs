@@ -12,7 +12,7 @@ export const AGENT_PRESET_ID = 'st-preset';
 const BASE = '/preset-enhance';
 const DSH_SYSTEM_PROMPT = '@deepseek-ai/dsh-system-prompt';
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
-const PRESET_COMPILER_VERSION = 2;
+const PRESET_COMPILER_VERSION = 3;
 const ownGet = (object, key) => Object.hasOwn(object, key) ? object[key] : undefined;
 const assign = (object, key, value) => Object.defineProperty(object, key, { value, writable: true, enumerable: true, configurable: true });
 const isRecord = value => value && typeof value === 'object' && !Array.isArray(value);
@@ -70,11 +70,13 @@ export async function apply(ctx, config = {}) {
         if (!binding?.enabled) return null;
         const record = current.presets.find(p => p.id === binding.presetId);
         if (!record) throw new Error('当前会话启用的预设不存在');
-        const key = digest({ compiler: PRESET_COMPILER_VERSION, messages: history, preset: record, binding });
+        const postToolPrefix = current.deepseekBetaPrefix && current.postToolPrefixMode === 'custom'
+          ? current.postToolPrefixText : undefined;
+        const key = digest({ compiler: PRESET_COMPILER_VERSION, messages: history, preset: record, binding, postToolPrefix });
         const prior = ownGet(current.sessions, options.sessionId);
         if (prior?.key === key) return prior.result;
         const result = compilePreset(record.preset, history, {
-          ...binding, seed: key, local: prior?.result.local, global: current.global,
+          ...binding, seed: key, local: prior?.result.local, global: current.global, postToolPrefix,
         });
         options.signal?.throwIfAborted();
         current.global = result.global;
@@ -143,6 +145,8 @@ export async function apply(ctx, config = {}) {
             presets: state.presets,
             binding: ownGet(state.bindings, sessionId) ?? fallback ?? { enabled: false },
             selectedPresetId: state.selectedPresetId ?? modeDefault?.id ?? null,
+            postToolPrefixMode: state.postToolPrefixMode,
+            postToolPrefixText: state.postToolPrefixText,
             deepseekBetaPrefix: state.deepseekBetaPrefix === true,
             prefixToolCalls: state.prefixToolCalls === true,
             prefixNonOfficialRemoveTools: state.prefixNonOfficialRemoveTools !== false,
@@ -240,6 +244,14 @@ export async function apply(ctx, config = {}) {
             if (body.removeNonOfficialTools !== undefined) {
               if (typeof body.removeNonOfficialTools !== 'boolean') throw new Error('非官方接口工具移除开关值无效');
               state.prefixNonOfficialRemoveTools = body.removeNonOfficialTools;
+            }
+            if (body.postToolPrefixMode !== undefined) {
+              if (!['inherit', 'custom'].includes(body.postToolPrefixMode)) throw new Error('工具调用后预填充模式无效');
+              state.postToolPrefixMode = body.postToolPrefixMode;
+            }
+            if (body.postToolPrefixText !== undefined) {
+              if (typeof body.postToolPrefixText !== 'string') throw new Error('工具调用后预填充必须为文本');
+              state.postToolPrefixText = body.postToolPrefixText;
             }
             state.deepseekBetaPrefix = body.enabled;
             state.revision++;
