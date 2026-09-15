@@ -30,3 +30,5 @@
 .package-tools{border-top:1px dashed #2a3942;margin-top:12px;padding-top:10px}
 .package-tools button{margin-top:8px}
 @media(max-width:760px){.group-actions{margin-left:0}}
+.tool-auto-save{margin:8px 0}
+.tool-auto-save-hint{display:block;letter-spacing:0;color:#8da2ae;font-size:11px;line-height:1.5;margin-top:2px}

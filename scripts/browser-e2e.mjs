@@ -420,6 +420,119 @@ try {
   const restored = await evaluate(`fetch('/preset-enhance/api').then(r => r.json()).then(s => s.modeToolPolicies[${JSON.stringify(modeSwitch)}] ?? null)`);
   check('restored the mode policy to all-enabled', restored !== null && Object.values(restored).every(value => value === true), JSON.stringify(restored));
 
+  // 12. tool-switch persistence: unrelated saves keep the draft, reload remembers the mode
+  const persistMode = await evaluate(`(() => {
+    const select = document.getElementById('tool-mode');
+    const target = [...select.options].find(o => o.value === 'ptc') ?? select.options[0];
+    select.value = target.value;
+    select.dispatchEvent(new Event('change'));
+    return target.value;
+  })()`);
+  await settle(1400);
+  const uncheckedTools = await evaluate(`(() => {
+    const boxes = [...document.querySelectorAll('#tool-list input[data-tool]')].filter(box => box.checked).slice(0, 2);
+    for (const box of boxes) box.click();
+    return boxes.map(box => box.dataset.tool);
+  })()`);
+  await settle(600);
+  await evaluate(`document.getElementById('save-deepseek-beta').click()`);
+  await settle(2000);
+  const afterUnrelated = await evaluate(`(() => {
+    const boxes = [...document.querySelectorAll('#tool-list input[data-tool]')];
+    return { off: boxes.filter(box => !box.checked).map(box => box.dataset.tool), status: document.getElementById('status').textContent };
+  })()`);
+  check('an unrelated save keeps the unsaved tool-switch draft',
+    JSON.stringify([...afterUnrelated.off].sort()) === JSON.stringify([...uncheckedTools].sort()) && /尚未保存/.test(afterUnrelated.status),
+    `off=[${afterUnrelated.off.join(',')}] status=${afterUnrelated.status}`);
+  await evaluate(`document.getElementById('save-tools').click()`);
+  await settle(2200);
+  const persistedPolicy = await evaluate(`fetch('/preset-enhance/api').then(r => r.json()).then(s => s.modeToolPolicies[${JSON.stringify(persistMode)}] ?? null)`);
+  const persistedOff = Object.entries(persistedPolicy ?? {}).filter(([, value]) => value === false).map(([name]) => name);
+  check('保存工具开关 persists exactly the unchecked tools',
+    uncheckedTools.length > 0 && uncheckedTools.every(name => persistedPolicy?.[name] === false) && persistedOff.length === uncheckedTools.length,
+    `${persistMode}: off=[${persistedOff.join(',')}]`);
+  const persistReload = once('Page.loadEventFired');
+  await send('Page.reload', {});
+  await persistReload;
+  await waitReady();
+  await settle(2200);
+  const afterPersistReload = await evaluate(`(() => {
+    const boxes = [...document.querySelectorAll('#tool-list input[data-tool]')];
+    return { mode: document.getElementById('tool-mode').value, off: boxes.filter(box => !box.checked).map(box => box.dataset.tool) };
+  })()`);
+  check('a page reload remembers the configured mode and renders its saved switches',
+    afterPersistReload.mode === persistMode &&
+    JSON.stringify([...afterPersistReload.off].sort()) === JSON.stringify([...uncheckedTools].sort()),
+    `mode=${afterPersistReload.mode} off=[${afterPersistReload.off.join(',')}]`);
+
+  // 13. auto-save switch: one edit = one request, no manual save; OFF keeps the draft behaviour
+  const hasAutoSave = await evaluate(`!!document.getElementById('tool-auto-save')`);
+  if (hasAutoSave) {
+    await evaluate(`(() => {
+      if (!window.__origFetch) window.__origFetch = window.fetch;
+      window.__apiPosts = [];
+      window.fetch = (input, init = {}) => {
+        const url = typeof input === 'string' ? input : input?.url ?? '';
+        if (String(init.method ?? 'GET').toUpperCase() === 'POST' && url.includes('/preset-enhance/api')) {
+          try { window.__apiPosts.push(JSON.parse(init.body).action); } catch { window.__apiPosts.push('unknown'); }
+        }
+        return window.__origFetch(input, init);
+      };
+      const box = document.getElementById('tool-auto-save');
+      if (box.checked) box.click();
+      return box.checked;
+    })()`);
+    await settle(500);
+    await evaluate(`document.getElementById('tool-auto-save').click()`);
+    await settle(500);
+    await evaluate(`window.__apiPosts = []`);
+    const autoTarget = await evaluate(`(() => {
+      const box = [...document.querySelectorAll('#tool-list input[data-tool]')].find(item => item.checked);
+      box.click();
+      return box.dataset.tool;
+    })()`);
+    await settle(2200);
+    const autoPosts = await evaluate(`window.__apiPosts.slice()`);
+    const autoPolicy = await evaluate(`fetch('/preset-enhance/api').then(r => r.json()).then(s => s.modeToolPolicies[${JSON.stringify(persistMode)}] ?? null)`);
+    const autoStatus = await evaluate(`document.getElementById('status').textContent`);
+    check('auto-save persists a single toggle without 保存工具开关',
+      autoPosts.filter(action => action === 'save-mode-tools' || action === 'save-session-tools').length === 1 &&
+      autoPolicy?.[autoTarget] === false,
+      `${autoTarget}: posts=[${autoPosts.join(',')}] saved=${autoPolicy?.[autoTarget]} status=${autoStatus}`);
+    await evaluate(`window.__apiPosts = []`);
+    await evaluate(`(() => { for (const box of [...document.querySelectorAll('#tool-list input[data-tool]')].slice(0, 4)) box.click(); })()`);
+    await settle(2200);
+    const burstPosts = await evaluate(`window.__apiPosts.slice()`);
+    check('rapid edits coalesce into a single auto-save request',
+      burstPosts.filter(action => action.startsWith('save-')).length === 1, `posts=[${burstPosts.join(',')}]`);
+    await evaluate(`(() => { const box = document.getElementById('tool-auto-save'); if (box.checked) box.click(); })()`);
+    await settle(400);
+    await evaluate(`window.__apiPosts = []`);
+    await evaluate(`(() => { document.querySelector('#tool-list input[data-tool]').click(); })()`);
+    await settle(1800);
+    const offPosts = await evaluate(`window.__apiPosts.slice()`);
+    const offStatus = await evaluate(`document.getElementById('status').textContent`);
+    check('auto-save OFF keeps the manual draft behaviour',
+      offPosts.length === 0 && /尚未保存/.test(offStatus), `posts=[${offPosts.join(',')}] status=${offStatus}`);
+    await evaluate(`document.getElementById('select-all-tools').click()`);
+    await settle(400);
+    await evaluate(`document.getElementById('save-tools').click()`);
+    await settle(2000);
+    const autoReload = once('Page.loadEventFired');
+    await send('Page.reload', {});
+    await autoReload;
+    await waitReady();
+    await settle(1800);
+    const autoPersisted = await evaluate(`(() => {
+      const box = document.getElementById('tool-auto-save');
+      return { checked: box?.checked ?? null, stored: localStorage.getItem('dsh-preset-enhance.tool-auto-save') };
+    })()`);
+    check('auto-save switch state is UI-local and off after being turned off',
+      autoPersisted.checked === false, JSON.stringify(autoPersisted));
+  } else {
+    check('auto-save switch exists', false, 'no #tool-auto-save in the tool card');
+  }
+
   const summary = { verified: results.filter(item => item.pass).length, falsified: results.filter(item => !item.pass).length, results };
   writeFileSync(join(OUT, 'browser-e2e.json'), JSON.stringify(summary, null, 2));
   console.log(`\n${summary.verified} verified / ${summary.falsified} falsified`);

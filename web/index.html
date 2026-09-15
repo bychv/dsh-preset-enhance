@@ -14,6 +14,7 @@
 <div class="row"><label>配置范围<select id="tool-scope"><option value="mode">模式默认</option><option value="session">当前会话覆盖</option></select></label><label>DSH 模式<select id="tool-mode"></select></label><label>工具预设<select id="tool-preset" aria-label="工具预设"></select></label><button id="tool-preset-new">新建</button><button id="tool-preset-copy">复制</button><button id="tool-preset-rename">重命名</button><button id="tool-preset-delete" class="danger">删除</button><button id="inherit-tools">恢复继承</button></div>
 <p id="tool-preset-refs" class="muted"></p>
 <div class="row"><button id="select-all-tools">全选</button><button id="clear-all-tools">全不选</button><button id="manage-groups" aria-expanded="false">管理分组</button><button id="tool-tabs-toggle" aria-expanded="true">收起标签栏</button></div>
+<label class="switch-row tool-auto-save"><span>自动保存工具开关<span id="tool-auto-save-hint" class="tool-auto-save-hint">开启后工具开关改动即时生效；分组名称、排序与成员结构改动仍需“保存分组”。</span></span><span class="switch"><input type="checkbox" id="tool-auto-save" aria-label="自动保存工具开关" aria-describedby="tool-auto-save-hint"><span class="slider" aria-hidden="true"></span></span></label>
 <p id="tool-note" class="muted"></p>
 <div id="unresolved-tools" class="unresolved-list" hidden></div>
 <div id="tool-tab-area">

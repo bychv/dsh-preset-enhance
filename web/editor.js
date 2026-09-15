@@ -10,7 +10,12 @@ function blank() {
   };
 }
 function status(text, error = false) {
-  $('status').textContent = text;
+  // 无关的保存/刷新不再丢弃未保存的工具草稿，因此成功提示需要附带待保存提醒。
+  const pending = [];
+  if (toolDraft.dirty) pending.push('工具开关尚未保存');
+  if (groupsDirty) pending.push('工具分组尚未保存');
+  const suffix = !error && pending.length && !text.includes('尚未保存') ? ` · ${pending.join('；')}` : '';
+  $('status').textContent = `${text}${suffix}`;
   $('status').className = error ? 'error' : '';
 }
 function updateDefaultButton() {
@@ -32,14 +37,19 @@ function markDirty() {
   status('草稿未保存');
   updateDefaultButton();
 }
-async function api(body) {
+async function api(body, options = {}) {
   const res = await fetch(`/preset-enhance/api?sessionId=${encodeURIComponent(sessionId)}`, body ? {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ revision: state.revision, ...body }),
+    ...(options.keepalive === true ? { keepalive: true } : {}),
   } : {});
   const result = await res.json();
-  if (!res.ok) throw new Error(result.error ?? '请求失败');
+  if (!res.ok) {
+    const error = new Error(result.error ?? '请求失败');
+    error.status = res.status;
+    throw error;
+  }
   return result;
 }
 function guard(fn) {
@@ -110,7 +120,7 @@ async function reload(id) {
   $('post-tool-prefix-text').value = state.postToolPrefixText ?? '';
   syncPrefixToolControls();
   renderAutoModes();
-  discardToolDrafts();
+  syncDraftsWithState();
   renderToolModes(previousToolMode);
   loadDraft(id ?? state.selectedPresetId ?? binding.presetId ?? '');
   updateSessionNote();
@@ -169,11 +179,20 @@ function renderAutoModes() {
 /* ---------- 工具预设、分组标签与草稿模型 ---------- */
 const TOOL_TABS_COLLAPSED_KEY = 'dsh-preset-enhance.tool-tabs-collapsed';
 const TOOL_CONTENT_OPEN_KEY = 'dsh-preset-enhance.tool-group-content-open';
+const TOOL_LAST_MODE_KEY = 'dsh-preset-enhance.tool-last-mode';
+const TOOL_AUTO_SAVE_KEY = 'dsh-preset-enhance.tool-auto-save';
+const TOOL_AUTO_SAVE_DELAY = 400;
 const TOOL_PRESET_PREFIX = 'preset:';
 const toolActiveGroupKey = modeId => `dsh-preset-enhance.tool-active-group:${modeId}`;
 const compactToolTabs = window.matchMedia?.('(max-width:760px)') ?? { matches: false, addEventListener() {} };
 
 let toolDraft = { key: '', policy: {}, dirty: false };
+let toolDraftVersion = 0;
+let autoSaveTimer = null;
+let autoSaveChain = Promise.resolve();
+let autoSaveInFlight = false;
+let autoSaveInFlightVersion = -1;
+let keepaliveFlushedVersion = -1;
 let groupDraft = [];
 let groupsDirty = false;
 let groupPageOpen = false;
@@ -249,31 +268,162 @@ function toolContext() {
 function loadToolDraft(force) {
   const { sessionScope, modeId } = toolContext();
   const key = `${sessionScope ? 'session' : 'mode'}:${modeId}`;
-  if (force || toolDraft.key !== key) {
+  if (force && toolDraft.dirty && toolDraft.key === key) {
+    // 保留尚未保存的草稿：无关的 reload()（保存预设、保存接口设置等）不得丢弃用户的开关改动。
+  } else if (force || toolDraft.key !== key) {
     toolDraft = { key, policy: effectiveToolPolicy(modeId, sessionScope), dirty: false };
   }
   toolView.sessionScope = sessionScope;
   toolView.modeId = modeId;
 }
-function discardToolDrafts() {
+function resetToolDraft() {
   toolDraft = { key: '', policy: {}, dirty: false };
+}
+function resetGroupDraft() {
   groupDraft = structuredClone(state.toolGroups ?? []);
   groupsDirty = false;
   groupEditorModes.clear();
 }
+function syncDraftsWithState() {
+  // reload() 之后刷新基线，但保留仍然脏的草稿，避免静默丢弃。
+  if (!toolDraft.dirty) resetToolDraft();
+  if (!groupsDirty) resetGroupDraft();
+}
 function markToolDirty() {
   toolDraft.dirty = true;
+  toolDraftVersion++;
   status('工具开关草稿尚未保存');
+  scheduleAutoSave();
 }
 function markGroupsDirty() {
   groupsDirty = true;
   status('工具分组草稿尚未保存');
 }
+function presetDiscardOkay() {
+  return !dirty || confirm('放弃尚未保存的预设草稿？');
+}
 function toolDiscardOkay() {
-  return !toolDraft.dirty || confirm('放弃尚未保存的工具开关草稿？');
+  if (!toolDraft.dirty) return true;
+  if (!confirm('放弃尚未保存的工具开关草稿？')) return false;
+  resetToolDraft();
+  return true;
 }
 function groupDiscardOkay() {
-  return !groupsDirty || confirm('放弃尚未保存的工具分组草稿？');
+  if (!groupsDirty) return true;
+  if (!confirm('放弃尚未保存的工具分组草稿？')) return false;
+  resetGroupDraft();
+  return true;
+}
+
+/* ---------- 工具开关自动保存（可关闭；关闭时行为与手工保存完全一致） ---------- */
+function autoSaveIsOn() {
+  return $('tool-auto-save').checked === true;
+}
+function autoSaveNote() {
+  return autoSaveIsOn()
+    ? '自动保存已开启：工具开关改动即时生效；分组名称、排序和成员结构改动仍需“保存分组”。'
+    : '自动保存未开启：工具开关改动需点击“保存工具开关”。';
+}
+function cancelAutoSave() {
+  if (autoSaveTimer !== null) {
+    clearTimeout(autoSaveTimer);
+    autoSaveTimer = null;
+  }
+}
+function scheduleAutoSave() {
+  if (!autoSaveIsOn()) return;
+  cancelAutoSave();
+  autoSaveTimer = setTimeout(() => {
+    autoSaveTimer = null;
+    void runAutoSave();
+  }, TOOL_AUTO_SAVE_DELAY);
+}
+function isRevisionConflict(error) {
+  return error?.status === 409 || /预设已被其他窗口更新/.test(String(error?.message ?? ''));
+}
+function toolSaveRequest(scope, modeId, policy) {
+  return scope === 'session'
+    ? { action: 'save-session-tools', sessionId, policy }
+    : { action: 'save-mode-tools', modeId, policy };
+}
+async function persistToolDraft() {
+  if (!toolDraft.dirty) return { ok: true, skipped: true };
+  const scope = toolView.sessionScope ? 'session' : 'mode';
+  const modeId = toolView.modeId;
+  if (!modeId) return { ok: false, error: new Error('当前没有可保存的 DSH 模式') };
+  if (scope === 'session' && !sessionId) return { ok: false, error: new Error('当前页面没有会话，无法自动保存') };
+  const key = toolDraft.key;
+  const version = toolDraftVersion;
+  const policy = { ...toolDraft.policy };
+  const send = () => api(toolSaveRequest(scope, modeId, policy));
+  try {
+    await send();
+  } catch (error) {
+    if (!isRevisionConflict(error)) return { ok: false, error };
+    try {
+      await reload(selectedId);            // 刷新 revision，reload 会保留脏草稿
+      await send();                        // 用新 revision 重试一次
+    } catch (retryError) {
+      return { ok: false, error: retryError };
+    }
+  }
+  if (toolDraft.key === key) {
+    if (toolDraftVersion === version) {
+      // 以刚保存的策略作为新基线：不能清空，否则下一次改动会提交不完整的策略。
+      toolDraft = { key, policy: { ...policy }, dirty: false };
+    } else {
+      scheduleAutoSave();                    // 保存在途时又有新改动，稍后再存一次
+    }
+  }
+  // 每次成功事务服务端只 +1；冲突时上面的 reload() 会重新同步 revision。
+  state.revision += 1;
+  return { ok: true, scope, modeId };
+}
+function runAutoSave() {
+  autoSaveChain = autoSaveChain.then(async () => {
+    autoSaveInFlight = true;
+    autoSaveInFlightVersion = toolDraftVersion;
+    let result;
+    try {
+      result = await persistToolDraft();
+    } finally {
+      autoSaveInFlight = false;
+    }
+    if (result.ok) {
+      if (!result.skipped) {
+        status(`已自动保存（${result.scope === 'session' ? '当前会话覆盖' : '模式默认'} · ${modeName(result.modeId)}）`);
+      }
+    } else {
+      status(`自动保存失败：${result.error.message}（改动尚未保存，仍保留在草稿中，可继续编辑或点击“保存工具开关”）`, true);
+    }
+    return result;
+  }).catch(error => {
+    autoSaveInFlight = false;
+    status(`自动保存失败：${error.message}（改动尚未保存，仍保留在草稿中）`, true);
+  });
+  return autoSaveChain;
+}
+// 页面卸载/隐藏时的尽力而为冲刷：同一个 payload 构造函数，keepalive 让浏览器在卸载期间完成请求。
+// 卸载期间无法观察结果，因此草稿保持为脏，也不从卸载处理函数里弹错；同一批改动最多发送一次。
+function flushToolDraftKeepalive() {
+  if (!autoSaveIsOn() || !toolDraft.dirty) return 0;
+  cancelAutoSave();                        // 先取消排队定时器，保证不会双发
+  if (autoSaveInFlight && autoSaveInFlightVersion === toolDraftVersion) return 0;
+  if (keepaliveFlushedVersion === toolDraftVersion) return 0;
+  const scope = toolView.sessionScope ? 'session' : 'mode';
+  const modeId = toolView.modeId;
+  if (!modeId || (scope === 'session' && !sessionId)) return 0;
+  keepaliveFlushedVersion = toolDraftVersion;
+  const policy = { ...toolDraft.policy };
+  void api(toolSaveRequest(scope, modeId, policy), { keepalive: true }).catch(() => {});
+  return 1;
+}
+// 返回 true 表示没有待处理的自动保存；false 表示自动保存失败且草稿仍处于未保存状态。
+async function flushPendingToolDraft() {
+  if (!autoSaveIsOn() || !toolDraft.dirty) return true;
+  cancelAutoSave();
+  await runAutoSave();
+  return !toolDraft.dirty;
 }
 
 function sortToolGroups(groups) {
@@ -319,9 +469,12 @@ function activeToolPanel() {
 function renderToolModes(previous) {
   const modes = (state.agentModes ?? []).filter(mode => !mode.broken);
   $('tool-mode').replaceChildren(...modes.map(mode => new Option(mode.name, mode.id)));
-  const preferred = previous && modes.some(mode => mode.id === previous) ? previous :
-    state.sessionMode && modes.some(mode => mode.id === state.sessionMode) ? state.sessionMode :
-      modes.find(mode => mode.id === 'st-preset')?.id ?? modes[0]?.id ?? '';
+  const known = id => !!id && modes.some(mode => mode.id === id);
+  const stored = storageGet(TOOL_LAST_MODE_KEY, '');
+  const preferred = known(previous) ? previous :
+    known(stored) ? stored :
+      known(state.sessionMode) ? state.sessionMode :
+        modes.find(mode => mode.id === 'st-preset')?.id ?? modes[0]?.id ?? '';
   $('tool-mode').value = preferred;
   renderToolPanel({ force: true });
 }
@@ -344,9 +497,10 @@ function renderToolPanel(options = {}) {
   $('inherit-tools').disabled = !sessionId || kind !== 'custom';
   const unmatched = unmatchedToolRuleCount(modeId, scope);
   const catalogError = state.toolCatalogErrors?.[modeId];
-  $('tool-note').textContent = !modeId ? '当前会话没有可识别的 DSH 模式。' :
+  const note = !modeId ? '当前会话没有可识别的 DSH 模式。' :
     catalog.length === 0 ? `${modeName(modeId)} 尚无工具目录；打开该模式的会话后即可配置。${catalogError ? `（${catalogError}）` : ''}` :
       describeToolSelection(scope, modeId, kind, catalog) + (unmatched ? ` · 另有 ${unmatched} 条未匹配工具规则（缺少对应模式或插件）` : '');
+  $('tool-note').textContent = `${note} · ${autoSaveNote()}`;
 }
 function describeToolSelection(scope, modeId, kind, catalog) {
   const name = modeName(modeId);
@@ -1046,13 +1200,12 @@ $('add').onclick = () => {
 };
 
 function discardOkay() {
-  return (!dirty || confirm('放弃尚未保存的预设草稿？')) && toolDiscardOkay() && groupDiscardOkay();
+  return presetDiscardOkay() && toolDiscardOkay() && groupDiscardOkay();
 }
 $('new').onclick = () => {
-  if (!discardOkay()) return;
-  discardToolDrafts();
+  // 新建提示词预设与工具配置无关：只确认提示词草稿，工具/分组草稿继续保留。
+  if (!presetDiscardOkay()) return;
   loadDraft('');
-  renderToolPanel({ force: true });
 };
 $('library').onchange = guard(async () => {
   const id = $('library').value;
@@ -1068,7 +1221,10 @@ $('library').onchange = guard(async () => {
   await reload(id);
   status('已切换全局默认注入预设');
 });
-$('reload').onclick = guard(async () => { if (discardOkay()) await reload(selectedId); });
+$('reload').onclick = guard(async () => {
+  // 重新加载只刷新提示词预设草稿；未保存的工具/分组草稿会被保留。
+  if (presetDiscardOkay()) await reload(selectedId);
+});
 $('delete-preset').onclick = guard(async () => {
   if (!selectedId) throw new Error('请选择要删除的已保存预设');
   if (dirty) throw new Error('请先保存或放弃预设草稿');
@@ -1115,7 +1271,7 @@ $('bind').onclick = guard(async () => {
   status('会话设置已应用，下一次请求生效');
 });
 $('apply-package-prefill').onclick = guard(async () => {
-  if (!discardOkay()) return;
+  if (!presetDiscardOkay()) return;
   await api({ action: 'apply-package-prefill', id: selectedId });
   await reload(selectedId);
   status('包内接口设置已应用到全局，下一次请求生效');
@@ -1140,24 +1296,26 @@ $('save-auto-modes').onclick = guard(async () => {
   await reload(selectedId);
   status('自动启用模式列表已保存，仅影响之后新建的会话');
 });
-$('tool-scope').onchange = () => {
+$('tool-scope').onchange = guard(async () => {
   const previousScope = toolView.sessionScope ? 'session' : 'mode';
-  if (!toolDiscardOkay()) {
+  if ((!(await flushPendingToolDraft()) || toolDraft.dirty) && !toolDiscardOkay()) {
     $('tool-scope').value = previousScope;
     renderToolPanel();
     return;
   }
   renderToolPanel({ force: true });
-};
-$('tool-mode').onchange = () => {
+});
+$('tool-mode').onchange = guard(async () => {
   const previousMode = toolView.modeId;
-  if (!toolDiscardOkay()) {
+  if ((!(await flushPendingToolDraft()) || toolDraft.dirty) && !toolDiscardOkay()) {
     $('tool-mode').value = previousMode;
     renderToolPanel();
     return;
   }
+  // 记住用户最后配置的模式，刷新页面后优先回到它，而不是回到会话模式/st-preset。
+  storageSet(TOOL_LAST_MODE_KEY, $('tool-mode').value);
   renderToolPanel({ force: true });
-};
+});
 $('tool-preset').onchange = guard(async () => {
   const value = $('tool-preset').value;
   const sessionScope = $('tool-scope').value === 'session';
@@ -1167,7 +1325,7 @@ $('tool-preset').onchange = guard(async () => {
     renderToolPanel();
     throw new Error('请先选择要配置的 DSH 模式');
   }
-  if (!toolDiscardOkay()) {
+  if ((!(await flushPendingToolDraft()) || toolDraft.dirty) && !toolDiscardOkay()) {
     renderToolPanel();
     return;
   }
@@ -1189,6 +1347,8 @@ $('tool-preset-new').onclick = guard(async () => {
   const { sessionScope, modeId } = toolContext();
   const catalog = toolCatalog(modeId);
   if (!modeId || !catalog.length) throw new Error('当前模式没有可用的工具目录');
+  // 新建后会把选择切到新预设：先刷掉待自动保存的改动，再按约定确认。
+  if ((!(await flushPendingToolDraft()) || toolDraft.dirty) && !toolDiscardOkay()) return;
   const suggested = `${modeName(modeId)} 工具预设`;
   const input = prompt('新工具预设名称', suggested);
   if (input === null) return;
@@ -1261,6 +1421,8 @@ $('tool-preset-delete').onclick = guard(async () => {
   const modes = counts?.modes ?? Object.values(state.modeToolSelections ?? {})
     .filter(item => item?.kind === 'preset' && item.presetId === preset.id).length;
   const sessions = counts?.sessions ?? 0;
+  // 删除会让引用它的模式/会话回退：先刷掉待自动保存的改动，再按约定确认。
+  if ((!(await flushPendingToolDraft()) || toolDraft.dirty) && !toolDiscardOkay()) return;
   if (!confirm(`确定删除工具预设“${preset.name}”？它被 ${modes} 个模式、${sessions} 个会话引用；删除后这些模式回到自定义策略，会话回到继承模式默认。此操作无法撤销。`)) return;
   await api({ action: 'delete-tool-preset', id: preset.id });
   await reload(selectedId);
@@ -1274,6 +1436,9 @@ for (const [id, checked] of [['select-all-tools', true], ['clear-all-tools', fal
   };
 }
 $('save-tools').onclick = guard(async () => {
+  // 显式保存：取消待触发的自动保存，并等待在途自动保存结束，避免同一改动提交两次。
+  cancelAutoSave();
+  await autoSaveChain;
   const scope = toolView.sessionScope ? 'session' : 'mode';
   const modeId = toolView.modeId;
   const kind = toolSelectionKind(scope, modeId);
@@ -1284,7 +1449,9 @@ $('save-tools').onclick = guard(async () => {
   } else {
     if (!modeId) throw new Error('请先选择要保存的 DSH 模式');
     await api({ action: 'save-mode-tools', modeId, policy });
+    storageSet(TOOL_LAST_MODE_KEY, modeId);
   }
+  resetToolDraft();
   await reload(selectedId);
   status(kind === 'preset' ? '工具开关已保存并切换为自定义策略，下一次请求生效' :
     scope === 'session' ? '当前会话工具已更新，下一次请求生效' :
@@ -1297,6 +1464,18 @@ $('inherit-tools').onclick = guard(async () => {
   await reload(selectedId);
   status('当前会话已恢复继承模式默认工具');
 });
+$('tool-auto-save').onchange = () => {
+  const enabled = $('tool-auto-save').checked;
+  storageSet(TOOL_AUTO_SAVE_KEY, enabled ? '1' : '0');
+  if (enabled) {
+    status('已开启工具开关自动保存');
+    if (toolDraft.dirty) scheduleAutoSave();   // 立即把已有草稿纳入自动保存
+  } else {
+    cancelAutoSave();
+    status('已关闭工具开关自动保存，改动需要点击“保存工具开关”');
+  }
+  renderToolPanel();
+};
 $('tool-tabs-toggle').onclick = () => {
   const collapsed = storageGet(TOOL_TABS_COLLAPSED_KEY, '0') === '1';
   storageSet(TOOL_TABS_COLLAPSED_KEY, collapsed ? '0' : '1');
@@ -1347,13 +1526,15 @@ $('group-save').onclick = guard(async () => {
     members: (group.members ?? []).map(member => ({ modeId: member.modeId, toolName: member.toolName })),
   }));
   const result = await api({ action: 'save-tool-groups', groups });
+  resetGroupDraft();
   await reload(selectedId);
   const warnings = result.warnings ?? [];
   status(warnings.length ? `工具分组已保存 · ${warnings.length} 项提示：${warnings.join('；')}` : '工具分组已保存');
 });
 $('import-package-tools').onclick = guard(async () => {
   if (!selectedId) throw new Error('请先在预设库中选择带工具配置的预设');
-  if (!groupDiscardOkay() || !toolDiscardOkay()) return;
+  // 导入会替换分组基线；工具开关草稿不受影响，reload 会保留它。
+  if (!groupDiscardOkay()) return;
   if (!confirm('导入包内工具配置？会新增或更新工具分组与工具预设，不会自动应用到任何模式或会话。')) return;
   const result = await api({ action: 'import-package-tools', id: selectedId });
   await reload(selectedId);
@@ -1414,6 +1595,7 @@ $('last').onclick = guard(async () => {
   show(latest.last.result);
 });
 
+$('tool-auto-save').checked = storageGet(TOOL_AUTO_SAVE_KEY, '0') === '1';
 $('tool-scope').querySelector('option[value="session"]').disabled = !sessionId;
 $('tool-scope').value = sessionId ? 'session' : 'mode';
 window.addEventListener('beforeunload', event => {
@@ -1421,5 +1603,10 @@ window.addEventListener('beforeunload', event => {
     event.preventDefault();
     event.returnValue = '';
   }
+});
+// 自动保存开启时，页面隐藏/卸载前尽力把最近的工具开关改动发出去（keepalive），避免丢失最后一次编辑。
+window.addEventListener('pagehide', () => { flushToolDraftKeepalive(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') flushToolDraftKeepalive();
 });
 await guard(() => reload())();
