@@ -313,7 +313,7 @@ async function attach(url) {
 // ---------------------------------------------------------------------------
 // HTTP spec checks
 // ---------------------------------------------------------------------------
-const NEW_GET_FIELDS = ['toolGroups', 'toolPresets', 'modeToolSelections', 'sessionToolSelection', 'toolPresetRefCounts', 'unresolvedToolRefs'];
+const NEW_GET_FIELDS = ['toolGroups', 'toolPresets', 'modeToolSelections', 'sessionToolSelection', 'toolPresetRefCounts', 'unresolvedToolRefs', 'mcpToolGroups'];
 const LEGACY_GET_FIELDS = ['revision', 'presets', 'binding', 'selectedPresetId', 'agentModes', 'toolCatalogs', 'toolCatalogErrors',
   'modeToolPolicies', 'sessionToolPolicy', 'autoEnableModes', 'sessionMode'];
 
@@ -763,6 +763,87 @@ async function loadDsh(name) {
   const file = path.join(APP_NM, '@deepseek-ai', name, 'lib/index.js');
   return import(pathToFileURL(file).href);
 }
+
+async function mcpChecks() {
+  const sdkRoot = path.join(APP_NM, '@modelcontextprotocol', 'sdk');
+  const fixture = path.join(REPO, 'scripts', 'fixtures', 'mcp-stdio-server.mjs');
+  let ctx;
+  try {
+    const { Context } = await loadDsh('cordis');
+    ctx = new Context();
+    const packages = [
+      ['dsh-llm', {}],
+      ['dsh-session', {}],
+      ['dsh-session-projection', {}],
+      ['dsh-system-prompt', {}],
+      ['dsh-tools', {}],
+      ['dsh-agent', {}],
+      ['dsh-agent-loop', { agents: [] }],
+    ];
+    for (const [name, config] of packages) {
+      await ctx.plugin((await loadDsh(name)).default, config);
+    }
+
+    const mcp = await loadDsh('dsh-mcp-client');
+    const servers = [
+      { serverName: 'fixture_alpha', marker: 'ALPHA' },
+      { serverName: 'fixture_beta', marker: 'BETA' },
+    ];
+    for (const server of servers) {
+      await mcp.apply(ctx, {
+        transport: 'stdio',
+        serverName: server.serverName,
+        command: process.execPath,
+        args: [fixture, sdkRoot, server.serverName, server.marker],
+        env: {},
+        cwd: REPO,
+        toolCallTimeoutMs: 5_000,
+        failOnStartupError: true,
+        reconnect: { enabled: false },
+      });
+    }
+
+    const schemas = ctx.tools.schemas();
+    for (let index = 0; index < servers.length; index += 1) {
+      const server = servers[index];
+      const publicName = `mcp__${server.serverName}__echo`;
+      const result = await ctx.tools.execute({
+        callId: `mcp-fixture-${index + 1}`,
+        name: publicName,
+        arguments: { text: `request-${index + 1}` },
+        signal: new AbortController().signal,
+      });
+      const textContent = result.content?.filter(block => block.type === 'text').map(block => block.text).join('\n') ?? '';
+      const expected = `${server.marker}:request-${index + 1}`;
+      record(
+        `mcp-${index + 1}`,
+        schemas.some(tool => tool.name === publicName) && !result.isError && textContent.includes(expected) ? 'verified' : 'falsified',
+        `MCP stdio service ${index + 1} is discovered and callable through DSH`,
+        `tool=${publicName} expected=${expected} result=${JSON.stringify(result)}`,
+      );
+    }
+
+    const { mcpToolGroups } = await import(pathToFileURL(path.join(REPO, 'index.mjs')).href);
+    const groups = mcpToolGroups({ standard: schemas }).standard ?? [];
+    const grouped = servers.every(server => groups.some(group =>
+      group.serverName === server.serverName
+      && group.tools.includes(`mcp__${server.serverName}__echo`)));
+    record(
+      'mcp-groups',
+      grouped && groups.length === 2 ? 'verified' : 'falsified',
+      'live tools from two MCP services become separate workbench groups',
+      `groups=${JSON.stringify(groups)}`,
+    );
+  } catch (error) {
+    record('mcp-runtime', 'falsified', 'dual MCP integration test crashed', String(error?.stack ?? error));
+  } finally {
+    if (ctx) {
+      try { await ctx.fiber.dispose(); } catch (error) {
+        record('mcp-dispose', 'falsified', 'dual MCP integration context did not dispose cleanly', String(error?.stack ?? error));
+      }
+    }
+  }
+}
 function writeState(file, mutate) {
   const text = fs.readFileSync(file, 'utf8');
   const state = JSON.parse(text);
@@ -1177,6 +1258,9 @@ async function main() {
   }
   if (command === 'runtime' || command === 'all') {
     await runtimeChecks();
+  }
+  if (command === 'mcp' || command === 'all') {
+    await mcpChecks();
   }
   if (command === 'selftest-http') {
     await localHttpChecks();

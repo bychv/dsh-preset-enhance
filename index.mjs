@@ -166,6 +166,7 @@ export async function apply(ctx, config = {}) {
             agentModes: modes,
             autoEnableModes: state.autoEnableModes,
             toolCatalogs: catalogs,
+            mcpToolGroups: mcpToolGroups(catalogs),
             toolCatalogErrors: discovered.errors,
             modeToolPolicies: state.modeToolPolicies,
             sessionToolPolicy: sessionId ? ownGet(state.sessionToolPolicies, sessionId) ?? null : null,
@@ -605,6 +606,26 @@ function requestToolCatalogs(ctx, state, discovered, sessionId) {
   const live = liveToolCatalog(ctx, sessionId);
   if (live.length > 0 && modeId) assign(catalogs, modeId, live);
   return catalogs;
+}
+/** Group DSH MCP public tool names by their stable server namespace. */
+export function mcpToolGroups(catalogs) {
+  const result = {};
+  for (const [modeId, catalog] of Object.entries(catalogs ?? {})) {
+    if (!Array.isArray(catalog)) continue;
+    const servers = new Map();
+    for (const tool of catalog) {
+      const match = /^mcp__([A-Za-z0-9_-]{1,32})__(.+)$/.exec(String(tool?.name ?? ''));
+      if (!match) continue;
+      const serverName = match[1];
+      const tools = servers.get(serverName) ?? [];
+      tools.push(tool.name);
+      servers.set(serverName, tools);
+    }
+    const groups = [...servers].sort(([left], [right]) => left.localeCompare(right))
+      .map(([serverName, tools]) => ({ serverName, tools: [...new Set(tools)].sort() }));
+    if (groups.length > 0) assign(result, modeId, groups);
+  }
+  return result;
 }
 function unresolvedWarnings(refs) {
   return refs.length > 0

@@ -388,6 +388,46 @@ try {
   check('all four batch buttons are rendered', layout.batchButtons.length === 4, layout.batchButtons.join(','));
   check('group content lives in an open <details>', layout.contentDetails.open === true, JSON.stringify(layout.contentDetails));
   check('tab labels show 名称 · 已启用/总数', layout.tabLabelPattern >= 2, layout.stat ?? '');
+  const tabStress = await evaluate(`(() => {
+    const list = document.getElementById('tool-tablist');
+    const seed = list.querySelector('[role="tab"]');
+    const clones = [];
+    for (let index = 0; index < 32; index += 1) {
+      const clone = seed.cloneNode(true);
+      clone.id = 'mcp-stress-tab-' + index;
+      clone.dataset.group = '@mcp:stress_' + index;
+      clone.querySelector('.tab-label').textContent = 'MCP · stress_server_with_a_long_name_' + index + ' · 1/1';
+      clone.setAttribute('aria-selected', 'false');
+      clone.tabIndex = -1;
+      list.append(clone);
+      clones.push(clone);
+    }
+    const style = getComputedStyle(list);
+    const pageWidthBefore = document.documentElement.scrollWidth;
+    const overflow = list.scrollWidth > list.clientWidth;
+    list.scrollLeft = 0;
+    clones.at(-1).scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    const scrolledToLast = list.scrollLeft > 0;
+    const labelStyle = getComputedStyle(clones.at(-1).querySelector('.tab-label'));
+    const result = {
+      count: list.querySelectorAll('[role="tab"]').length,
+      overflow,
+      scrolledToLast,
+      flexWrap: style.flexWrap,
+      overflowX: style.overflowX,
+      pageStayedContained: document.documentElement.scrollWidth === pageWidthBefore,
+      ellipsis: labelStyle.textOverflow,
+      whiteSpace: labelStyle.whiteSpace,
+    };
+    clones.forEach(clone => clone.remove());
+    return result;
+  })()`);
+  check('many MCP tabs stay on one horizontally scrollable row without widening the page',
+    tabStress.count >= 34 && tabStress.overflow && tabStress.scrolledToLast && tabStress.flexWrap === 'nowrap' &&
+    ['auto', 'scroll'].includes(tabStress.overflowX) && tabStress.pageStayedContained,
+    JSON.stringify(tabStress));
+  check('long MCP tab labels use ellipsis', tabStress.ellipsis === 'ellipsis' && tabStress.whiteSpace === 'nowrap',
+    JSON.stringify(tabStress));
   await shot('05-layout.png');
   writeFileSync(join(OUT, 'layout.json'), JSON.stringify(layout, null, 2));
   await shotClip('06-toolcard.png', 'details.config-card:nth-of-type(2)', 1.2);

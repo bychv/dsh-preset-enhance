@@ -444,8 +444,24 @@ function toolTabsFor(modeId) {
     for (const name of tools) claimed.add(name);
     userTabs.push({ id: group.id, name: group.name || '未命名分组', tools });
   }
-  tabs.push({ id: '@ungrouped', name: '未分组', tools: names.filter(name => !claimed.has(name)) });
-  return [...tabs, ...userTabs];
+  const mcpTabs = [];
+  const mcpClaimed = new Set();
+  for (const group of state.mcpToolGroups?.[modeId] ?? []) {
+    const tools = [...new Set((group.tools ?? []).filter(name => known.has(name)))];
+    if (!tools.length) continue;
+    for (const name of tools) mcpClaimed.add(name);
+    mcpTabs.push({
+      id: '@mcp:' + group.serverName,
+      name: 'MCP · ' + group.serverName,
+      tools,
+    });
+  }
+  tabs.push({
+    id: '@ungrouped',
+    name: '未分组',
+    tools: names.filter(name => !claimed.has(name) && !mcpClaimed.has(name)),
+  });
+  return [...tabs, ...mcpTabs, ...userTabs];
 }
 function toolSlug(tabId) {
   return tabId === '@all' ? 'v-all' : tabId === '@ungrouped' ? 'v-ungrouped' : String(tabId).replace(/[^A-Za-z0-9_-]/g, '-');
@@ -623,6 +639,7 @@ function renderToolTabs() {
     const label = document.createElement('span');
     label.className = 'tab-label';
     label.textContent = toolTabLabel(tab);
+    button.title = label.textContent;
     button.append(label);
     button.onclick = () => activateToolGroup(tab.id);
     return button;
@@ -654,7 +671,10 @@ function syncToolTabs(focus) {
     const selected = button.dataset.group === toolView.active;
     button.setAttribute('aria-selected', String(selected));
     button.tabIndex = selected ? 0 : -1;
-    if (selected && focus) button.focus();
+    if (selected) {
+      if (focus) button.focus();
+      button.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+    }
   }
   $('tool-group-select').value = toolView.active;
   for (const panel of $('tool-group-panels').children) {
@@ -1295,6 +1315,14 @@ $('save-auto-modes').onclick = guard(async () => {
   await api({ action: 'save-auto-modes', modes });
   await reload(selectedId);
   status('自动启用模式列表已保存，仅影响之后新建的会话');
+});
+$('refresh-tools').onclick = guard(async () => {
+  if (!presetDiscardOkay()) return;
+  await reload(selectedId);
+  const { modeId } = toolContext();
+  const groups = state.mcpToolGroups?.[modeId] ?? [];
+  const toolCount = groups.reduce((sum, group) => sum + (group.tools?.length ?? 0), 0);
+  status('工具列表已刷新：' + groups.length + ' 个 MCP 服务，' + toolCount + ' 个 MCP 工具');
 });
 $('tool-scope').onchange = guard(async () => {
   const previousScope = toolView.sessionScope ? 'session' : 'mode';

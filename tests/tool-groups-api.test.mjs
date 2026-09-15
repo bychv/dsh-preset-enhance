@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { PresetStore } from '../lib/store.mjs';
-import { AGENT_PRESET_ID, apply } from '../index.mjs';
+import { AGENT_PRESET_ID, apply, mcpToolGroups } from '../index.mjs';
 
 const STANDARD_COMPOSITION = [
   '- id: persona',
@@ -186,7 +186,7 @@ test('legacy flat policies stay authoritative and equal tool names resolve per m
       'deepseekBetaPrefix', 'prefixToolCalls', 'prefixNonOfficialRemoveTools', 'modeDefaultPresetId', 'modeDefaultName',
       'presetMode', 'sessionMode', 'agentModes', 'autoEnableModes', 'toolCatalogs', 'toolCatalogErrors',
       'modeToolPolicies', 'sessionToolPolicy', 'last', 'toolGroups', 'toolPresets', 'modeToolSelections',
-      'sessionToolSelection', 'toolPresetRefCounts', 'unresolvedToolRefs']) {
+      'sessionToolSelection', 'toolPresetRefCounts', 'unresolvedToolRefs', 'mcpToolGroups']) {
       assert.equal(key in payload, true, `GET lost ${key}`);
     }
     assert.deepEqual(payload.sessionToolPolicy, { shell: true, read: false });
@@ -267,6 +267,34 @@ test('live session tools shown by GET can be saved for the session and its mode'
 
     await h.post({ action: 'save-mode-tools', modeId: 'standard', policy }, 's');
     assert.deepEqual((await h.read()).modeToolPolicies.standard, policy);
+  } finally { await h.cleanup(); }
+});
+
+test('MCP tools are exposed as stable per-server groups without mixing ordinary tools', async () => {
+  const catalogs = {
+    standard: [
+      { name: 'read', description: 'ordinary' },
+      { name: 'mcp__github__create_issue', description: 'MCP' },
+      { name: 'mcp__drive-1__search', description: 'MCP' },
+      { name: 'mcp__github__list_issues', description: 'MCP' },
+      { name: 'mcp__github__create_issue', description: 'duplicate ignored' },
+      { name: 'mcp__bad.server__ignored', description: 'invalid namespace' },
+    ],
+  };
+  assert.deepEqual(mcpToolGroups(catalogs), {
+    standard: [
+      { serverName: 'drive-1', tools: ['mcp__drive-1__search'] },
+      { serverName: 'github', tools: ['mcp__github__create_issue', 'mcp__github__list_issues'] },
+    ],
+  });
+
+  const h = await createHarness();
+  try {
+    h.ctx.agents = {
+      get: id => id === 's' ? { ctx: { tools: { schemas: () => catalogs.standard } } } : undefined,
+    };
+    const state = await h.get('s');
+    assert.deepEqual(state.mcpToolGroups, mcpToolGroups(catalogs));
   } finally { await h.cleanup(); }
 });
 
