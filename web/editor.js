@@ -680,6 +680,14 @@ function renderGroupPage() {
   }
   for (const [index, group] of ordered.entries()) list.append(groupEditor(group, index, ordered.length, modes));
 }
+function groupMemberCountText(group, modeId) {
+  const members = group.members ?? [];
+  if (!modeId) return `本组共 ${members.length} 个成员（暂无可配置模式）`;
+  const known = new Set(toolCatalog(modeId).map(tool => tool.name));
+  const local = members.filter(member => member.modeId === modeId && known.has(member.toolName)).length;
+  const name = (state.agentModes ?? []).find(mode => mode.id === modeId)?.name ?? modeId;
+  return `本组共 ${members.length} 个成员（${name} 中 ${local} 个）`;
+}
 function groupEditor(group, index, count, modes) {
   const box = document.createElement('div');
   box.className = 'group-editor';
@@ -756,7 +764,7 @@ function groupEditor(group, index, count, modes) {
   const counts = document.createElement('span');
   counts.className = 'muted';
   counts.dataset.role = 'member-count';
-  counts.textContent = `本组共 ${(group.members ?? []).length} 个工具`;
+  counts.textContent = groupMemberCountText(group, chosen);
   modeRow.append(modeLabel, counts);
   const grid = document.createElement('div');
   grid.className = 'check-list tools';
@@ -803,9 +811,9 @@ function syncGroupMembership(modeId, toolName) {
   for (const box of $('group-list').querySelectorAll('.group-editor')) {
     const group = groupDraft.find(item => item.id === box.dataset.group);
     if (!group) continue;
-    const counts = box.querySelector('[data-role="member-count"]');
-    if (counts) counts.textContent = `本组共 ${(group.members ?? []).length} 个工具`;
     const select = box.querySelector('.group-member-mode');
+    const counts = box.querySelector('[data-role="member-count"]');
+    if (counts) counts.textContent = groupMemberCountText(group, select ? select.value : '');
     if (!select || select.value !== modeId) continue;
     const input = box.querySelector(`input[data-mode="${CSS.escape(modeId)}"][data-tool="${CSS.escape(toolName)}"]`);
     if (input) input.checked = (group.members ?? []).some(member => member.modeId === modeId && member.toolName === toolName);
