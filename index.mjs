@@ -147,10 +147,8 @@ export async function apply(ctx, config = {}) {
           const modeDefault = defaultRecord(state);
           const modes = await agentModeRows(ctx);
           const discovered = await discoverModeToolCatalogs(ctx, modes);
-          const catalogs = { ...state.toolCatalogs, ...discovered.catalogs };
-          const live = liveToolCatalog(ctx, sessionId);
           const liveMode = sessionModeId(session);
-          if (live.length > 0 && liveMode) assign(catalogs, liveMode, live);
+          const catalogs = requestToolCatalogs(ctx, state, discovered.catalogs, sessionId);
           return respond(res, 200, {
             revision: state.revision,
             presets: state.presets,
@@ -211,7 +209,8 @@ export async function apply(ctx, config = {}) {
 
         if (body.action === 'save-tool-groups') {
           const state = await store.read();
-          const catalogs = knownToolCatalogs(state, discovered.catalogs);
+          const catalogs = requestToolCatalogs(
+            ctx, state, discovered.catalogs, url.searchParams.get('sessionId') ?? '');
           const groups = normalizeToolGroups(body.groups, { catalogs, existing: state.toolGroups });
           const warnings = unresolvedWarnings(unresolvedToolRefs({ toolGroups: groups }, catalogs));
           return respond(res, 200, await store.transaction(current => {
@@ -236,7 +235,8 @@ export async function apply(ctx, config = {}) {
           assertPresetGroupIds(preset, state.toolGroups);
           const record = { ...preset, id: existing ? requestedId : randomUUID() };
           const warnings = unresolvedWarnings(
-            unresolvedToolRefs({ toolPresets: [record] }, knownToolCatalogs(state, discovered.catalogs)));
+            unresolvedToolRefs({ toolPresets: [record] }, requestToolCatalogs(
+              ctx, state, discovered.catalogs, url.searchParams.get('sessionId') ?? '')));
           return respond(res, 200, await store.transaction(current => {
             assertRevision(current, body);
             const index = current.toolPresets.findIndex(item => item.id === record.id);
@@ -297,7 +297,10 @@ export async function apply(ctx, config = {}) {
 
         if (body.action === 'save-mode-tools') {
           if (typeof body.modeId !== 'string' || !knownModes.has(body.modeId)) throw new Error('请选择有效的 DSH 模式');
-          const policy = validateToolPolicy(body.policy, discovered.catalogs[body.modeId]);
+          const state = await store.read();
+          const catalogs = requestToolCatalogs(
+            ctx, state, discovered.catalogs, url.searchParams.get('sessionId') ?? '');
+          const policy = validateToolPolicy(body.policy, catalogs[body.modeId]);
           const selection = { kind: 'custom' };
           return respond(res, 200, await store.transaction(current => {
             assertRevision(current, body);
@@ -315,7 +318,9 @@ export async function apply(ctx, config = {}) {
           const modeId = sessionModeId(session);
           if (!knownModes.has(modeId)) throw new Error('当前会话没有可识别的 DSH 模式');
           const inherit = body.inherit === true;
-          const policy = inherit ? null : validateToolPolicy(body.policy, discovered.catalogs[modeId]);
+          const state = await store.read();
+          const catalogs = requestToolCatalogs(ctx, state, discovered.catalogs, body.sessionId);
+          const policy = inherit ? null : validateToolPolicy(body.policy, catalogs[modeId]);
           return respond(res, 200, await store.transaction(current => {
             assertRevision(current, body);
             if (inherit) {
@@ -337,7 +342,8 @@ export async function apply(ctx, config = {}) {
           if (!record) throw new Error('请选择带有工具配置的预设包');
           if (!record.sharePackage?.tools) throw new Error('该预设包不包含工具配置');
           const plan = remapToolPackage(record.sharePackage.tools, state, {
-            catalogs: knownToolCatalogs(state, discovered.catalogs),
+            catalogs: requestToolCatalogs(
+              ctx, state, discovered.catalogs, url.searchParams.get('sessionId') ?? ''),
           });
           if (body.dryRun === true) {
             return respond(res, 200, {
@@ -589,6 +595,15 @@ function knownToolCatalogs(state, discovered) {
       if (Array.isArray(catalog)) assign(catalogs, modeId, catalog);
     }
   }
+  return catalogs;
+}
+/** Match GET's catalog view for writes opened from a live conversation. */
+function requestToolCatalogs(ctx, state, discovered, sessionId) {
+  const catalogs = knownToolCatalogs(state, discovered);
+  const session = sessionId ? ctx.sessions.get(sessionId) : undefined;
+  const modeId = sessionModeId(session);
+  const live = liveToolCatalog(ctx, sessionId);
+  if (live.length > 0 && modeId) assign(catalogs, modeId, live);
   return catalogs;
 }
 function unresolvedWarnings(refs) {

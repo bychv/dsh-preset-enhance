@@ -99,19 +99,19 @@ async function createHarness(seed) {
     assert.equal(calls.length, before + 1, `request for session ${sessionId} was not routed`);
     return calls.at(-1);
   };
-  const rawPost = async body => {
+  const rawPost = async (body, sessionId = '') => {
     const req = Readable.from([typeof body === 'string' ? body : JSON.stringify(body)]);
     req.method = 'POST';
-    req.url = '/preset-enhance/api';
+    req.url = '/preset-enhance/api' + (sessionId ? '?sessionId=' + encodeURIComponent(sessionId) : '');
     req.headers = { 'content-type': 'application/json', host: 'localhost' };
     let statusCode, payload;
     await handler(req, { writeHead(code) { statusCode = code; }, end(value) { payload = JSON.parse(String(value)); } });
     return { statusCode, payload };
   };
-  const post = async body => {
+  const post = async (body, sessionId = '') => {
     const request = { ...body };
     if (request.revision === undefined) request.revision = (await store.read()).revision;
-    const { statusCode, payload } = await rawPost(request);
+    const { statusCode, payload } = await rawPost(request, sessionId);
     assert.equal(statusCode, 200, payload?.error);
     return payload;
   };
@@ -244,6 +244,29 @@ test('preset defaultEnabled, explicit rules, new catalog tools and flat saves me
     const flipped = await h.post({ action: 'select-tool-policy', scope: 'mode', modeId: 'standard', selection: { kind: 'custom' } });
     assert.deepEqual(flipped.selection, { kind: 'custom' });
     assert.deepEqual(h.names(await h.send('s')), ['shell', 'write']);
+  } finally { await h.cleanup(); }
+});
+
+test('live session tools shown by GET can be saved for the session and its mode', async () => {
+  const h = await createHarness();
+  try {
+    const dynamic = { name: 'plugin.dynamic', description: 'Added by a session plugin' };
+    h.ctx.agents = {
+      get: id => id === 's' ? {
+        ctx: { tools: { schemas: () => [...TOOL_CATALOGS.standard, dynamic] } },
+      } : undefined,
+    };
+    const shown = await h.get('s');
+    assert.deepEqual(shown.toolCatalogs.standard.map(tool => tool.name),
+      ['plugin.dynamic', 'read', 'shell', 'write']);
+    const policy = { 'plugin.dynamic': false, read: true, shell: true, write: true };
+
+    await h.post({ action: 'save-session-tools', sessionId: 's', policy });
+    assert.deepEqual((await h.get('s')).sessionToolPolicy, policy);
+    assert.deepEqual((await h.read()).sessionToolSelections.s, { kind: 'custom' });
+
+    await h.post({ action: 'save-mode-tools', modeId: 'standard', policy }, 's');
+    assert.deepEqual((await h.read()).modeToolPolicies.standard, policy);
   } finally { await h.cleanup(); }
 });
 
