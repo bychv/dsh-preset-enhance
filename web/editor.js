@@ -75,7 +75,7 @@ function loadDraft(id) {
   const packaged = record?.sharePackage;
   $('apply-package-prefill').hidden = !packaged?.prefill;
   $('package-note').textContent = packaged
-    ? '此预设附带分享数据。导入不会改动全局接口设置；可点击应用包内设置。保存接口设置会同时更新当前已保存预设的分享数据。工具预设与分组数据仅保留。'
+    ? '此预设附带分享数据。导入不会改动全局接口设置；可点击应用包内设置。保存接口设置会同时更新当前已保存预设的分享数据。包内工具预设与分组需在“工具预设”卡片中显式导入。'
     : '分享文件为单个 .dsh-preset.json，包含预设与已保存接口设置，并预留工具预设和分组。';
   ensureGroups();
   $('name').value = record?.name ?? '新预设';
@@ -90,6 +90,7 @@ function loadDraft(id) {
   renderList();
   renderEditor();
   updateDefaultButton();
+  renderPackageTools(record);
   void refreshPrefillWarning();
 }
 async function reload(id) {
@@ -109,6 +110,7 @@ async function reload(id) {
   $('post-tool-prefix-text').value = state.postToolPrefixText ?? '';
   syncPrefixToolControls();
   renderAutoModes();
+  discardToolDrafts();
   renderToolModes(previousToolMode);
   loadDraft(id ?? state.selectedPresetId ?? binding.presetId ?? '');
   updateSessionNote();
@@ -164,6 +166,156 @@ function renderAutoModes() {
     $('auto-mode-list').append(label);
   }
 }
+/* ---------- 工具预设、分组标签与草稿模型 ---------- */
+const TOOL_TABS_COLLAPSED_KEY = 'dsh-preset-enhance.tool-tabs-collapsed';
+const TOOL_CONTENT_OPEN_KEY = 'dsh-preset-enhance.tool-group-content-open';
+const TOOL_PRESET_PREFIX = 'preset:';
+const toolActiveGroupKey = modeId => `dsh-preset-enhance.tool-active-group:${modeId}`;
+const compactToolTabs = window.matchMedia?.('(max-width:760px)') ?? { matches: false, addEventListener() {} };
+
+let toolDraft = { key: '', policy: {}, dirty: false };
+let groupDraft = [];
+let groupsDirty = false;
+let groupPageOpen = false;
+let toolView = { sessionScope: false, modeId: '', tabs: [], active: '@all' };
+let packageToolsRecordId = '';
+const groupEditorModes = new Map();
+
+function storageGet(key, fallback = null) {
+  try {
+    const value = localStorage.getItem(key);
+    return value === null ? fallback : value;
+  } catch { return fallback; }
+}
+function storageSet(key, value) {
+  try { localStorage.setItem(key, value); } catch { /* 隐私模式下写入失败时保持内存状态 */ }
+}
+function toolCatalog(modeId) {
+  return state.toolCatalogs?.[modeId] ?? [];
+}
+function findToolPreset(id) {
+  return (state.toolPresets ?? []).find(item => item.id === id) ?? null;
+}
+function toolSelection(scope, modeId) {
+  return scope === 'session' ? state.sessionToolSelection ?? null : state.modeToolSelections?.[modeId] ?? null;
+}
+function toolSelectionKind(scope, modeId) {
+  const kind = toolSelection(scope, modeId)?.kind;
+  if (kind === 'inherit' || kind === 'custom' || kind === 'preset') return kind;
+  return scope === 'session' ? state.sessionToolPolicy ? 'custom' : 'inherit' : 'custom';
+}
+function normalizeToolPolicy(raw, modeId) {
+  const policy = {};
+  for (const tool of toolCatalog(modeId)) policy[tool.name] = raw?.[tool.name] !== false;
+  return policy;
+}
+function expandToolPreset(preset, modeId) {
+  const policy = {};
+  for (const tool of toolCatalog(modeId)) policy[tool.name] = preset.defaultEnabled !== false;
+  for (const rule of preset.rules ?? []) {
+    if (rule.modeId === modeId) policy[rule.toolName] = rule.enabled !== false;
+  }
+  return policy;
+}
+function modeToolPolicy(modeId) {
+  const selection = toolSelection('mode', modeId);
+  const preset = selection?.kind === 'preset' ? findToolPreset(selection.presetId) : null;
+  return preset ? normalizeToolPolicy(expandToolPreset(preset, modeId), modeId) :
+    normalizeToolPolicy(state.modeToolPolicies?.[modeId] ?? {}, modeId);
+}
+function sessionToolPolicy(modeId) {
+  const kind = toolSelectionKind('session', modeId);
+  if (kind === 'preset') {
+    const preset = findToolPreset(toolSelection('session', modeId)?.presetId);
+    if (preset) return normalizeToolPolicy(expandToolPreset(preset, modeId), modeId);
+    return modeToolPolicy(modeId);
+  }
+  if (kind === 'custom') {
+    // GET 在没有保存会话策略时返回 null：服务端把 null 解析为模式结果，显式 {} 才是全部启用。
+    return state.sessionToolPolicy == null
+      ? modeToolPolicy(modeId)
+      : normalizeToolPolicy(state.sessionToolPolicy, modeId);
+  }
+  return modeToolPolicy(modeId);
+}
+function effectiveToolPolicy(modeId, sessionScope) {
+  return sessionScope ? sessionToolPolicy(modeId) : modeToolPolicy(modeId);
+}
+function toolContext() {
+  const sessionScope = $('tool-scope').value === 'session';
+  const modeId = sessionScope ? (state.sessionMode ?? $('tool-mode').value) : $('tool-mode').value;
+  return { sessionScope, modeId };
+}
+function loadToolDraft(force) {
+  const { sessionScope, modeId } = toolContext();
+  const key = `${sessionScope ? 'session' : 'mode'}:${modeId}`;
+  if (force || toolDraft.key !== key) {
+    toolDraft = { key, policy: effectiveToolPolicy(modeId, sessionScope), dirty: false };
+  }
+  toolView.sessionScope = sessionScope;
+  toolView.modeId = modeId;
+}
+function discardToolDrafts() {
+  toolDraft = { key: '', policy: {}, dirty: false };
+  groupDraft = structuredClone(state.toolGroups ?? []);
+  groupsDirty = false;
+  groupEditorModes.clear();
+}
+function markToolDirty() {
+  toolDraft.dirty = true;
+  status('工具开关草稿尚未保存');
+}
+function markGroupsDirty() {
+  groupsDirty = true;
+  status('工具分组草稿尚未保存');
+}
+function toolDiscardOkay() {
+  return !toolDraft.dirty || confirm('放弃尚未保存的工具开关草稿？');
+}
+function groupDiscardOkay() {
+  return !groupsDirty || confirm('放弃尚未保存的工具分组草稿？');
+}
+
+function sortToolGroups(groups) {
+  return [...groups].sort((a, b) => (Number(a.order) || 0) - (Number(b.order) || 0) ||
+    String(a.name ?? '').localeCompare(String(b.name ?? ''), 'zh-CN'));
+}
+function toolTabsFor(modeId) {
+  const names = toolCatalog(modeId).map(tool => tool.name);
+  const known = new Set(names);
+  const tabs = [{ id: '@all', name: '全部', tools: names }];
+  const claimed = new Set();
+  const userTabs = [];
+  for (const group of sortToolGroups(groupDraft)) {
+    const tools = [];
+    for (const member of group.members ?? []) {
+      if (member.modeId === modeId && known.has(member.toolName) && !tools.includes(member.toolName)) tools.push(member.toolName);
+    }
+    for (const name of tools) claimed.add(name);
+    userTabs.push({ id: group.id, name: group.name || '未命名分组', tools });
+  }
+  tabs.push({ id: '@ungrouped', name: '未分组', tools: names.filter(name => !claimed.has(name)) });
+  return [...tabs, ...userTabs];
+}
+function toolSlug(tabId) {
+  return tabId === '@all' ? 'v-all' : tabId === '@ungrouped' ? 'v-ungrouped' : String(tabId).replace(/[^A-Za-z0-9_-]/g, '-');
+}
+function toolTabElementId(tabId) {
+  return `tool-tab-${toolSlug(tabId)}`;
+}
+function toolPanelElementId(tabId) {
+  return `tool-panel-${toolSlug(tabId)}`;
+}
+function toolGroupEnabledCount(tab) {
+  return tab.tools.filter(name => toolDraft.policy[name] !== false).length;
+}
+function toolTabLabel(tab) {
+  return `${tab.name} · ${toolGroupEnabledCount(tab)}/${tab.tools.length}`;
+}
+function activeToolPanel() {
+  return [...$('tool-group-panels').children].find(panel => panel.dataset.group === toolView.active) ?? null;
+}
+
 function renderToolModes(previous) {
   const modes = (state.agentModes ?? []).filter(mode => !mode.broken);
   $('tool-mode').replaceChildren(...modes.map(mode => new Option(mode.name, mode.id)));
@@ -171,47 +323,558 @@ function renderToolModes(previous) {
     state.sessionMode && modes.some(mode => mode.id === state.sessionMode) ? state.sessionMode :
       modes.find(mode => mode.id === 'st-preset')?.id ?? modes[0]?.id ?? '';
   $('tool-mode').value = preferred;
-  renderToolPanel();
+  renderToolPanel({ force: true });
 }
-function renderToolPanel() {
+function renderToolPanel(options = {}) {
   const sessionScope = $('tool-scope').value === 'session';
   $('tool-mode').disabled = sessionScope;
   if (sessionScope && state.sessionMode) $('tool-mode').value = state.sessionMode;
-  const modeId = sessionScope ? state.sessionMode : $('tool-mode').value;
-  const inherited = state.modeToolPolicies?.[modeId] ?? {};
-  const own = sessionScope ? state.sessionToolPolicy : null;
-  const policy = own ?? inherited;
-  const catalog = state.toolCatalogs?.[modeId] ?? [];
-  const catalogError = state.toolCatalogErrors?.[modeId];
+  loadToolDraft(options.force === true);
+  const modeId = toolView.modeId;
+  const catalog = toolCatalog(modeId);
+  const scope = sessionScope ? 'session' : 'mode';
+  const kind = toolSelectionKind(scope, modeId);
+  renderToolPresetBar(scope, modeId, kind, catalog);
+  renderUnresolvedToolRefs();
+  renderToolTabs();
+  renderGroupPage();
+  $('save-tools').disabled = (sessionScope && !sessionId) || !modeId || catalog.length === 0;
+  $('select-all-tools').disabled = $('clear-all-tools').disabled = !modeId || catalog.length === 0;
   $('inherit-tools').hidden = !sessionScope;
-  $('inherit-tools').disabled = !sessionId || own === null;
-  $('save-tools').disabled = sessionScope && !sessionId || !modeId || catalog.length === 0;
+  $('inherit-tools').disabled = !sessionId || kind !== 'custom';
+  const unmatched = unmatchedToolRuleCount(modeId, scope);
+  const catalogError = state.toolCatalogErrors?.[modeId];
   $('tool-note').textContent = !modeId ? '当前会话没有可识别的 DSH 模式。' :
-    catalog.length === 0 ? `${modeName(modeId)} 尚无工具目录；打开该模式的会话后即可配置。` :
-      sessionScope ? own === null ? `当前会话继承 ${modeName(modeId)} 的模式默认，共 ${catalog.length} 个工具。` :
-        `当前会话正在使用独立覆盖，共 ${catalog.length} 个工具；保存后下一次请求生效。` :
-        `${modeName(modeId)} 的模式默认工具策略，共 ${catalog.length} 个。`;
-  $('tool-list').replaceChildren();
-  for (const tool of catalog) {
+    catalog.length === 0 ? `${modeName(modeId)} 尚无工具目录；打开该模式的会话后即可配置。${catalogError ? `（${catalogError}）` : ''}` :
+      describeToolSelection(scope, modeId, kind, catalog) + (unmatched ? ` · 另有 ${unmatched} 条未匹配工具规则（缺少对应模式或插件）` : '');
+}
+function describeToolSelection(scope, modeId, kind, catalog) {
+  const name = modeName(modeId);
+  if (kind === 'preset') {
+    const presetName = findToolPreset(toolSelection(scope, modeId)?.presetId)?.name ?? '已删除的预设';
+    return scope === 'session'
+      ? `当前会话使用工具预设“${presetName}”，共 ${catalog.length} 个工具；修改预设后下一次请求生效。`
+      : `${name} 使用工具预设“${presetName}”，共 ${catalog.length} 个工具。`;
+  }
+  if (scope === 'session') {
+    return kind === 'inherit'
+      ? `当前会话继承 ${name} 的模式默认，共 ${catalog.length} 个工具。`
+      : `当前会话正在使用独立覆盖，共 ${catalog.length} 个工具；保存后下一次请求生效。`;
+  }
+  return `${name} 的模式默认工具策略，共 ${catalog.length} 个。`;
+}
+function unmatchedToolRuleCount(modeId, scope) {
+  if (!modeId) return 0;
+  const known = new Set(toolCatalog(modeId).map(tool => tool.name));
+  const unmatched = new Set();
+  const collectRules = rules => {
+    for (const rule of rules ?? []) {
+      if (rule.modeId === modeId && rule.toolName && !known.has(rule.toolName)) unmatched.add(rule.toolName);
+    }
+  };
+  const collectFlat = policy => {
+    for (const toolName of Object.keys(policy ?? {})) if (!known.has(toolName)) unmatched.add(toolName);
+  };
+  const collectModeLayer = () => {
+    const modeSelection = toolSelection('mode', modeId);
+    if (modeSelection?.kind === 'preset') {
+      const preset = findToolPreset(modeSelection.presetId);
+      if (preset) {
+        collectRules(preset.rules);
+        return;
+      }
+    }
+    collectFlat(state.modeToolPolicies?.[modeId]);
+  };
+  if (scope === 'mode') {
+    collectModeLayer();
+  } else {
+    const kind = toolSelectionKind('session', modeId);
+    if (kind === 'preset') {
+      const preset = findToolPreset(toolSelection('session', modeId)?.presetId);
+      if (preset) collectRules(preset.rules);
+      else collectModeLayer();
+    } else if (kind === 'custom' && state.sessionToolPolicy != null) {
+      collectFlat(state.sessionToolPolicy);
+    } else {
+      // inherit，以及选择自定义但尚未保存会话策略（服务端解析为模式结果）
+      collectModeLayer();
+    }
+  }
+  for (const ref of state.unresolvedToolRefs ?? []) {
+    if (ref.modeId === modeId && ref.toolName && !known.has(ref.toolName)) unmatched.add(ref.toolName);
+  }
+  return unmatched.size;
+}
+function renderToolPresetBar(scope, modeId, kind, catalog) {
+  const sessionScope = scope === 'session';
+  const selection = toolSelection(scope, modeId);
+  const presets = state.toolPresets ?? [];
+  const options = [];
+  if (sessionScope) options.push(new Option('继承模式默认', 'inherit'));
+  options.push(new Option('自定义', 'custom'));
+  for (const preset of presets) options.push(new Option(preset.name || preset.id, `${TOOL_PRESET_PREFIX}${preset.id}`));
+  $('tool-preset').replaceChildren(...options);
+  const selectedId = kind === 'preset' && findToolPreset(selection?.presetId) ? selection.presetId : '';
+  $('tool-preset').value = selectedId ? `${TOOL_PRESET_PREFIX}${selectedId}` :
+    kind === 'inherit' && sessionScope ? 'inherit' : 'custom';
+  $('tool-preset-copy').disabled = $('tool-preset-rename').disabled = $('tool-preset-delete').disabled = !selectedId;
+  $('tool-preset-new').disabled = !modeId || catalog.length === 0;
+  const counts = selectedId ? state.toolPresetRefCounts?.[selectedId] : null;
+  $('tool-preset-refs').textContent = !selectedId ? '' : counts
+    ? `被 ${counts.modes ?? 0} 个模式、${counts.sessions ?? 0} 个会话引用`
+    : `被 ${Object.values(state.modeToolSelections ?? {}).filter(item => item?.kind === 'preset' && item.presetId === selectedId).length} 个模式引用（会话引用计数暂不可用）`;
+}
+function renderUnresolvedToolRefs() {
+  const box = $('unresolved-tools');
+  const refs = state.unresolvedToolRefs ?? [];
+  box.hidden = refs.length === 0;
+  box.replaceChildren();
+  if (!refs.length) return;
+  const head = document.createElement('p');
+  head.textContent = `未匹配引用 ${refs.length} 项（安装对应插件并打开其会话后自动重新匹配）：`;
+  box.append(head);
+  const list = document.createElement('ul');
+  for (const ref of refs.slice(0, 20)) {
+    const item = document.createElement('li');
+    item.textContent = `${ref.ownerName ?? ref.ownerId ?? '未知来源'} · ${ref.kind === 'group' ? '分组' : '工具预设'} · ${ref.modeId} / ${ref.toolName}`;
+    list.append(item);
+  }
+  if (refs.length > 20) {
+    const item = document.createElement('li');
+    item.textContent = `… 另有 ${refs.length - 20} 项`;
+    list.append(item);
+  }
+  box.append(list);
+}
+
+function renderToolTabs() {
+  const tabs = toolTabsFor(toolView.modeId);
+  const available = new Set(tabs.map(tab => tab.id));
+  const remembered = storageGet(toolActiveGroupKey(toolView.modeId), '@all');
+  if (!available.has(toolView.active)) toolView.active = available.has(remembered) ? remembered : '@all';
+  toolView.tabs = tabs;
+  const collapsed = storageGet(TOOL_TABS_COLLAPSED_KEY, '0') === '1' || compactToolTabs.matches;
+  const tablist = $('tool-tablist');
+  tablist.hidden = collapsed;
+  tablist.replaceChildren(...tabs.map(tab => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.setAttribute('role', 'tab');
+    button.id = toolTabElementId(tab.id);
+    button.dataset.group = tab.id;
+    button.setAttribute('aria-controls', toolPanelElementId(tab.id));
+    button.setAttribute('aria-selected', String(tab.id === toolView.active));
+    button.tabIndex = tab.id === toolView.active ? 0 : -1;
+    const label = document.createElement('span');
+    label.className = 'tab-label';
+    label.textContent = toolTabLabel(tab);
+    button.append(label);
+    button.onclick = () => activateToolGroup(tab.id);
+    return button;
+  }));
+  $('tool-group-select-wrap').hidden = !collapsed;
+  $('tool-group-select').replaceChildren(...tabs.map(tab => new Option(toolTabLabel(tab), tab.id)));
+  $('tool-group-select').value = toolView.active;
+  $('tool-tabs-toggle').setAttribute('aria-expanded', String(!collapsed));
+  $('tool-tabs-toggle').textContent = collapsed ? '展开标签栏' : '收起标签栏';
+  const panels = $('tool-group-panels');
+  const contentOpen = storageGet(TOOL_CONTENT_OPEN_KEY, '1') !== '0';
+  panels.replaceChildren(...tabs.map(tab => {
+    const panel = document.createElement('details');
+    panel.className = 'tool-group-content';
+    panel.id = toolPanelElementId(tab.id);
+    panel.dataset.group = tab.id;
+    panel.setAttribute('role', 'tabpanel');
+    panel.setAttribute('aria-labelledby', toolTabElementId(tab.id));
+    panel.open = contentOpen;
+    panel.addEventListener('toggle', event => {
+      if (event.target === panel) storageSet(TOOL_CONTENT_OPEN_KEY, panel.open ? '1' : '0');
+    });
+    return panel;
+  }));
+  syncToolTabs(false);
+}
+function syncToolTabs(focus) {
+  for (const button of $('tool-tablist').querySelectorAll('[role="tab"]')) {
+    const selected = button.dataset.group === toolView.active;
+    button.setAttribute('aria-selected', String(selected));
+    button.tabIndex = selected ? 0 : -1;
+    if (selected && focus) button.focus();
+  }
+  $('tool-group-select').value = toolView.active;
+  for (const panel of $('tool-group-panels').children) {
+    const selected = panel.dataset.group === toolView.active;
+    panel.hidden = !selected;
+    if (selected) renderToolGroupPanel(panel);
+    else panel.replaceChildren();
+  }
+}
+function activateToolGroup(id, options = {}) {
+  if (!toolView.tabs.some(tab => tab.id === id)) return;
+  toolView.active = id;
+  if (options.persist !== false) storageSet(toolActiveGroupKey(toolView.modeId), id);
+  syncToolTabs(options.focus === true);
+}
+function toolButton(text, handler) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.textContent = text;
+  button.onclick = handler;
+  return button;
+}
+function renderToolGroupPanel(panel) {
+  const tab = toolView.tabs.find(item => item.id === panel.dataset.group);
+  panel.replaceChildren();
+  if (!tab) return;
+  const descriptions = new Map(toolCatalog(toolView.modeId).map(tool => [tool.name, tool.description || '无描述']));
+  const summary = document.createElement('summary');
+  const head = document.createElement('span');
+  head.className = 'group-summary';
+  const toggle = document.createElement('input');
+  toggle.type = 'checkbox';
+  toggle.className = 'group-switch';
+  toggle.setAttribute('aria-label', `全开或全关 ${tab.name}`);
+  toggle.onchange = () => {
+    for (const name of tab.tools) toolDraft.policy[name] = toggle.checked;
+    markToolDirty();
+    rerenderToolGroup();
+  };
+  const stat = document.createElement('span');
+  stat.className = 'group-stat';
+  head.append(toggle, stat);
+  const actions = document.createElement('span');
+  actions.className = 'group-actions';
+  for (const [op, text] of [['all-on', '全开'], ['all-off', '全关'], ['only', '仅启用此组'], ['restore', '恢复预设值']]) {
+    const button = toolButton(text, () => applyToolBatch(op, tab));
+    button.dataset.op = op;
+    actions.append(button);
+  }
+  summary.append(head, actions);
+  summary.addEventListener('click', event => {
+    if (!event.target.closest('input,button,select,textarea,a')) return;
+    const wasOpen = panel.open;
+    queueMicrotask(() => { if (panel.open !== wasOpen) panel.open = wasOpen; });
+  });
+  const listWrap = document.createElement('details');
+  listWrap.className = 'tool-list-toggle';
+  listWrap.open = true;
+  const listSummary = document.createElement('summary');
+  const list = document.createElement('div');
+  list.className = 'check-list tools';
+  list.id = 'tool-list';
+  for (const name of tab.tools) {
     const label = document.createElement('label');
     label.className = 'check-entry';
     const input = document.createElement('input');
     input.type = 'checkbox';
+    input.dataset.tool = name;
+    input.checked = toolDraft.policy[name] !== false;
+    input.onchange = () => {
+      toolDraft.policy[name] = input.checked;
+      markToolDirty();
+      updateToolGroupSummary(panel);
+      refreshToolTabLabels();
+    };
+    const text = document.createElement('span');
+    text.textContent = name;
+    const small = document.createElement('small');
+    small.textContent = descriptions.get(name) ?? '无描述';
+    text.append(small);
+    label.append(input, text);
+    list.append(label);
+  }
+  listWrap.append(listSummary, list);
+  panel.append(summary, listWrap);
+  updateToolGroupSummary(panel);
+}
+function updateToolGroupSummary(panel) {
+  const tab = toolView.tabs.find(item => item.id === panel?.dataset.group);
+  if (!tab) return;
+  const enabled = toolGroupEnabledCount(tab);
+  const total = tab.tools.length;
+  const toggle = panel.querySelector('.group-switch');
+  if (toggle) {
+    toggle.checked = total > 0 && enabled === total;
+    toggle.indeterminate = enabled > 0 && enabled < total;
+    toggle.disabled = total === 0;
+  }
+  const stat = panel.querySelector('.group-stat');
+  if (stat) stat.textContent = `已启用 ${enabled}/${total}`;
+  const listSummary = panel.querySelector('.tool-list-toggle>summary');
+  if (listSummary) listSummary.textContent = `工具列表（${total} 个）`;
+  const restorable = !!restoreToolReference();
+  for (const button of panel.querySelectorAll('[data-op]')) {
+    if (button.dataset.op === 'restore') {
+      button.disabled = !restorable;
+      button.title = restorable ? toolView.sessionScope ? '将本组工具恢复为模式继承值' : '将本组工具恢复为已保存的模式默认值'
+        : '仅自定义策略可以恢复预设值';
+    } else {
+      button.disabled = total === 0;
+    }
+  }
+}
+function refreshToolTabLabels() {
+  for (const tab of toolView.tabs) {
+    const label = toolTabLabel(tab);
+    const button = $('tool-tablist').querySelector(`[role="tab"][data-group="${CSS.escape(tab.id)}"]`);
+    const span = button?.querySelector('.tab-label');
+    if (span) span.textContent = label;
+    const option = [...$('tool-group-select').options].find(item => item.value === tab.id);
+    if (option) option.textContent = label;
+  }
+}
+function rerenderToolGroup() {
+  const panel = activeToolPanel();
+  if (panel) renderToolGroupPanel(panel);
+  refreshToolTabLabels();
+}
+function restoreToolReference() {
+  const scope = toolView.sessionScope ? 'session' : 'mode';
+  if (toolSelectionKind(scope, toolView.modeId) !== 'custom') return null;
+  return toolView.sessionScope
+    ? modeToolPolicy(toolView.modeId)
+    : normalizeToolPolicy(state.modeToolPolicies?.[toolView.modeId] ?? {}, toolView.modeId);
+}
+function applyToolBatch(op, tab) {
+  const modeId = toolView.modeId;
+  if (op === 'all-on') {
+    for (const name of tab.tools) toolDraft.policy[name] = true;
+  } else if (op === 'all-off') {
+    for (const name of tab.tools) toolDraft.policy[name] = false;
+  } else if (op === 'only') {
+    for (const tool of toolCatalog(modeId)) toolDraft.policy[tool.name] = false;
+    for (const name of tab.tools) toolDraft.policy[name] = true;
+  } else if (op === 'restore') {
+    const reference = restoreToolReference();
+    if (!reference) return;
+    for (const name of tab.tools) toolDraft.policy[name] = reference[name] !== false;
+  } else return;
+  markToolDirty();
+  rerenderToolGroup();
+}
+
+function assignableToolModes() {
+  const modes = (state.agentModes ?? []).filter(mode => !mode.broken && toolCatalog(mode.id).length > 0);
+  const known = new Set(modes.map(mode => mode.id));
+  for (const modeId of Object.keys(state.toolCatalogs ?? {})) {
+    if (!known.has(modeId) && toolCatalog(modeId).length > 0) modes.push({ id: modeId, name: modeId });
+  }
+  return modes;
+}
+function renderGroupPage() {
+  $('tool-groups-page').hidden = !groupPageOpen;
+  $('tool-tab-area').hidden = groupPageOpen;
+  $('manage-groups').setAttribute('aria-expanded', String(groupPageOpen));
+  $('manage-groups').textContent = groupPageOpen ? '隐藏分组管理' : '管理分组';
+  if (!groupPageOpen) return;
+  const list = $('group-list');
+  list.replaceChildren();
+  const modes = assignableToolModes();
+  const ordered = sortToolGroups(groupDraft);
+  if (!ordered.length) {
+    const empty = document.createElement('p');
+    empty.className = 'muted';
+    empty.textContent = '还没有自定义分组。点击“＋ 新增分组”，再用复选框把工具分配到分组。';
+    list.append(empty);
+  }
+  for (const [index, group] of ordered.entries()) list.append(groupEditor(group, index, ordered.length, modes));
+}
+function groupEditor(group, index, count, modes) {
+  const box = document.createElement('div');
+  box.className = 'group-editor';
+  box.dataset.group = group.id;
+  const head = document.createElement('div');
+  head.className = 'row';
+  const nameLabel = document.createElement('label');
+  nameLabel.className = 'grow';
+  nameLabel.textContent = '分组名称';
+  const nameInput = document.createElement('input');
+  nameInput.value = group.name ?? '';
+  nameInput.oninput = () => {
+    group.name = nameInput.value;
+    markGroupsDirty();
+    renderToolTabs();
+  };
+  nameLabel.append(nameInput);
+  const orderLabel = document.createElement('label');
+  orderLabel.textContent = '顺序';
+  const orderInput = document.createElement('input');
+  orderInput.type = 'number';
+  orderInput.min = '0';
+  orderInput.value = String(Number(group.order) || 0);
+  orderInput.onchange = () => {
+    group.order = Math.max(0, Math.round(Number(orderInput.value) || 0));
+    markGroupsDirty();
+    renderGroupPage();
+    renderToolTabs();
+  };
+  orderLabel.append(orderInput);
+  const up = toolButton('↑ 上移', () => moveToolGroup(group.id, -1));
+  up.disabled = index === 0;
+  const down = toolButton('↓ 下移', () => moveToolGroup(group.id, 1));
+  down.disabled = index === count - 1;
+  const remove = toolButton('删除', () => {
+    if (!confirm(`删除分组“${group.name || '未命名分组'}”？只删除成员关系，不改变工具开关。`)) return;
+    groupDraft = groupDraft.filter(item => item.id !== group.id);
+    groupEditorModes.delete(group.id);
+    markGroupsDirty();
+    renderGroupPage();
+    renderToolTabs();
+  });
+  remove.className = 'danger';
+  head.append(nameLabel, orderLabel, up, down, remove);
+  const descLabel = document.createElement('label');
+  descLabel.className = 'grow';
+  descLabel.textContent = '分组描述（可选）';
+  const descInput = document.createElement('input');
+  descInput.value = group.description ?? '';
+  descInput.oninput = () => {
+    group.description = descInput.value;
+    markGroupsDirty();
+  };
+  descLabel.append(descInput);
+  const members = document.createElement('div');
+  members.className = 'group-members';
+  const modeRow = document.createElement('div');
+  modeRow.className = 'row';
+  const modeLabel = document.createElement('label');
+  modeLabel.textContent = '分配工具的模式';
+  const modeSelect = document.createElement('select');
+  modeSelect.className = 'group-member-mode';
+  modeSelect.replaceChildren(...modes.map(mode => new Option(mode.name, mode.id)));
+  const candidates = modes.map(mode => mode.id);
+  const preferred = groupEditorModes.get(group.id);
+  const chosen = candidates.includes(preferred) ? preferred : candidates.includes(toolView.modeId) ? toolView.modeId : candidates[0] ?? '';
+  modeSelect.value = chosen;
+  groupEditorModes.set(group.id, chosen);
+  modeSelect.onchange = () => {
+    groupEditorModes.set(group.id, modeSelect.value);
+    renderGroupPage();
+  };
+  modeLabel.append(modeSelect);
+  const counts = document.createElement('span');
+  counts.className = 'muted';
+  counts.dataset.role = 'member-count';
+  counts.textContent = `本组共 ${(group.members ?? []).length} 个工具`;
+  modeRow.append(modeLabel, counts);
+  const grid = document.createElement('div');
+  grid.className = 'check-list tools';
+  if (!chosen) {
+    const none = document.createElement('p');
+    none.className = 'muted';
+    none.textContent = '暂无可分配的工具目录；打开对应模式的会话后即可配置。';
+    grid.append(none);
+  }
+  for (const tool of toolCatalog(chosen)) {
+    const label = document.createElement('label');
+    label.className = 'check-entry';
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.dataset.mode = chosen;
     input.dataset.tool = tool.name;
-    input.checked = policy[tool.name] !== false;
+    input.checked = (group.members ?? []).some(member => member.modeId === chosen && member.toolName === tool.name);
+    input.onchange = () => {
+      group.members = (group.members ?? []).filter(member => !(member.modeId === chosen && member.toolName === tool.name));
+      if (input.checked) {
+        for (const other of groupDraft) {
+          if (other.id === group.id) continue;
+          other.members = (other.members ?? []).filter(member => !(member.modeId === chosen && member.toolName === tool.name));
+        }
+        group.members.push({ modeId: chosen, toolName: tool.name });
+      }
+      markGroupsDirty();
+      syncGroupMembership(chosen, tool.name);
+      renderToolTabs();
+    };
     const text = document.createElement('span');
     text.textContent = tool.name;
     const small = document.createElement('small');
     small.textContent = tool.description || '无描述';
     text.append(small);
     label.append(input, text);
-    $('tool-list').append(label);
+    grid.append(label);
+  }
+  members.append(modeRow, grid);
+  box.append(head, descLabel, members);
+  return box;
+}
+function syncGroupMembership(modeId, toolName) {
+  for (const box of $('group-list').querySelectorAll('.group-editor')) {
+    const group = groupDraft.find(item => item.id === box.dataset.group);
+    if (!group) continue;
+    const counts = box.querySelector('[data-role="member-count"]');
+    if (counts) counts.textContent = `本组共 ${(group.members ?? []).length} 个工具`;
+    const select = box.querySelector('.group-member-mode');
+    if (!select || select.value !== modeId) continue;
+    const input = box.querySelector(`input[data-mode="${CSS.escape(modeId)}"][data-tool="${CSS.escape(toolName)}"]`);
+    if (input) input.checked = (group.members ?? []).some(member => member.modeId === modeId && member.toolName === toolName);
   }
 }
-function collectToolPolicy() {
-  const policy = {};
-  for (const input of $('tool-list').querySelectorAll('input[data-tool]')) policy[input.dataset.tool] = input.checked;
-  return policy;
+function moveToolGroup(id, delta) {
+  const ordered = sortToolGroups(groupDraft);
+  const index = ordered.findIndex(group => group.id === id);
+  const target = index + delta;
+  if (index < 0 || target < 0 || target >= ordered.length) return;
+  [ordered[index], ordered[target]] = [ordered[target], ordered[index]];
+  ordered.forEach((group, position) => { group.order = (position + 1) * 100; });
+  markGroupsDirty();
+  renderGroupPage();
+  renderToolTabs();
+}
+
+function renderPackageTools(record) {
+  const tools = record?.sharePackage?.tools;
+  const box = $('package-tools');
+  const button = $('import-package-tools');
+  const note = $('package-tools-note');
+  const preview = $('package-tools-preview');
+  packageToolsRecordId = '';
+  if (!tools || !selectedId) {
+    box.hidden = true;
+    note.textContent = '';
+    preview.replaceChildren();
+    button.hidden = true;
+    return;
+  }
+  box.hidden = false;
+  button.hidden = false;
+  const groups = Array.isArray(tools.groups) ? tools.groups.length : 0;
+  const presets = Array.isArray(tools.presets) ? tools.presets.length : 0;
+  const supported = Number(tools.version) === 1;
+  button.disabled = !supported;
+  note.textContent = `包内工具配置：${groups} 个分组 · ${presets} 个工具预设 · tools.version=${tools.version ?? '未标注'}` +
+    (supported ? '。导入不会自动应用，需显式点击。' : '（版本未知，禁止应用；仍会随分享文件原样保留）');
+  preview.replaceChildren();
+  if (!supported) return;
+  const recordId = selectedId;
+  packageToolsRecordId = recordId;
+  preview.textContent = '正在预览导入内容…';
+  api({ action: 'import-package-tools', id: recordId, dryRun: true }).then(result => {
+    if (packageToolsRecordId !== recordId) return;
+    renderPackageToolsPreview(result, '预览导入');
+  }).catch(error => {
+    if (packageToolsRecordId !== recordId) return;
+    preview.textContent = `预览失败：${error.message}`;
+  });
+}
+function renderPackageToolsPreview(result, title) {
+  const box = $('package-tools-preview');
+  box.replaceChildren();
+  const stats = result.stats ?? {};
+  const line = document.createElement('p');
+  line.className = 'muted';
+  line.textContent = `${title}：分组 新增 ${stats.groups?.added ?? 0} / 复用 ${stats.groups?.reused ?? 0} / 重映射 ${stats.groups?.remapped ?? 0}` +
+    `；工具预设 新增 ${stats.presets?.added ?? 0} / 复用 ${stats.presets?.reused ?? 0} / 重映射 ${stats.presets?.remapped ?? 0}` +
+    `；引用匹配 ${stats.matched ?? 0}、未匹配 ${stats.unmatched ?? 0}`;
+  box.append(line);
+  const warnings = result.warnings ?? [];
+  if (warnings.length) {
+    const warning = document.createElement('p');
+    warning.className = 'muted';
+    warning.textContent = `未匹配警告：${warnings.join('；')}`;
+    box.append(warning);
+  }
 }
 
 function renderList() {
@@ -375,9 +1038,14 @@ $('add').onclick = () => {
 };
 
 function discardOkay() {
-  return !dirty || confirm('放弃尚未保存的预设草稿？');
+  return (!dirty || confirm('放弃尚未保存的预设草稿？')) && toolDiscardOkay() && groupDiscardOkay();
 }
-$('new').onclick = () => { if (discardOkay()) loadDraft(''); };
+$('new').onclick = () => {
+  if (!discardOkay()) return;
+  discardToolDrafts();
+  loadDraft('');
+  renderToolPanel({ force: true });
+};
 $('library').onchange = guard(async () => {
   const id = $('library').value;
   if (!discardOkay()) {
@@ -464,34 +1132,240 @@ $('save-auto-modes').onclick = guard(async () => {
   await reload(selectedId);
   status('自动启用模式列表已保存，仅影响之后新建的会话');
 });
-$('tool-scope').onchange = renderToolPanel;
-$('tool-mode').onchange = renderToolPanel;
+$('tool-scope').onchange = () => {
+  const previousScope = toolView.sessionScope ? 'session' : 'mode';
+  if (!toolDiscardOkay()) {
+    $('tool-scope').value = previousScope;
+    renderToolPanel();
+    return;
+  }
+  renderToolPanel({ force: true });
+};
+$('tool-mode').onchange = () => {
+  const previousMode = toolView.modeId;
+  if (!toolDiscardOkay()) {
+    $('tool-mode').value = previousMode;
+    renderToolPanel();
+    return;
+  }
+  renderToolPanel({ force: true });
+};
+$('tool-preset').onchange = guard(async () => {
+  const value = $('tool-preset').value;
+  const sessionScope = $('tool-scope').value === 'session';
+  if (sessionScope && !sessionId) throw new Error('当前页面没有会话，无法切换会话工具策略');
+  const modeId = sessionScope ? state.sessionMode ?? '' : $('tool-mode').value;
+  if (!modeId) {
+    renderToolPanel();
+    throw new Error('请先选择要配置的 DSH 模式');
+  }
+  if (!toolDiscardOkay()) {
+    renderToolPanel();
+    return;
+  }
+  const selection = value === 'inherit' ? { kind: 'inherit' } :
+    value === 'custom' ? { kind: 'custom' } :
+      { kind: 'preset', presetId: value.slice(TOOL_PRESET_PREFIX.length) };
+  await api({
+    action: 'select-tool-policy',
+    scope: sessionScope ? 'session' : 'mode',
+    ...(sessionScope ? { sessionId } : { modeId }),
+    selection,
+  });
+  await reload(selectedId);
+  status(selection.kind === 'inherit' ? '当前会话已恢复继承模式默认工具，下一次请求生效' :
+    selection.kind === 'custom' ? '已切换为逐工具自定义策略，下一次请求生效' :
+      `工具预设已应用到当前${sessionScope ? '会话' : '模式'}，下一次请求生效`);
+});
+$('tool-preset-new').onclick = guard(async () => {
+  const { sessionScope, modeId } = toolContext();
+  const catalog = toolCatalog(modeId);
+  if (!modeId || !catalog.length) throw new Error('当前模式没有可用的工具目录');
+  const suggested = `${modeName(modeId)} 工具预设`;
+  const input = prompt('新工具预设名称', suggested);
+  if (input === null) return;
+  const policy = effectiveToolPolicy(modeId, sessionScope);
+  const rules = catalog
+    .filter(tool => policy[tool.name] === false)
+    .map(tool => ({ modeId, toolName: tool.name, enabled: false }));
+  const name = input.trim() || suggested;
+  const created = await api({
+    action: 'save-tool-preset',
+    id: null,
+    preset: { name, description: '', defaultEnabled: true, groupIds: [], rules },
+  });
+  await api({
+    action: 'select-tool-policy',
+    scope: sessionScope ? 'session' : 'mode',
+    ...(sessionScope ? { sessionId } : { modeId }),
+    selection: { kind: 'preset', presetId: created.id },
+  });
+  await reload(selectedId);
+  status(`工具预设“${name}”已新建并应用到当前${sessionScope ? '会话' : '模式'}，下一次请求生效`);
+});
+$('tool-preset-copy').onclick = guard(async () => {
+  const { sessionScope, modeId } = toolContext();
+  const preset = findToolPreset(toolSelection(sessionScope ? 'session' : 'mode', modeId)?.presetId);
+  if (!preset) throw new Error('请先选择一个工具预设');
+  const input = prompt('复制工具预设名称', `${preset.name} 副本`);
+  if (input === null) return;
+  const name = input.trim() || `${preset.name} 副本`;
+  await api({
+    action: 'save-tool-preset',
+    id: null,
+    preset: {
+      name,
+      description: preset.description ?? '',
+      defaultEnabled: preset.defaultEnabled !== false,
+      groupIds: [...(preset.groupIds ?? [])],
+      rules: structuredClone(preset.rules ?? []),
+    },
+  });
+  await reload(selectedId);
+  status(`工具预设已复制为“${name}”；当前选择未改变`);
+});
+$('tool-preset-rename').onclick = guard(async () => {
+  const { sessionScope, modeId } = toolContext();
+  const preset = findToolPreset(toolSelection(sessionScope ? 'session' : 'mode', modeId)?.presetId);
+  if (!preset) throw new Error('请先选择一个工具预设');
+  const input = prompt('重命名工具预设', preset.name);
+  if (input === null || !input.trim() || input.trim() === preset.name) return;
+  const name = input.trim();
+  await api({
+    action: 'save-tool-preset',
+    id: preset.id,
+    preset: {
+      name,
+      description: preset.description ?? '',
+      defaultEnabled: preset.defaultEnabled !== false,
+      groupIds: [...(preset.groupIds ?? [])],
+      rules: structuredClone(preset.rules ?? []),
+    },
+  });
+  await reload(selectedId);
+  status(`工具预设已重命名为“${name}”`);
+});
+$('tool-preset-delete').onclick = guard(async () => {
+  const { sessionScope, modeId } = toolContext();
+  const preset = findToolPreset(toolSelection(sessionScope ? 'session' : 'mode', modeId)?.presetId);
+  if (!preset) throw new Error('请先选择一个工具预设');
+  const counts = state.toolPresetRefCounts?.[preset.id];
+  const modes = counts?.modes ?? Object.values(state.modeToolSelections ?? {})
+    .filter(item => item?.kind === 'preset' && item.presetId === preset.id).length;
+  const sessions = counts?.sessions ?? 0;
+  if (!confirm(`确定删除工具预设“${preset.name}”？它被 ${modes} 个模式、${sessions} 个会话引用；删除后这些模式回到自定义策略，会话回到继承模式默认。此操作无法撤销。`)) return;
+  await api({ action: 'delete-tool-preset', id: preset.id });
+  await reload(selectedId);
+  status('工具预设已删除，引用它的模式回到自定义、会话回到继承');
+});
 for (const [id, checked] of [['select-all-tools', true], ['clear-all-tools', false]]) {
   $(id).onclick = () => {
-    for (const input of $('tool-list').querySelectorAll('input[data-tool]')) input.checked = checked;
+    for (const tool of toolCatalog(toolView.modeId)) toolDraft.policy[tool.name] = checked;
+    markToolDirty();
+    rerenderToolGroup();
   };
 }
 $('save-tools').onclick = guard(async () => {
-  const policy = collectToolPolicy();
-  if ($('tool-scope').value === 'session') {
+  const scope = toolView.sessionScope ? 'session' : 'mode';
+  const modeId = toolView.modeId;
+  const kind = toolSelectionKind(scope, modeId);
+  const policy = { ...toolDraft.policy };
+  if (scope === 'session') {
+    if (!sessionId) throw new Error('当前页面没有会话，无法保存会话工具开关');
     await api({ action: 'save-session-tools', sessionId, policy });
-    await reload(selectedId);
-    status('当前会话工具已更新，下一次请求生效');
   } else {
-    await api({ action: 'save-mode-tools', modeId: $('tool-mode').value, policy });
-    await reload(selectedId);
-    status('模式默认工具已保存，该模式会话的下一次请求生效');
+    if (!modeId) throw new Error('请先选择要保存的 DSH 模式');
+    await api({ action: 'save-mode-tools', modeId, policy });
   }
+  await reload(selectedId);
+  status(kind === 'preset' ? '工具开关已保存并切换为自定义策略，下一次请求生效' :
+    scope === 'session' ? '当前会话工具已更新，下一次请求生效' :
+      '模式默认工具已保存，该模式会话的下一次请求生效');
 });
 $('inherit-tools').onclick = guard(async () => {
+  if (!sessionId) throw new Error('当前页面没有会话，无法恢复继承');
+  if (!toolDiscardOkay()) return;
   await api({ action: 'save-session-tools', sessionId, inherit: true });
   await reload(selectedId);
   status('当前会话已恢复继承模式默认工具');
 });
+$('tool-tabs-toggle').onclick = () => {
+  const collapsed = storageGet(TOOL_TABS_COLLAPSED_KEY, '0') === '1';
+  storageSet(TOOL_TABS_COLLAPSED_KEY, collapsed ? '0' : '1');
+  renderToolTabs();
+};
+$('tool-group-select').onchange = () => activateToolGroup($('tool-group-select').value);
+$('tool-tablist').onkeydown = event => {
+  const tabs = [...$('tool-tablist').querySelectorAll('[role="tab"]')];
+  const index = tabs.indexOf(document.activeElement);
+  if (index < 0) return;
+  let next = -1;
+  if (event.key === 'ArrowRight') next = (index + 1) % tabs.length;
+  else if (event.key === 'ArrowLeft') next = (index - 1 + tabs.length) % tabs.length;
+  else if (event.key === 'Home') next = 0;
+  else if (event.key === 'End') next = tabs.length - 1;
+  else if (event.key === 'Enter' || event.key === ' ') next = index;
+  else return;
+  event.preventDefault();
+  activateToolGroup(tabs[next].dataset.group, { focus: true });
+};
+$('manage-groups').onclick = () => {
+  groupPageOpen = !groupPageOpen;
+  renderGroupPage();
+};
+$('group-back').onclick = () => {
+  groupPageOpen = false;
+  renderGroupPage();
+};
+$('group-new').onclick = () => {
+  const maxOrder = groupDraft.reduce((max, group) => Math.max(max, Number(group.order) || 0), 0);
+  groupDraft.push({
+    id: crypto.randomUUID(),
+    name: `新分组 ${groupDraft.length + 1}`,
+    description: '',
+    order: maxOrder + 100,
+    members: [],
+  });
+  markGroupsDirty();
+  renderGroupPage();
+  renderToolTabs();
+};
+$('group-save').onclick = guard(async () => {
+  const groups = groupDraft.map(group => ({
+    id: group.id,
+    name: group.name ?? '',
+    description: group.description ?? '',
+    order: Number(group.order) || 0,
+    members: (group.members ?? []).map(member => ({ modeId: member.modeId, toolName: member.toolName })),
+  }));
+  const result = await api({ action: 'save-tool-groups', groups });
+  await reload(selectedId);
+  const warnings = result.warnings ?? [];
+  status(warnings.length ? `工具分组已保存 · ${warnings.length} 项提示：${warnings.join('；')}` : '工具分组已保存');
+});
+$('import-package-tools').onclick = guard(async () => {
+  if (!selectedId) throw new Error('请先在预设库中选择带工具配置的预设');
+  if (!groupDiscardOkay() || !toolDiscardOkay()) return;
+  if (!confirm('导入包内工具配置？会新增或更新工具分组与工具预设，不会自动应用到任何模式或会话。')) return;
+  const result = await api({ action: 'import-package-tools', id: selectedId });
+  await reload(selectedId);
+  const stats = result.stats ?? {};
+  status(`包内工具配置已导入：分组新增 ${stats.groups?.added ?? 0} 个、工具预设新增 ${stats.presets?.added ?? 0} 个、未匹配 ${stats.unmatched ?? 0} 个`);
+});
+compactToolTabs.addEventListener('change', () => renderToolTabs());
 $('export-package').onclick = guard(async () => {
-  const document = await api({ action: 'export-package', id: selectedId, name: $('name').value, preset });
+  const scope = toolView.sessionScope ? 'session' : 'mode';
+  const selection = toolSelection(scope, toolView.modeId);
+  const toolPresetId = selection?.kind === 'preset' ? selection.presetId : '';
+  const document = await api({
+    action: 'export-package',
+    id: selectedId,
+    name: $('name').value,
+    preset,
+    ...(toolPresetId ? { toolPresetId } : {}),
+  });
   downloadJson(document, `${$('name').value || 'preset'}.dsh-preset.json`);
-  status('分享文件已导出；接口配置取自包内保存值或全局已保存设置');
+  status(toolPresetId ? '分享文件已导出，并附带当前选中的工具预设；接口配置取自包内保存值或全局已保存设置' : '分享文件已导出；接口配置取自包内保存值或全局已保存设置');
 });
 function downloadJson(document, filename) {
   const url = URL.createObjectURL(new Blob([JSON.stringify(document, null, 2)], { type: 'application/json' }));
@@ -532,9 +1406,10 @@ $('last').onclick = guard(async () => {
   show(latest.last.result);
 });
 
+$('tool-scope').querySelector('option[value="session"]').disabled = !sessionId;
 $('tool-scope').value = sessionId ? 'session' : 'mode';
 window.addEventListener('beforeunload', event => {
-  if (dirty) {
+  if (dirty || toolDraft.dirty || groupsDirty) {
     event.preventDefault();
     event.returnValue = '';
   }
