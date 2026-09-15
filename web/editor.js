@@ -72,6 +72,11 @@ function loadDraft(id) {
   selectedId = id;
   const record = state.presets.find(item => item.id === id);
   preset = structuredClone(record?.preset ?? blank());
+  const packaged = record?.sharePackage;
+  $('apply-package-prefill').hidden = !packaged?.prefill;
+  $('package-note').textContent = packaged
+    ? '此预设附带分享数据。导入不会改动全局接口设置；可点击应用包内设置。保存接口设置会同时更新当前已保存预设的分享数据。工具预设与分组数据仅保留。'
+    : '分享文件为单个 .dsh-preset.json，包含预设与已保存接口设置，并预留工具预设和分组。';
   ensureGroups();
   $('name').value = record?.name ?? '新预设';
   $('library').value = id;
@@ -403,11 +408,10 @@ $('import').onchange = guard(async () => {
   try {
     if (file.size > 8_000_000) throw new Error('预设文件不能超过 8 MB');
     const parsed = JSON.parse(await file.text());
-    if (!Array.isArray(parsed.prompts)) throw new Error('文件不是 SillyTavern 提示词预设');
-    const name = file.name.replace(/\.json$/i, '');
-    const result = await api({ action: 'save', id: '', name, preset: parsed });
+    const name = file.name.replace(/(?:\.dsh-preset)?\.json$/i, '');
+    const result = await api({ action: 'import', name, document: parsed });
     await reload(result.id);
-    status('预设已导入、全局保存并设为当前默认');
+    status(parsed.format === 'dsh-preset-enhance' ? '预设包已导入并设为当前默认；全局接口设置保持原值' : '预设已导入、全局保存并设为当前默认');
   } finally {
     $('import').value = '';
   }
@@ -434,9 +438,17 @@ $('bind').onclick = guard(async () => {
   await reload(selectedId);
   status('会话设置已应用，下一次请求生效');
 });
+$('apply-package-prefill').onclick = guard(async () => {
+  if (!discardOkay()) return;
+  await api({ action: 'apply-package-prefill', id: selectedId });
+  await reload(selectedId);
+  status('包内接口设置已应用到全局，下一次请求生效');
+});
 $('save-deepseek-beta').onclick = guard(async () => {
+  if (dirty) throw new Error('请先保存或放弃预设草稿');
   await api({
     action: 'save-deepseek-beta',
+    presetId: selectedId,
     postToolPrefixMode: $('post-tool-prefix-mode').value,
     postToolPrefixText: $('post-tool-prefix-text').value,
     enabled: $('deepseek-beta-prefix').checked,
@@ -476,14 +488,21 @@ $('inherit-tools').onclick = guard(async () => {
   await reload(selectedId);
   status('当前会话已恢复继承模式默认工具');
 });
-$('export').onclick = () => {
-  const url = URL.createObjectURL(new Blob([JSON.stringify(preset, null, 2)], { type: 'application/json' }));
-  const anchor = document.createElement('a');
+$('export-package').onclick = guard(async () => {
+  const document = await api({ action: 'export-package', id: selectedId, name: $('name').value, preset });
+  downloadJson(document, `${$('name').value || 'preset'}.dsh-preset.json`);
+  status('分享文件已导出；接口配置取自包内保存值或全局已保存设置');
+});
+function downloadJson(document, filename) {
+  const url = URL.createObjectURL(new Blob([JSON.stringify(document, null, 2)], { type: 'application/json' }));
+  const anchor = window.document.createElement('a');
   anchor.href = url;
-  anchor.download = `${$('name').value || 'preset'}.json`;
+  anchor.download = filename;
   anchor.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
-};
+}
+$('export').onclick = () => downloadJson(preset, `${$('name').value || 'preset'}.json`);
+
 function show(result) {
   $('warnings').textContent = result.warnings.join('\n');
   $('output').replaceChildren();

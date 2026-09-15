@@ -9,7 +9,7 @@
   "homepage": "https://github.com/bychv/dsh-preset-enhance",
   "main": "./index.mjs",
   "exports": { ".": "./index.mjs", "./mode": "./mode.mjs", "./client": "./client.js", "./package.json": "./package.json" },
-  "files": ["index.mjs", "mode.mjs", "client.js", "agent-mode", "lib", "web", "cordis.patch.yml", "README.md"],
+  "files": ["index.mjs", "mode.mjs", "client.js", "agent-mode", "lib", "web", "cordis.patch.yml", "README.md", "PRESET_FORMAT.md"],
   "dsh": {
     "bundle": { "patch": "./cordis.patch.yml" },
     "client": { "platform": "web", "inject": ["@deepseek-ai/dsh-client-ui-renderer", "@deepseek-ai/dsh-client-ui-layout", "@deepseek-ai/dsh-client-ui-sidebar", "@deepseek-ai/dsh-client-ui-conversation"] }

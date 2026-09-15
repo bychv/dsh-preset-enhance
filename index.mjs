@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 import { PresetStore } from './lib/store.mjs';
 import { compilePreset, validatePreset, getOrder } from './lib/preset.mjs';
+import { decodePresetDocument, encodePresetPackage, attachPrefillSettings, applyPackagePrefill } from './lib/preset-package.mjs';
 import { installDeepSeekBetaBridge } from './lib/deepseek-beta.mjs';
 
 export const name = 'preset-enhance';
@@ -173,6 +174,16 @@ export async function apply(ctx, config = {}) {
           }));
         }
 
+        if (body.action === 'export-package') {
+          const state = await store.read();
+          if (body.revision !== state.revision) throw new Error('预设已被其他窗口更新，请重新加载后再导出');
+          const record = state.presets.find(preset => preset.id === body.id);
+          return respond(res, 200, encodePresetPackage({
+            ...record, name: String(body.name || record?.name || '未命名预设').slice(0, 200),
+            preset: body.preset ?? record?.preset,
+          }, state));
+        }
+
         const needsModes = ['save-auto-modes', 'save-mode-tools', 'save-session-tools'].includes(body.action);
         const modeRows = needsModes ? await agentModeRows(ctx) : [];
         const knownModes = needsModes ? new Set(modeRows.map(mode => mode.id)) : null;
@@ -180,13 +191,16 @@ export async function apply(ctx, config = {}) {
           await discoverModeToolCatalogs(ctx, modeRows) : null;
         const result = await store.transaction(state => {
           if (body.revision !== state.revision) throw new Error('预设已被其他窗口更新，请重新加载后再保存');
-          if (body.action === 'save') {
-            validatePreset(body.preset);
-            const old = state.presets.find(p => p.id === body.id);
+          if (body.action === 'save' || body.action === 'import') {
+            const imported = body.action === 'import' ? decodePresetDocument(body.document, String(body.name || '未命名预设')) : null;
+            validatePreset(imported?.preset ?? body.preset);
+            const old = body.action === 'save' ? state.presets.find(p => p.id === body.id) : undefined;
             const record = {
+              ...old,
+              ...imported,
               id: old?.id ?? randomUUID(),
-              name: String(body.name || '未命名预设').slice(0, 200),
-              preset: body.preset,
+              name: String(imported?.name || body.name || '未命名预设').slice(0, 200),
+              preset: imported?.preset ?? body.preset,
             };
             if (old) state.presets[state.presets.indexOf(old)] = record;
             else state.presets.push(record);
@@ -235,6 +249,13 @@ export async function apply(ctx, config = {}) {
             state.revision++;
             return { id: record.id };
           }
+          if (body.action === 'apply-package-prefill') {
+            const record = state.presets.find(preset => preset.id === body.id);
+            if (!record?.sharePackage) throw new Error('请选择带有接口设置的预设包');
+            applyPackagePrefill(state, record);
+            state.revision++;
+            return { id: record.id };
+          }
           if (body.action === 'save-deepseek-beta') {
             if (typeof body.enabled !== 'boolean') throw new Error('预填充接口开关值无效');
             if (body.toolCalls !== undefined) {
@@ -254,6 +275,11 @@ export async function apply(ctx, config = {}) {
               state.postToolPrefixText = body.postToolPrefixText;
             }
             state.deepseekBetaPrefix = body.enabled;
+            if (body.presetId) {
+              const record = state.presets.find(preset => preset.id === body.presetId);
+              if (!record) throw new Error('请选择有效的已保存预设');
+              attachPrefillSettings(record, state);
+            }
             state.revision++;
             return {
               enabled: state.deepseekBetaPrefix,
