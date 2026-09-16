@@ -13,7 +13,7 @@ dsh plugin --profile web add dsh-preset-enhance@alpha
 如需固定安装当前 alpha 版本：
 
 ~~~powershell
-dsh plugin --profile web add dsh-preset-enhance@0.3.2-alpha.1
+dsh plugin --profile web add dsh-preset-enhance@0.3.2-alpha.2
 ~~~
 
 也可以直接从 GitHub 安装 `alpha` 分支的最新源码：
