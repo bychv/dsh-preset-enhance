@@ -1,6 +1,6 @@
 {
   "name": "dsh-preset-enhance",
-  "version": "0.3.1-rc.1",
+  "version": "0.3.2-alpha.2",
   "type": "module",
   "description": "SillyTavern prompt presets, macros and editor for DeepSeek Harness",
   "author": "bychv <89071107+bychv@users.noreply.github.com>",
@@ -9,11 +9,11 @@
   "homepage": "https://github.com/bychv/dsh-preset-enhance",
   "main": "./index.mjs",
   "exports": { ".": "./index.mjs", "./mode": "./mode.mjs", "./client": "./client.js", "./package.json": "./package.json" },
-  "files": ["index.mjs", "mode.mjs", "client.js", "agent-mode", "lib", "web", "cordis.patch.yml", "README.md"],
+  "files": ["index.mjs", "mode.mjs", "client.js", "agent-mode", "lib", "web", "cordis.patch.yml", "README.md", "PRESET_FORMAT.md"],
   "dsh": {
     "bundle": { "patch": "./cordis.patch.yml" },
     "client": { "platform": "web", "inject": ["@deepseek-ai/dsh-client-ui-renderer", "@deepseek-ai/dsh-client-ui-layout", "@deepseek-ai/dsh-client-ui-sidebar", "@deepseek-ai/dsh-client-ui-conversation"] }
   },
   "engines": { "node": ">=22.19.0", "dsh": ">=0.1.5-rc.2 <0.1.6" },
-  "scripts": { "test": "node --test tests/*.test.mjs", "check": "node --check index.mjs && node --check web/editor.js && node --check client.js", "pack:check": "npm pack --dry-run" }
+  "scripts": { "test": "node --test tests/*.test.mjs", "test:mcp:candidate": "node scripts/sandbox-verify.mjs mcp --slot candidate", "check": "node --check index.mjs && node --check web/editor.js && node --check web/tool-labels.js && node --check client.js", "pack:check": "npm pack --dry-run" }
 }

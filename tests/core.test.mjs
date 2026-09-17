@@ -7,8 +7,17 @@ import { Readable } from 'node:stream';
 import { createMacroContext, renderMacros } from '../lib/macros.mjs';
 import { compilePreset } from '../lib/preset.mjs';
 import { PresetStore } from '../lib/store.mjs';
-import { rewriteDeepSeekPrefixFetch } from '../lib/deepseek-beta.mjs';
+import { installDeepSeekBetaBridge, rewriteDeepSeekPrefixFetch } from '../lib/deepseek-beta.mjs';
 import { AGENT_PRESET_ID, apply, buildPresetModeComposition, discoverModeToolCatalogs, ensurePresetAgentMode } from '../index.mjs';
+
+const FETCH_BRIDGE = Symbol.for('dsh-preset-enhance.deepseek-beta-fetch-bridge');
+/** Earlier tests may leave the shared fetch wrapper installed; restore the real fetch. */
+function resetFetchBridge() {
+  const host = globalThis[FETCH_BRIDGE];
+  if (!host) return;
+  globalThis.fetch = host.original;
+  delete globalThis[FETCH_BRIDGE];
+}
 
 test('variables resolve in textual order, nested values preserve delimiters, comments are inert', () => {
   const ctx = createMacroContext({ values: { user: 'A::B' } });
@@ -147,14 +156,42 @@ test('new conversations inject and pin the globally selected preset after reopen
     assert.deepEqual((await new PresetStore(file).read()).bindings.auto, { enabled: true, presetId: 'selected', characterId: null, values: {}, markers: {} });
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
-test('client registers the conversation view, main panel and sidebar button through slot injection', async () => {
+test('client registers the workbench and locks both DSH resize handles while mounted', async () => {
   let definition;
+  const cleanups = [];
+  const rootAttributes = new Set();
+  const styles = [];
   globalThis.window = { __ModuleLoader__: { load(value) { definition = value; } } };
+  globalThis.document = {
+    documentElement: {
+      setAttribute(name) { rootAttributes.add(name); },
+      removeAttribute(name) { rootAttributes.delete(name); },
+    },
+    head: { appendChild(style) { styles.push(style); } },
+    querySelector(selector) {
+      return selector === 'style[data-preset-enhance-resize-lock]' ? styles[0] ?? null : null;
+    },
+    createElement(tag) {
+      assert.equal(tag, 'style');
+      const attributes = new Set();
+      return {
+        textContent: '',
+        setAttribute(name) { attributes.add(name); },
+        remove() {
+          const index = styles.indexOf(this);
+          if (index >= 0) styles.splice(index, 1);
+        },
+      };
+    },
+  };
   try {
-    await import(`../client.js?test=${Date.now()}`);
+    await import('../client.js?test=' + Date.now());
     const plugin = definition.factory(name => {
       assert.equal(name, 'react');
-      return { createElement: (type, props, ...children) => ({ type, props, children }) };
+      return {
+        createElement: (type, props, ...children) => ({ type, props, children }),
+        useEffect(effect) { cleanups.push(effect()); },
+      };
     });
     const injected = [], registered = [];
     plugin.apply({ slots: {
@@ -165,7 +202,34 @@ test('client registers the conversation view, main panel and sidebar button thro
     assert.deepEqual(registered.map(x => [x.options.name, x.options.id ?? x.options.key]), [
       ['conversation.view', 'preset-enhance-editor'], ['main', 'preset-enhance-editor'], ['sidebar.panellist', 'preset-enhance-editor'],
     ]);
-  } finally { delete globalThis.window; }
+
+    const conversationEntry = registered.find(entry => entry.options.name === 'conversation.view');
+    assert.equal(conversationEntry.options.inject, undefined);
+    const conversationFrame = conversationEntry.component({
+      sessionId: 'conversation-session',
+      useSessions(selector) { return selector({ current: 'other-session' }); },
+    });
+    assert.equal(conversationFrame.props.src, '/preset-enhance?sessionId=conversation-session');
+    const frame = registered.find(entry => entry.options.name === 'main').component({
+      useSessions(selector) { return selector({ current: 'current-session' }); },
+    });
+    assert.equal(frame.type, 'iframe');
+    assert.equal(frame.props.src, '/preset-enhance?sessionId=current-session');
+    assert.equal(rootAttributes.has('data-preset-enhance-workbench'), true);
+    assert.equal(styles.length, 1);
+    assert.match(styles[0].textContent, /data-side="sidebar"/);
+    assert.match(styles[0].textContent, /data-side="rightbar"/);
+    assert.match(styles[0].textContent, /display:none!important/);
+
+    cleanups.shift()();
+    assert.equal(rootAttributes.has('data-preset-enhance-workbench'), true);
+    cleanups.shift()();
+    assert.equal(rootAttributes.has('data-preset-enhance-workbench'), false);
+    assert.equal(styles.length, 0);
+  } finally {
+    delete globalThis.document;
+    delete globalThis.window;
+  }
 });
 
 test('preset mode composition inherits standard tools while replacing its persona', () => {
@@ -337,7 +401,7 @@ test('saved imports are global and the last library selection survives reopening
       llm: { stream: options => listeners['llm/stream'](options, async function* () {}) },
     };
     await apply(ctx, { dataFile: file, agentPresetRoot: join(dir, '.agent-presets') });
-    const post = async body => {
+    const postRaw = async body => {
       const req = Readable.from([JSON.stringify(body)]);
       req.method = 'POST';
       req.url = '/preset-enhance/api';
@@ -348,6 +412,10 @@ test('saved imports are global and the last library selection survives reopening
         end(value) { payload = JSON.parse(String(value)); },
       };
       await apiHandler(req, res);
+      return { statusCode, payload };
+    };
+    const post = async body => {
+      const { statusCode, payload } = await postRaw(body);
       assert.equal(statusCode, 200, payload?.error);
       return payload;
     };
@@ -358,14 +426,68 @@ test('saved imports are global and the last library selection survives reopening
     const first = await post({ revision: 0, action: 'save', name: 'A', preset });
     const second = await post({ revision: 1, action: 'save', name: 'B', preset });
     await post({ revision: 2, action: 'select-preset', id: first.id });
-    await post({ revision: 3, action: 'save-deepseek-beta', enabled: true });
+    await post({ revision: 3, action: 'save-deepseek-beta', enabled: true, toolCalls: true, removeNonOfficialTools: false, postToolPrefixMode: 'custom', postToolPrefixText: 'Review results' });
 
     const reopened = await new PresetStore(file).read();
     assert.deepEqual(reopened.presets.map(item => item.name), ['A', 'B']);
     assert.equal(reopened.selectedPresetId, first.id);
     assert.equal(reopened.defaultPresetId, first.id);
     assert.equal(reopened.deepseekBetaPrefix, true);
+    assert.equal(reopened.prefixToolCalls, true);
+    assert.equal(reopened.postToolPrefixMode, 'custom');
+    assert.equal(reopened.postToolPrefixText, 'Review results');
+    assert.equal(reopened.prefixNonOfficialRemoveTools, false);
+    assert.equal(Object.hasOwn(reopened, 'prefixRelayUrl'), false);
     assert.notEqual(first.id, second.id);
+
+    const rejected = await postRaw({
+      revision: reopened.revision,
+      action: 'save-deepseek-beta',
+      enabled: true,
+      removeNonOfficialTools: null,
+    });
+    assert.equal(rejected.statusCode, 400);
+    assert.match(rejected.payload.error, /工具移除开关/);
+    assert.equal((await new PresetStore(file).read()).prefixNonOfficialRemoveTools, false);
+
+    for (const invalid of [{ postToolPrefixMode: 'unknown' }, { postToolPrefixText: null }]) {
+      const response = await postRaw({ revision: reopened.revision,
+        action: 'save-deepseek-beta', enabled: true, ...invalid });
+      assert.equal(response.statusCode, 400);
+      assert.equal((await new PresetStore(file).read()).postToolPrefixText, 'Review results');
+    }
+
+    const external = new PresetStore(file);
+    await external.transaction(state => {
+      state.bindings.bound = {
+        enabled: true,
+        presetId: first.id,
+        characterId: 100001,
+        values: { user: 'User' },
+        markers: {},
+      };
+      state.sessions.bound = { presetId: first.id, key: 'stale' };
+      state.revision++;
+    });
+    const deleted = await post({ revision: 5, action: 'delete-preset', id: first.id });
+    assert.equal(deleted.id, second.id);
+    const afterFirstDelete = await external.read();
+    assert.deepEqual(afterFirstDelete.presets.map(item => item.name), ['B']);
+    assert.equal(afterFirstDelete.selectedPresetId, second.id);
+    assert.equal(afterFirstDelete.defaultPresetId, second.id);
+    assert.equal(afterFirstDelete.bindings.bound.enabled, true);
+    assert.equal(afterFirstDelete.bindings.bound.presetId, second.id);
+    assert.equal(afterFirstDelete.bindings.bound.characterId, null);
+    assert.equal(afterFirstDelete.sessions.bound, undefined);
+
+    const deletedLast = await post({ revision: 6, action: 'delete-preset', id: second.id });
+    assert.equal(deletedLast.id, null);
+    const empty = await external.read();
+    assert.equal(empty.presets.length, 0);
+    assert.equal(empty.selectedPresetId, null);
+    assert.equal(empty.defaultPresetId, null);
+    assert.equal(empty.bindings.bound.enabled, false);
+    assert.equal(empty.bindings.bound.presetId, '');
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 test('negative order and trailing ordered assistant compile as a prefix', () => {
@@ -448,9 +570,362 @@ test('DeepSeek Beta bridge supplies reasoning fields only for the activated offi
   assert.equal(JSON.parse(disabled.init.body).messages.at(-1).content, prefix);
   assert.equal(JSON.parse(disabled.init.body).messages.at(-1).reasoning_content, undefined);
 
-  assert.equal(rewriteDeepSeekPrefixFetch('https://example.com/chat/completions', init, [registry]).changed, false);
+  // Without an activation nothing is rewritten, and non chat-completion URLs are never touched.
+  assert.equal(rewriteDeepSeekPrefixFetch('https://adapter.example.com/v1/chat/completions', init, []).changed, false);
+  assert.equal(rewriteDeepSeekPrefixFetch('https://adapter.example.com/v1/files', init, [registry]).changed, false);
   assert.equal(rewriteDeepSeekPrefixFetch('https://api.deepseek.com/chat/completions', {
     ...init,
     headers: { ...init.headers, 'x-deepseek-harness-session-id': 'another-session' },
   }, [registry]).changed, false);
+});
+
+test('non-official adapter supports pass-through, removal and DSML tool handling', () => {
+  const prefix = '<think>\ncontinue the plan';
+  const tools = [{ type: 'function', function: { name: 'noop', parameters: { type: 'object' } } }];
+  const body = {
+    model: 'adapter-model',
+    messages: [
+      { role: 'user', content: 'hello' },
+      { role: 'assistant', content: 'previous answer' },
+      { role: 'assistant', content: prefix },
+    ],
+    thinking: { type: 'enabled' },
+    tools,
+    tool_choice: 'auto',
+    parallel_tool_calls: false,
+    stream: true,
+  };
+  const init = {
+    method: 'POST',
+    headers: { 'x-deepseek-harness-session-id': 'session-1', 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  };
+  const endpoint = 'https://adapter.example.com/v1/chat/completions';
+
+  const removingRegistry = new Map([['session-1', new Map([[
+    prefix, { count: 1, removeNonOfficialTools: true },
+  ]])]]);
+  const removed = rewriteDeepSeekPrefixFetch(endpoint, init, [removingRegistry]);
+  assert.equal(removed.changed, true);
+  assert.equal(removed.mode, 'adapter');
+  assert.equal(removed.input, endpoint);
+  const removedBody = JSON.parse(removed.init.body);
+  assert.equal(removedBody.tools, undefined);
+  assert.equal(removedBody.tool_choice, undefined);
+  assert.equal(removedBody.parallel_tool_calls, undefined);
+  assert.deepEqual(removedBody.messages.at(-1), {
+    role: 'assistant', content: '', reasoning_content: 'continue the plan', prefix: true,
+  });
+  assert.equal(removedBody.messages[1].reasoning_content, '');
+
+  const passThroughRegistry = new Map([['session-1', new Map([[
+    prefix, { count: 1, removeNonOfficialTools: false },
+  ]])]]);
+  const passThrough = rewriteDeepSeekPrefixFetch(endpoint, init, [passThroughRegistry]);
+  const passThroughBody = JSON.parse(passThrough.init.body);
+  assert.deepEqual(passThroughBody.tools, tools);
+  assert.equal(passThroughBody.tool_choice, 'auto');
+  assert.equal(passThroughBody.parallel_tool_calls, false);
+  assert.equal(passThroughBody.messages.at(-1).prefix, true);
+
+  const emulatingRegistry = new Map([['session-1', new Map([[
+    prefix, { count: 1, toolCalls: true, removeNonOfficialTools: false },
+  ]])]]);
+  const emulated = rewriteDeepSeekPrefixFetch(endpoint, init, [emulatingRegistry]);
+  const emulatedBody = JSON.parse(emulated.init.body);
+  assert.equal(emulatedBody.tools, undefined);
+  assert.equal(emulatedBody.tool_choice, undefined);
+  assert.match(emulatedBody.messages[0].content, /## Tools/);
+  assert.match(emulatedBody.messages[0].content, /noop/);
+  assert.deepEqual(emulated.responseTransform, {
+    contentPrefix: '',
+    reasoningPrefix: 'continue the plan',
+  });
+
+  const official = rewriteDeepSeekPrefixFetch('https://api.deepseek.com/chat/completions', init, [passThroughRegistry]);
+  assert.equal(official.mode, 'official');
+  assert.equal(official.input, 'https://api.deepseek.com/beta/chat/completions');
+  assert.equal(JSON.parse(official.init.body).tools, undefined);
+
+  assert.equal(rewriteDeepSeekPrefixFetch('https://adapter.example.com/v1/files', init, [passThroughRegistry]).changed, false);
+});
+
+test('adapter replays historical tool reasoning from tags and compatible aliases', () => {
+  const prefix = 'Answer: ';
+  const toolCalls = [{
+    id: 'call-weather',
+    type: 'function',
+    function: { name: 'lookup_weather', arguments: '{"city":"Shanghai"}' },
+  }];
+  const body = {
+    messages: [
+      { role: 'user', content: 'Check the weather.' },
+      { role: 'assistant', content: '<think>\nI should call the weather tool.</think>\n', tool_calls: toolCalls },
+      { role: 'tool', tool_call_id: 'call-weather', content: '{"temperature":22}' },
+      { role: 'assistant', content: 'Earlier answer.', reasoning: 'Summarize the tool result.' },
+      { role: 'user', content: 'Continue.' },
+      { role: 'assistant', content: prefix },
+    ],
+    thinking: { type: 'enabled' },
+    tools: [{ type: 'function', function: { name: 'lookup_weather' } }],
+  };
+  const init = {
+    headers: { 'x-deepseek-harness-session-id': 's' },
+    body: JSON.stringify(body),
+  };
+  const registry = new Map([['s', new Map([[
+    prefix, { count: 1, removeNonOfficialTools: true },
+  ]])]]);
+
+  const rewritten = rewriteDeepSeekPrefixFetch('https://adapter.example.com/v1/chat/completions', init, [registry]);
+  const messages = JSON.parse(rewritten.init.body).messages;
+  assert.deepEqual(messages[1], {
+    role: 'assistant',
+    content: '',
+    reasoning_content: 'I should call the weather tool.',
+    tool_calls: toolCalls,
+  });
+  assert.equal(messages[3].reasoning, 'Summarize the tool result.');
+  assert.equal(messages[3].reasoning_content, 'Summarize the tool result.');
+  assert.equal(JSON.parse(rewritten.init.body).tools, undefined);
+});
+
+test('active assistant prefix is detected on any non-official adapter address', () => {
+  const prefix = 'Answer: ';
+  const makeInit = content => ({
+    method: 'POST',
+    headers: { 'x-deepseek-harness-session-id': 's' },
+    body: JSON.stringify({
+      messages: [{ role: 'user', content: 'hi' }, { role: 'assistant', content }],
+      tools: [{ type: 'function', function: { name: 'noop' } }],
+    }),
+  });
+  const activated = new Map([['s', new Map([[
+    prefix, { count: 1, removeNonOfficialTools: false },
+  ]])]]);
+
+  for (const endpoint of [
+    'https://first.example.com/v1/chat/completions',
+    'http://127.0.0.1:8080/chat/completions',
+  ]) {
+    const rewritten = rewriteDeepSeekPrefixFetch(endpoint, makeInit(prefix), [activated]);
+    assert.equal(rewritten.changed, true);
+    assert.equal(rewritten.mode, 'adapter');
+    assert.equal(rewritten.input, endpoint);
+    assert.deepEqual(JSON.parse(rewritten.init.body).tools, [
+      { type: 'function', function: { name: 'noop' } },
+    ]);
+  }
+  assert.equal(rewriteDeepSeekPrefixFetch(
+    'https://first.example.com/v1/chat/completions', makeInit('different'), [activated],
+  ).changed, false);
+  assert.equal(rewriteDeepSeekPrefixFetch(
+    'https://first.example.com/v1/chat/completions', makeInit(prefix), [],
+  ).changed, false);
+});
+
+test('the installed fetch bridge rewrites only an activated adapter prefill request', async () => {
+  resetFetchBridge();
+  const previous = globalThis.fetch;
+  const calls = [];
+  const stub = async (input, init) => { calls.push({ input: String(input), init }); return { ok: true, status: 200 }; };
+  globalThis.fetch = stub;
+  try {
+    const controller = installDeepSeekBetaBridge({ effect: fn => { fn(); } });
+    const init = { method: 'POST', headers: { 'x-deepseek-harness-session-id': 's' },
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }, { role: 'assistant', content: '<think>\ncontinue' }],
+        tools: [{ type: 'function', function: { name: 'noop' } }] }) };
+    const release = controller.activate('s', '<think>\ncontinue', { removeNonOfficialTools: true });
+    await globalThis.fetch('https://adapter.example.com/v1/chat/completions', init);
+    assert.equal(calls.length, 1);
+    const body = JSON.parse(calls[0].init.body);
+    assert.equal(body.messages.at(-1).prefix, true);
+    assert.equal(body.tools, undefined);
+
+    release();
+    await globalThis.fetch('https://adapter.example.com/v1/chat/completions', init);
+    assert.equal(calls[1].init, init);
+
+    controller.dispose();
+    assert.equal(globalThis.fetch, stub);
+  } finally {
+    resetFetchBridge();
+    globalThis.fetch = previous;
+  }
+});
+
+test('installed fetch bridge converts an emulated adapter response back to tool calls', async () => {
+  resetFetchBridge();
+  const previous = globalThis.fetch;
+  const calls = [];
+  const dsml = [
+    '<｜｜DSML｜｜ calls>',
+    '<｜｜DSML｜｜ invoke name="noop">',
+    '<｜｜DSML｜｜ parameter name="value" string="false">7</｜｜DSML｜｜ parameter>',
+    '</｜｜DSML｜｜ invoke>',
+    '</｜｜DSML｜｜ calls>',
+  ].join('\n');
+  globalThis.fetch = async (input, init) => {
+    calls.push({ input: String(input), init });
+    return new Response(JSON.stringify({
+      choices: [{
+        index: 0,
+        message: { role: 'assistant', content: dsml, reasoning_content: '' },
+        finish_reason: 'stop',
+      }],
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  try {
+    const controller = installDeepSeekBetaBridge({ effect: fn => fn() });
+    const release = controller.activate('s', 'Prefix: ', { toolCalls: true });
+    const response = await globalThis.fetch('https://adapter.example.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'x-deepseek-harness-session-id': 's', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        messages: [{ role: 'user', content: 'use a tool' }, { role: 'assistant', content: 'Prefix: ' }],
+        tools: [{ type: 'function', function: { name: 'noop', parameters: { type: 'object' } } }],
+        tool_choice: 'auto',
+      }),
+    });
+    const outgoing = JSON.parse(calls[0].init.body);
+    assert.equal(outgoing.tools, undefined);
+    assert.equal(outgoing.tool_choice, undefined);
+    assert.match(outgoing.messages[0].content, /## Tools/);
+
+    const data = await response.json();
+    assert.equal(data.choices[0].finish_reason, 'tool_calls');
+    assert.equal(data.choices[0].message.content, 'Prefix: ');
+    assert.equal(data.choices[0].message.tool_calls[0].function.name, 'noop');
+    assert.deepEqual(JSON.parse(data.choices[0].message.tool_calls[0].function.arguments), { value: 7 });
+
+    release();
+    controller.dispose();
+  } finally {
+    resetFetchBridge();
+    globalThis.fetch = previous;
+  }
+});
+
+
+test('adapter tool settings drive prefix rewriting end to end', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-preset-adapter-'));
+  resetFetchBridge();
+  const previous = globalThis.fetch;
+  const posted = [], disposers = [], listeners = {};
+  try {
+    globalThis.fetch = async (input, init) => {
+      posted.push({ input: String(input), init });
+      return new Response(JSON.stringify({ choices: [] }), {
+        status: 200, headers: { 'content-type': 'application/json' },
+      });
+    };
+    const file = join(dir, 'state.json'), store = new PresetStore(file);
+    await store.transaction(state => {
+      state.presets.push({ id: 'p', name: 'Prefix', preset: {
+        prompts: [
+          { identifier: 'chatHistory', marker: true, role: 'user' },
+          { identifier: 'prefix', role: 'assistant', content: '<think>\n继续' },
+        ],
+        prompt_order: [{ character_id: 100001, order: [
+          { identifier: 'chatHistory', enabled: true },
+          { identifier: 'prefix', enabled: true },
+        ] }],
+      } });
+      state.selectedPresetId = 'p';
+      state.defaultPresetId = 'p';
+      state.bindings.s = { enabled: true, presetId: 'p', characterId: null, values: {}, markers: {} };
+      state.deepseekBetaPrefix = true;
+      state.prefixToolCalls = true;
+      state.prefixNonOfficialRemoveTools = true;
+    });
+    const session = { id: 's', header: { agentPreset: 'standard' }, snapshotEvents: () => [] };
+    const nativeTools = [{ type: 'function', function: { name: 'noop', parameters: { type: 'object' } } }];
+    const ctx = {
+      sessions: { get: id => id === 's' ? session : undefined },
+      on: (name, fn) => listeners[name] = fn,
+      effect: fn => { const disposer = fn(); if (typeof disposer === 'function') disposers.push(disposer); return disposer; },
+      webServer: { register: () => () => {} },
+      llm: { stream: options => listeners['llm/stream'](options, async function* () {
+        await globalThis.fetch('https://adapter.example.com/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'x-deepseek-harness-session-id': options.sessionId, 'content-type': 'application/json' },
+          body: JSON.stringify({
+            model: 'adapter-model',
+            messages: options.messages.map(message => ({
+              role: message.role,
+              content: message.content.map(block => block.type === 'text' ? block.text : '').join(''),
+            })),
+            thinking: { type: 'enabled' },
+            tools: nativeTools,
+            tool_choice: 'auto',
+            parallel_tool_calls: false,
+          }),
+        });
+        yield { type: 'finish', reason: { kind: 'completed' } };
+      }) },
+    };
+    await apply(ctx, { dataFile: file, agentPresetRoot: join(dir, '.agent-presets') });
+    const send = async (messages = [msg('u', 'user', 'hi')]) => {
+      const before = posted.length;
+      for await (const _ of ctx.llm.stream({
+        sessionId: 's',
+        provider: 'plugin-provided-adapter',
+        model: 'adapter-model',
+        messages,
+      })) {}
+      assert.equal(posted.length, before + 1);
+      return JSON.parse(posted.at(-1).init.body);
+    };
+    const configure = async values => {
+      await store.transaction(state => {
+        Object.assign(state, values);
+        state.revision++;
+      });
+    };
+
+    const emulated = await send();
+    assert.deepEqual(emulated.messages.at(-1), {
+      role: 'assistant', content: '', reasoning_content: '继续', prefix: true,
+    });
+    assert.equal(emulated.tools, undefined);
+    assert.match(emulated.messages[0].content, /## Tools/);
+
+    const toolHistory = [msg('u', 'user', 'hi'), {
+      ...msg('result', 'user', 'tool output'), source: { kind: 'tool' },
+    }];
+    assert.equal((await send(toolHistory)).messages.at(-1).reasoning_content, '继续');
+    await configure({ postToolPrefixMode: 'custom', postToolPrefixText: '<think>\nReview {{lastmessage}}' });
+    assert.equal((await new PresetStore(file).read()).postToolPrefixText, '<think>\nReview {{lastmessage}}');
+    assert.equal((await send(toolHistory)).messages.at(-1).reasoning_content, 'Review tool output');
+    assert.equal((await send([...toolHistory, {
+      ...msg('result2', 'user', 'second output'), source: { kind: 'tool' },
+    }])).messages.at(-1).reasoning_content, 'Review second output');
+    assert.equal((await send([...toolHistory, msg('new', 'user', 'next turn')])).messages.at(-1).reasoning_content, '继续');
+    await configure({ postToolPrefixText: 'Updated continuation' });
+    assert.equal((await send(toolHistory)).messages.at(-1).content, 'Updated continuation');
+    await configure({ deepseekBetaPrefix: false });
+    assert.equal((await send(toolHistory)).messages.at(-1).content, '<think>\n继续');
+    await configure({ deepseekBetaPrefix: true, postToolPrefixText: '' });
+    assert.equal((await send(toolHistory)).messages.at(-1).reasoning_content, '继续');
+    await configure({ postToolPrefixMode: 'inherit', postToolPrefixText: 'unused' });
+    assert.equal((await send(toolHistory)).messages.at(-1).reasoning_content, '继续');
+
+    await configure({ prefixToolCalls: false, prefixNonOfficialRemoveTools: false });
+    const passedThrough = await send();
+    assert.deepEqual(passedThrough.tools, nativeTools);
+    assert.equal(passedThrough.tool_choice, 'auto');
+    assert.equal(passedThrough.parallel_tool_calls, false);
+    assert.doesNotMatch(passedThrough.messages[0].content, /## Tools/);
+
+    await configure({ prefixNonOfficialRemoveTools: true });
+    const removed = await send();
+    assert.equal(removed.tools, undefined);
+    assert.equal(removed.tool_choice, undefined);
+    assert.equal(removed.parallel_tool_calls, undefined);
+  } finally {
+    for (const dispose of disposers.reverse()) { try { dispose(); } catch {} }
+    resetFetchBridge();
+    globalThis.fetch = previous;
+    await rm(dir, { recursive: true, force: true });
+  }
 });

@@ -4,7 +4,13 @@ import { homedir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 import { PresetStore } from './lib/store.mjs';
 import { compilePreset, validatePreset, getOrder } from './lib/preset.mjs';
-import { DEEPSEEK_OFFICIAL_PROVIDER, installDeepSeekBetaBridge } from './lib/deepseek-beta.mjs';
+import { decodePresetDocument, encodePresetPackage, attachPrefillSettings, applyPackagePrefill } from './lib/preset-package.mjs';
+import { installDeepSeekBetaBridge } from './lib/deepseek-beta.mjs';
+import {
+  normalizeToolGroups, normalizeToolPreset, normalizeToolSelection, assertPresetGroupIds,
+  toolPolicySnapshot, effectiveToolEnabled, effectiveToolPolicy, remapToolPackage,
+  presetReferenceCounts, unresolvedToolRefs, resetPresetSelections, exportToolsSection, TOOL_PRESET_LIMIT,
+} from './lib/tool-presets.mjs';
 
 export const name = 'preset-enhance';
 export const inject = ['llm', 'sessions', 'webServer', 'commands', 'tools', 'agentPresets', 'agents'];
@@ -12,10 +18,15 @@ export const AGENT_PRESET_ID = 'st-preset';
 const BASE = '/preset-enhance';
 const DSH_SYSTEM_PROMPT = '@deepseek-ai/dsh-system-prompt';
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
-const PRESET_COMPILER_VERSION = 2;
+const PRESET_COMPILER_VERSION = 3;
 const ownGet = (object, key) => Object.hasOwn(object, key) ? object[key] : undefined;
 const assign = (object, key, value) => Object.defineProperty(object, key, { value, writable: true, enumerable: true, configurable: true });
 const isRecord = value => value && typeof value === 'object' && !Array.isArray(value);
+/** Actions that need the DSH mode registry; catalog-backed ones also enumerate mode tools. */
+const MODE_ACTIONS = new Set(['save-auto-modes', 'save-mode-tools', 'save-session-tools',
+  'save-tool-groups', 'save-tool-preset', 'select-tool-policy', 'import-package-tools']);
+const CATALOG_ACTIONS = new Set(['save-mode-tools', 'save-session-tools',
+  'save-tool-groups', 'save-tool-preset', 'import-package-tools']);
 
 export async function apply(ctx, config = {}) {
   const home = process.env.DSH_HOME?.trim() || join(homedir(), '.dsh');
@@ -31,8 +42,8 @@ export async function apply(ctx, config = {}) {
   if (ctx.tools?.guard) ctx.effect(() => ctx.tools.guard(exec => {
     const session = exec.agent?.session;
     if (!session) return;
-    const policy = effectiveToolPolicy(policySnapshot, session.id, sessionModeId(session));
-    if (policy[exec.name] === false) return `工具 ${exec.name} 已在预设工作台中关闭`;
+    if (effectiveToolEnabled(policySnapshot, session.id, sessionModeId(session), exec.name) !== false) return;
+    return `工具 ${exec.name} 已在预设工作台中关闭`;
   }), 'preset-enhance: tool policy guard');
   if (ctx.commands?.register) ctx.effect(() => ctx.commands.register(presetCommand(store)), 'preset-enhance: /preset');
 
@@ -70,11 +81,13 @@ export async function apply(ctx, config = {}) {
         if (!binding?.enabled) return null;
         const record = current.presets.find(p => p.id === binding.presetId);
         if (!record) throw new Error('当前会话启用的预设不存在');
-        const key = digest({ compiler: PRESET_COMPILER_VERSION, messages: history, preset: record, binding });
+        const postToolPrefix = current.deepseekBetaPrefix && current.postToolPrefixMode === 'custom'
+          ? current.postToolPrefixText : undefined;
+        const key = digest({ compiler: PRESET_COMPILER_VERSION, messages: history, preset: record, binding, postToolPrefix });
         const prior = ownGet(current.sessions, options.sessionId);
         if (prior?.key === key) return prior.result;
         const result = compilePreset(record.preset, history, {
-          ...binding, seed: key, local: prior?.result.local, global: current.global,
+          ...binding, seed: key, local: prior?.result.local, global: current.global, postToolPrefix,
         });
         options.signal?.throwIfAborted();
         current.global = result.global;
@@ -85,7 +98,7 @@ export async function apply(ctx, config = {}) {
       });
     }
 
-    const policy = effectiveToolPolicy(policySnapshot, options.sessionId, modeId);
+    const policy = effectiveToolPolicy(policySnapshot, options.sessionId, modeId, options.tools);
     const filteredTools = filterTools(options.tools, policy);
     const toolsChanged = (options.tools?.length ?? 0) !== filteredTools.length;
     const messages = compiled?.messages ?? history;
@@ -93,9 +106,11 @@ export async function apply(ctx, config = {}) {
     if (!toolsChanged && !messagesChanged) { yield* next(); return; }
 
     const request = routedRequest(options, messages, filteredTools);
-    const betaPrefix = initial.deepseekBetaPrefix === true && options.provider === DEEPSEEK_OFFICIAL_PROVIDER &&
-      compiled?.assistantPrefix?.active === true;
-    const releaseBeta = betaPrefix ? deepSeekBeta.activate(options.sessionId, messageText(messages.at(-1))) : () => {};
+    const betaPrefix = initial.deepseekBetaPrefix === true && compiled?.assistantPrefix?.active === true;
+    const releaseBeta = betaPrefix ? deepSeekBeta.activate(options.sessionId, messageText(messages.at(-1)), {
+      toolCalls: initial.prefixToolCalls === true,
+      removeNonOfficialTools: initial.prefixNonOfficialRemoveTools !== false,
+    }) : () => {};
     routed.add(request);
     try { yield* ctx.llm.stream(request); } finally { releaseBeta(); routed.delete(request); }
   });
@@ -103,6 +118,7 @@ export async function apply(ctx, config = {}) {
   const assets = new Map([
     [BASE, ['web/index.html', 'text/html']],
     [`${BASE}/editor.js`, ['web/editor.js', 'text/javascript']],
+    [`${BASE}/tool-labels.js`, ['web/tool-labels.js', 'text/javascript']],
     [`${BASE}/editor.css`, ['web/editor.css', 'text/css']],
   ]);
   for (const [path, [file, mime]] of assets) ctx.effect(() => ctx.webServer.register({
@@ -132,16 +148,18 @@ export async function apply(ctx, config = {}) {
           const modeDefault = defaultRecord(state);
           const modes = await agentModeRows(ctx);
           const discovered = await discoverModeToolCatalogs(ctx, modes);
-          const catalogs = { ...state.toolCatalogs, ...discovered.catalogs };
-          const live = liveToolCatalog(ctx, sessionId);
           const liveMode = sessionModeId(session);
-          if (live.length > 0 && liveMode) catalogs[liveMode] = live;
+          const catalogs = requestToolCatalogs(ctx, state, discovered.catalogs, sessionId);
           return respond(res, 200, {
             revision: state.revision,
             presets: state.presets,
             binding: ownGet(state.bindings, sessionId) ?? fallback ?? { enabled: false },
             selectedPresetId: state.selectedPresetId ?? modeDefault?.id ?? null,
+            postToolPrefixMode: state.postToolPrefixMode,
+            postToolPrefixText: state.postToolPrefixText,
             deepseekBetaPrefix: state.deepseekBetaPrefix === true,
+            prefixToolCalls: state.prefixToolCalls === true,
+            prefixNonOfficialRemoveTools: state.prefixNonOfficialRemoveTools !== false,
             modeDefaultPresetId: modeDefault?.id ?? null,
             modeDefaultName: modeDefault?.name ?? null,
             presetMode: liveMode === AGENT_PRESET_ID,
@@ -149,9 +167,16 @@ export async function apply(ctx, config = {}) {
             agentModes: modes,
             autoEnableModes: state.autoEnableModes,
             toolCatalogs: catalogs,
+            mcpToolGroups: mcpToolGroups(catalogs),
             toolCatalogErrors: discovered.errors,
             modeToolPolicies: state.modeToolPolicies,
             sessionToolPolicy: sessionId ? ownGet(state.sessionToolPolicies, sessionId) ?? null : null,
+            toolGroups: state.toolGroups,
+            toolPresets: state.toolPresets,
+            modeToolSelections: state.modeToolSelections,
+            sessionToolSelection: sessionId ? ownGet(state.sessionToolSelections, sessionId) ?? null : null,
+            toolPresetRefCounts: presetReferenceCounts(state),
+            unresolvedToolRefs: unresolvedToolRefs(state, catalogs),
             last: ownGet(state.sessions, sessionId) ?? null,
           });
         }
@@ -165,20 +190,190 @@ export async function apply(ctx, config = {}) {
           }));
         }
 
-        const needsModes = ['save-auto-modes', 'save-mode-tools', 'save-session-tools'].includes(body.action);
+        if (body.action === 'export-package') {
+          const state = await store.read();
+          if (body.revision !== state.revision) throw new Error('预设已被其他窗口更新，请重新加载后再导出');
+          const record = state.presets.find(preset => preset.id === body.id);
+          const requested = typeof body.toolPresetId === 'string' ? body.toolPresetId : '';
+          const toolPresetId = requested && state.toolPresets.some(preset => preset.id === requested) ? requested : null;
+          const tools = toolPresetId ? exportToolsSection(state, toolPresetId) : record?.sharePackage?.tools;
+          return respond(res, 200, encodePresetPackage({
+            ...record, name: String(body.name || record?.name || '未命名预设').slice(0, 200),
+            preset: body.preset ?? record?.preset,
+          }, state, tools));
+        }
+
+        const needsModes = MODE_ACTIONS.has(body.action);
         const modeRows = needsModes ? await agentModeRows(ctx) : [];
         const knownModes = needsModes ? new Set(modeRows.map(mode => mode.id)) : null;
-        const discovered = ['save-mode-tools', 'save-session-tools'].includes(body.action) ?
+        const discovered = CATALOG_ACTIONS.has(body.action) ?
           await discoverModeToolCatalogs(ctx, modeRows) : null;
+
+        if (body.action === 'save-tool-groups') {
+          const state = await store.read();
+          const catalogs = requestToolCatalogs(
+            ctx, state, discovered.catalogs, url.searchParams.get('sessionId') ?? '');
+          const groups = normalizeToolGroups(body.groups, { catalogs, existing: state.toolGroups });
+          const warnings = unresolvedWarnings(unresolvedToolRefs({ toolGroups: groups }, catalogs));
+          return respond(res, 200, await store.transaction(current => {
+            assertRevision(current, body);
+            current.toolGroups = groups;
+            current.revision++;
+            refreshPolicies(current);
+            return { groups: current.toolGroups, warnings };
+          }));
+        }
+
+        if (body.action === 'save-tool-preset') {
+          if (!isRecord(body.preset)) throw new Error('工具预设必须是对象');
+          const state = await store.read();
+          const requestedId = typeof body.id === 'string' && body.id ? body.id
+            : typeof body.preset.id === 'string' && body.preset.id ? body.preset.id : null;
+          const existing = requestedId ? state.toolPresets.find(preset => preset.id === requestedId) : undefined;
+          if (!existing && state.toolPresets.length >= TOOL_PRESET_LIMIT) {
+            throw new Error(`工具预设最多 ${TOOL_PRESET_LIMIT} 个`);
+          }
+          const preset = normalizeToolPreset({ ...body.preset, id: existing ? requestedId : null });
+          assertPresetGroupIds(preset, state.toolGroups);
+          const record = { ...preset, id: existing ? requestedId : randomUUID() };
+          const warnings = unresolvedWarnings(
+            unresolvedToolRefs({ toolPresets: [record] }, requestToolCatalogs(
+              ctx, state, discovered.catalogs, url.searchParams.get('sessionId') ?? '')));
+          return respond(res, 200, await store.transaction(current => {
+            assertRevision(current, body);
+            const index = current.toolPresets.findIndex(item => item.id === record.id);
+            if (index >= 0) current.toolPresets[index] = record;
+            else current.toolPresets.push(record);
+            current.revision++;
+            refreshPolicies(current);
+            return { id: record.id, warnings };
+          }));
+        }
+
+        if (body.action === 'delete-tool-preset') {
+          const state = await store.read();
+          if (!state.toolPresets.some(preset => preset.id === body.id)) throw new Error('请选择要删除的工具预设');
+          return respond(res, 200, await store.transaction(current => {
+            assertRevision(current, body);
+            const index = current.toolPresets.findIndex(preset => preset.id === body.id);
+            if (index < 0) throw new Error('请选择要删除的工具预设');
+            current.toolPresets.splice(index, 1);
+            const { modes, sessions } = resetPresetSelections(current, body.id);
+            current.revision++;
+            refreshPolicies(current);
+            return { id: body.id, modes, sessions };
+          }));
+        }
+
+        if (body.action === 'select-tool-policy') {
+          const state = await store.read();
+          let key;
+          let id;
+          let selection;
+          if (body.scope === 'mode') {
+            if (typeof body.modeId !== 'string' || !knownModes.has(body.modeId)) throw new Error('请选择有效的 DSH 模式');
+            key = 'modeToolSelections';
+            id = body.modeId;
+            selection = normalizeToolSelection(body.selection, 'mode');
+          } else if (body.scope === 'session') {
+            const session = typeof body.sessionId === 'string' ? ctx.sessions.get(body.sessionId) : undefined;
+            if (!session) throw new Error('缺少有效的会话 ID');
+            key = 'sessionToolSelections';
+            id = body.sessionId;
+            selection = normalizeToolSelection(body.selection, 'session');
+          } else {
+            throw new Error('未知的工具策略范围');
+          }
+          if (selection.kind === 'preset' &&
+            !state.toolPresets.some(preset => preset.id === selection.presetId)) {
+            throw new Error('请选择有效的工具预设');
+          }
+          return respond(res, 200, await store.transaction(current => {
+            assertRevision(current, body);
+            assign(current[key], id, selection);
+            current.revision++;
+            refreshPolicies(current);
+            return { selection };
+          }));
+        }
+
+        if (body.action === 'save-mode-tools') {
+          if (typeof body.modeId !== 'string' || !knownModes.has(body.modeId)) throw new Error('请选择有效的 DSH 模式');
+          const state = await store.read();
+          const catalogs = requestToolCatalogs(
+            ctx, state, discovered.catalogs, url.searchParams.get('sessionId') ?? '');
+          const policy = validateToolPolicy(body.policy, catalogs[body.modeId]);
+          const selection = { kind: 'custom' };
+          return respond(res, 200, await store.transaction(current => {
+            assertRevision(current, body);
+            assign(current.modeToolPolicies, body.modeId, policy);
+            assign(current.modeToolSelections, body.modeId, selection);
+            current.revision++;
+            refreshPolicies(current);
+            return { modeId: body.modeId, selection };
+          }));
+        }
+
+        if (body.action === 'save-session-tools') {
+          const session = typeof body.sessionId === 'string' ? ctx.sessions.get(body.sessionId) : undefined;
+          if (!session) throw new Error('缺少有效的会话 ID');
+          const modeId = sessionModeId(session);
+          if (!knownModes.has(modeId)) throw new Error('当前会话没有可识别的 DSH 模式');
+          const inherit = body.inherit === true;
+          const state = await store.read();
+          const catalogs = requestToolCatalogs(ctx, state, discovered.catalogs, body.sessionId);
+          const policy = inherit ? null : validateToolPolicy(body.policy, catalogs[modeId]);
+          return respond(res, 200, await store.transaction(current => {
+            assertRevision(current, body);
+            if (inherit) {
+              delete current.sessionToolPolicies[body.sessionId];
+              delete current.sessionToolSelections[body.sessionId];
+            } else {
+              assign(current.sessionToolPolicies, body.sessionId, policy);
+              assign(current.sessionToolSelections, body.sessionId, { kind: 'custom' });
+            }
+            current.revision++;
+            refreshPolicies(current);
+            return { inherited: inherit };
+          }));
+        }
+
+        if (body.action === 'import-package-tools') {
+          const state = await store.read();
+          const record = state.presets.find(preset => preset.id === body.id);
+          if (!record) throw new Error('请选择带有工具配置的预设包');
+          if (!record.sharePackage?.tools) throw new Error('该预设包不包含工具配置');
+          const plan = remapToolPackage(record.sharePackage.tools, state, {
+            catalogs: requestToolCatalogs(
+              ctx, state, discovered.catalogs, url.searchParams.get('sessionId') ?? ''),
+          });
+          if (body.dryRun === true) {
+            return respond(res, 200, {
+              applied: false, stats: plan.stats, groups: plan.tools.groups, presets: plan.tools.presets,
+            });
+          }
+          return respond(res, 200, await store.transaction(current => {
+            assertRevision(current, body);
+            current.toolGroups.push(...plan.tools.groups);
+            current.toolPresets.push(...plan.tools.presets);
+            current.revision++;
+            refreshPolicies(current);
+            return { applied: true, stats: plan.stats, groups: plan.tools.groups, presets: plan.tools.presets };
+          }));
+        }
+
         const result = await store.transaction(state => {
-          if (body.revision !== state.revision) throw new Error('预设已被其他窗口更新，请重新加载后再保存');
-          if (body.action === 'save') {
-            validatePreset(body.preset);
-            const old = state.presets.find(p => p.id === body.id);
+          assertRevision(state, body);
+          if (body.action === 'save' || body.action === 'import') {
+            const imported = body.action === 'import' ? decodePresetDocument(body.document, String(body.name || '未命名预设')) : null;
+            validatePreset(imported?.preset ?? body.preset);
+            const old = body.action === 'save' ? state.presets.find(p => p.id === body.id) : undefined;
             const record = {
+              ...old,
+              ...imported,
               id: old?.id ?? randomUUID(),
-              name: String(body.name || '未命名预设').slice(0, 200),
-              preset: body.preset,
+              name: String(imported?.name || body.name || '未命名预设').slice(0, 200),
+              preset: imported?.preset ?? body.preset,
             };
             if (old) state.presets[state.presets.indexOf(old)] = record;
             else state.presets.push(record);
@@ -186,6 +381,30 @@ export async function apply(ctx, config = {}) {
             state.defaultPresetId = record.id;
             state.revision++;
             return { id: record.id };
+          }
+          if (body.action === 'delete-preset') {
+            const index = state.presets.findIndex(preset => preset.id === body.id);
+            if (index < 0) throw new Error('请选择要删除的已保存预设');
+            const [removed] = state.presets.splice(index, 1);
+            const fallback = state.presets.find(preset => preset.id === state.selectedPresetId) ??
+              state.presets.find(preset => preset.id === state.defaultPresetId) ??
+              state.presets[index] ?? state.presets[index - 1] ?? state.presets[0];
+            if (state.selectedPresetId === removed.id) state.selectedPresetId = fallback?.id ?? null;
+            if (state.defaultPresetId === removed.id) state.defaultPresetId = fallback?.id ?? null;
+            for (const [sessionId, binding] of Object.entries(state.bindings)) {
+              if (binding?.presetId !== removed.id) continue;
+              assign(state.bindings, sessionId, {
+                ...binding,
+                enabled: !!fallback && binding.enabled === true,
+                presetId: fallback?.id ?? '',
+                characterId: null,
+              });
+            }
+            for (const [sessionId, cached] of Object.entries(state.sessions)) {
+              if (cached?.presetId === removed.id) delete state.sessions[sessionId];
+            }
+            state.revision++;
+            return { id: fallback?.id ?? null };
           }
           if (body.action === 'set-default') {
             const record = state.presets.find(p => p.id === body.id);
@@ -203,11 +422,43 @@ export async function apply(ctx, config = {}) {
             state.revision++;
             return { id: record.id };
           }
-          if (body.action === 'save-deepseek-beta') {
-            if (typeof body.enabled !== 'boolean') throw new Error('DeepSeek Beta 开关值无效');
-            state.deepseekBetaPrefix = body.enabled;
+          if (body.action === 'apply-package-prefill') {
+            const record = state.presets.find(preset => preset.id === body.id);
+            if (!record?.sharePackage) throw new Error('请选择带有接口设置的预设包');
+            applyPackagePrefill(state, record);
             state.revision++;
-            return { enabled: state.deepseekBetaPrefix };
+            return { id: record.id };
+          }
+          if (body.action === 'save-deepseek-beta') {
+            if (typeof body.enabled !== 'boolean') throw new Error('预填充接口开关值无效');
+            if (body.toolCalls !== undefined) {
+              if (typeof body.toolCalls !== 'boolean') throw new Error('工具调用处理开关值无效');
+              state.prefixToolCalls = body.toolCalls;
+            }
+            if (body.removeNonOfficialTools !== undefined) {
+              if (typeof body.removeNonOfficialTools !== 'boolean') throw new Error('非官方接口工具移除开关值无效');
+              state.prefixNonOfficialRemoveTools = body.removeNonOfficialTools;
+            }
+            if (body.postToolPrefixMode !== undefined) {
+              if (!['inherit', 'custom'].includes(body.postToolPrefixMode)) throw new Error('工具调用后预填充模式无效');
+              state.postToolPrefixMode = body.postToolPrefixMode;
+            }
+            if (body.postToolPrefixText !== undefined) {
+              if (typeof body.postToolPrefixText !== 'string') throw new Error('工具调用后预填充必须为文本');
+              state.postToolPrefixText = body.postToolPrefixText;
+            }
+            state.deepseekBetaPrefix = body.enabled;
+            if (body.presetId) {
+              const record = state.presets.find(preset => preset.id === body.presetId);
+              if (!record) throw new Error('请选择有效的已保存预设');
+              attachPrefillSettings(record, state);
+            }
+            state.revision++;
+            return {
+              enabled: state.deepseekBetaPrefix,
+              toolCalls: state.prefixToolCalls === true,
+              removeNonOfficialTools: state.prefixNonOfficialRemoveTools !== false,
+            };
           }
           if (body.action === 'save-auto-modes') {
             if (!Array.isArray(body.modes) || body.modes.some(id => typeof id !== 'string' || !knownModes.has(id))) {
@@ -222,26 +473,6 @@ export async function apply(ctx, config = {}) {
             state.autoEnableModes = selected;
             state.revision++;
             return { modes: selected };
-          }
-          if (body.action === 'save-mode-tools') {
-            if (typeof body.modeId !== 'string' || !knownModes.has(body.modeId)) throw new Error('请选择有效的 DSH 模式');
-            const policy = validateToolPolicy(body.policy, discovered.catalogs[body.modeId]);
-            assign(state.modeToolPolicies, body.modeId, policy);
-            state.revision++;
-            refreshPolicies(state);
-            return { modeId: body.modeId };
-          }
-          if (body.action === 'save-session-tools') {
-            const session = typeof body.sessionId === 'string' ? ctx.sessions.get(body.sessionId) : undefined;
-            if (!session) throw new Error('缺少有效的会话 ID');
-            const modeId = sessionModeId(session);
-            if (!knownModes.has(modeId)) throw new Error('当前会话没有可识别的 DSH 模式');
-            if (body.inherit === true) delete state.sessionToolPolicies[body.sessionId];
-            else assign(state.sessionToolPolicies, body.sessionId,
-              validateToolPolicy(body.policy, discovered.catalogs[modeId]));
-            state.revision++;
-            refreshPolicies(state);
-            return { inherited: body.inherit === true };
           }
           if (body.action === 'bind') {
             validateBinding(state, body);
@@ -358,14 +589,52 @@ function presetModeHistory(messages) {
     !(message.source?.kind === 'plugin' && message.source.plugin === DSH_SYSTEM_PROMPT));
 }
 
-function toolPolicySnapshot(state) {
-  return {
-    modes: structuredClone(state.modeToolPolicies ?? {}),
-    sessions: structuredClone(state.sessionToolPolicies ?? {}),
-  };
+/** Live catalogs plus the last catalog seen for each mode, so a removed plugin is not silently forgotten. */
+function knownToolCatalogs(state, discovered) {
+  const catalogs = {};
+  for (const source of [state?.toolCatalogs, discovered]) {
+    for (const [modeId, catalog] of Object.entries(source ?? {})) {
+      if (Array.isArray(catalog)) assign(catalogs, modeId, catalog);
+    }
+  }
+  return catalogs;
 }
-function effectiveToolPolicy(snapshot, sessionId, modeId) {
-  return ownGet(snapshot.sessions, sessionId) ?? ownGet(snapshot.modes, modeId) ?? {};
+/** Match GET's catalog view for writes opened from a live conversation. */
+function requestToolCatalogs(ctx, state, discovered, sessionId) {
+  const catalogs = knownToolCatalogs(state, discovered);
+  const session = sessionId ? ctx.sessions.get(sessionId) : undefined;
+  const modeId = sessionModeId(session);
+  const live = liveToolCatalog(ctx, sessionId);
+  if (live.length > 0 && modeId) assign(catalogs, modeId, live);
+  return catalogs;
+}
+/** Group DSH MCP public tool names by their stable server namespace. */
+export function mcpToolGroups(catalogs) {
+  const result = {};
+  for (const [modeId, catalog] of Object.entries(catalogs ?? {})) {
+    if (!Array.isArray(catalog)) continue;
+    const servers = new Map();
+    for (const tool of catalog) {
+      const match = /^mcp__([A-Za-z0-9_-]{1,32})__(.+)$/.exec(String(tool?.name ?? ''));
+      if (!match) continue;
+      const serverName = match[1];
+      const tools = servers.get(serverName) ?? [];
+      tools.push(tool.name);
+      servers.set(serverName, tools);
+    }
+    const groups = [...servers].sort(([left], [right]) => left.localeCompare(right))
+      .map(([serverName, tools]) => ({ serverName, tools: [...new Set(tools)].sort() }));
+    if (groups.length > 0) assign(result, modeId, groups);
+  }
+  return result;
+}
+function unresolvedWarnings(refs) {
+  return refs.length > 0
+    ? [`${refs.length} 条工具引用在当前模式目录中不存在，已保留待插件恢复后重新匹配`]
+    : [];
+}
+function assertRevision(state, body) {
+  if (body.revision !== state.revision) throw new Error('预设已被其他窗口更新，请重新加载后再保存');
 }
 function validateToolPolicy(value, catalog) {
   if (!isRecord(value)) throw new Error('工具开关必须是对象');

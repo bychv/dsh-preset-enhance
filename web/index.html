@@ -2,15 +2,39 @@
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>预设工作台</title><link rel="stylesheet" href="/preset-enhance/editor.css"></head>
 <body>
 <header><div><small>DSH · PRESET ENHANCE</small><h1>预设工作台</h1></div><span id="status" role="status">正在加载</span></header>
-<nav><select id="library" aria-label="已保存预设"><option value="">新预设</option></select><button id="new">新建</button><label class="button">导入 JSON<input id="import" type="file" accept=".json,application/json" hidden></label><button id="save" class="primary">保存预设</button><button id="mode-default">当前默认</button><button id="export">导出</button><button id="reload">重新加载</button></nav>
+<nav><select id="library" aria-label="已保存预设"><option value="">新预设</option></select><button id="new">新建</button><label class="button">导入 JSON<input id="import" type="file" accept=".json,application/json" hidden></label><button id="save" class="primary">保存预设</button><label class="toggle" title="开启后，预设内容改动会自动保存"><input type="checkbox" id="preset-auto-save">自动保存预设</label><button id="delete-preset" class="danger">删除预设</button><button id="mode-default">当前默认</button><button id="export-package" class="primary">导出分享文件</button><button id="export">导出 ST JSON</button><button id="reload">重新加载</button></nav>
 <section class="settings"><label>预设名称<input id="name" placeholder="给预设起个名字"></label><label>顺序表<select id="order"></select></label><label>用户名称<input id="user" value="User"></label><label>助手名称<input id="char" value="Assistant"></label><label class="toggle"><input type="checkbox" id="enabled">当前会话启用</label><button id="bind">应用到会话</button></section>
 <p id="session-note" class="muted"></p>
 <div id="prefill-warning" class="notice warning" role="alert" hidden><strong>检测到 Assistant 预填充</strong><p id="prefill-warning-text"></p><a href="https://api-docs.deepseek.com/zh-cn/guides/chat_prefix_completion" target="_blank" rel="noreferrer">查看 DeepSeek 对话前缀续写文档</a></div>
 
+<p id="package-note" class="muted"></p><button id="apply-package-prefill" hidden>应用包内接口设置（全局）</button>
 <section class="config-grid">
 <details class="config-card" open><summary>新会话自动启用预设注入</summary><p class="muted">选中的 DSH 模式仅对保存后新建的会话生效；专用预设模式始终启用。</p><div id="auto-mode-list" class="check-list"></div><button id="save-auto-modes">保存模式列表</button></details>
-<details class="config-card" open><summary>工具预设</summary><div class="row"><label>配置范围<select id="tool-scope"><option value="mode">模式默认</option><option value="session">当前会话覆盖</option></select></label><label>DSH 模式<select id="tool-mode"></select></label><button id="inherit-tools">恢复继承</button><button id="select-all-tools">全选</button><button id="clear-all-tools">全不选</button></div><p id="tool-note" class="muted"></p><div id="tool-list" class="check-list tools"></div><button id="save-tools">保存工具开关</button></details>
-<details class="config-card" open><summary>Assistant 预填充接口</summary><label class="switch-row"><span>DeepSeek 官方 Beta 前缀续写</span><span class="switch"><input type="checkbox" id="deepseek-beta-prefix"><span class="slider" aria-hidden="true"></span></span></label><p class="muted">开启后，仅当 DeepSeek 官方接口的最终注入消息是 assistant 时，插件自动改用 <code>https://api.deepseek.com/beta</code> 并发送 <code>prefix: true</code>；该次请求会移除工具字段，以符合官方 Prefix 接口限制。</p><button id="save-deepseek-beta">保存接口开关</button></details>
+<details class="config-card" open><summary>工具预设</summary>
+<div class="row"><label>配置范围<select id="tool-scope"><option value="mode">模式默认</option><option value="session">当前会话覆盖</option></select></label><label>DSH 模式<select id="tool-mode"></select></label><label>工具预设<select id="tool-preset" aria-label="工具预设"></select></label><button id="tool-preset-new">新建</button><button id="tool-preset-copy">复制</button><button id="tool-preset-rename">重命名</button><button id="tool-preset-delete" class="danger">删除</button><button id="inherit-tools">恢复继承</button></div>
+<p id="tool-preset-refs" class="muted"></p>
+<div class="row"><button id="refresh-tools">刷新工具列表</button><button id="select-all-tools">全选</button><button id="clear-all-tools">全不选</button><button id="manage-groups" aria-expanded="false">管理分组</button><button id="tool-tabs-toggle" aria-expanded="true">收起标签栏</button></div>
+<label class="switch-row tool-auto-save"><span>自动保存工具开关<span id="tool-auto-save-hint" class="tool-auto-save-hint">开启后工具开关改动即时生效；分组名称、排序与成员结构改动仍需“保存分组”。</span></span><span class="switch"><input type="checkbox" id="tool-auto-save" aria-label="自动保存工具开关" aria-describedby="tool-auto-save-hint"><span class="slider" aria-hidden="true"></span></span></label>
+<p id="tool-note" class="muted"></p>
+<div id="unresolved-tools" class="unresolved-list" hidden></div>
+<div id="tool-tab-area">
+<div id="tool-tablist" class="tool-tablist" role="tablist" aria-label="工具分组"></div>
+<label id="tool-group-select-wrap" class="tool-group-select" hidden>工具分组<select id="tool-group-select" aria-label="工具分组"></select></label>
+<div id="tool-group-panels"></div>
+</div>
+<div id="tool-groups-page" class="tool-groups-page" hidden>
+<div class="row"><button id="group-new">＋ 新增分组</button><button id="group-save" class="primary">保存分组</button><button id="group-back">返回工具列表</button></div>
+<p id="group-note" class="muted">分组只用于组织和批量操作：一个工具最多属于一个用户分组，批量开关会展开为逐工具规则。</p>
+<div id="group-list"></div>
+</div>
+<button id="save-tools" class="primary">保存工具开关</button>
+<div id="package-tools" class="package-tools" hidden>
+<p id="package-tools-note" class="muted"></p>
+<div id="package-tools-preview"></div>
+<button id="import-package-tools">导入包内工具配置</button>
+</div>
+</details>
+<details class="config-card" open><summary>Assistant 预填充接口</summary><label class="switch-row"><span>预填充自动兼容（官方 Beta / 非官方适配器）</span><span class="switch"><input type="checkbox" id="deepseek-beta-prefix"><span class="slider" aria-hidden="true"></span></span></label><label class="switch-row"><span>处理工具调用（DSML 兼容）</span><span class="switch"><input type="checkbox" id="prefix-tool-calls"><span class="slider" aria-hidden="true"></span></span></label><label class="switch-row"><span>非官方接口移除原生工具字段</span><span class="switch"><input type="checkbox" id="prefix-nonofficial-remove-tools"><span class="slider" aria-hidden="true"></span></span></label><p class="muted">开启预填充兼容后，仅处理最终注入消息为 assistant 的请求。官方地址会自动切换到 Beta，非官方适配器地址保持不变。开启 DSML 兼容会转换工具定义、调用历史和响应；关闭时官方 Beta 会移除原生工具字段，非官方接口则按上方开关决定移除或原样发送 <code>tools</code>、<code>tool_choice</code> 和 <code>parallel_tool_calls</code>。</p><label>工具调用后继续请求的预填充<select id="post-tool-prefix-mode"><option value="inherit">继承原预设（默认）</option><option value="custom">自定义提示词</option></select></label><label id="post-tool-prefix-field" hidden>工具调用后的预填充提示词<textarea id="post-tool-prefix-text" rows="4" placeholder="支持变量宏和 &lt;think&gt; 前缀"></textarea></label><p class="muted">仅在预填充自动兼容开启时，替换同一轮工具执行后继续请求的末条 assistant 预填充。新一轮用户消息使用原预设。留空或变量展开为空时继承原预设。</p><button id="save-deepseek-beta">保存接口设置</button></details>
 </section>
 
 <main><aside><div class="list-head"><strong>提示词条目</strong><button id="add">＋ 新增</button></div><input id="search" placeholder="搜索名称或正文" aria-label="搜索提示词">

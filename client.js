@@ -2,11 +2,44 @@ window.__ModuleLoader__.load({
   id: 'dsh-preset-enhance',
   factory: require => {
     const React = require('react');
-    const Frame = props => React.createElement('iframe', {
-      title: '预设查看与编辑',
-      src: `/preset-enhance?sessionId=${encodeURIComponent(props.sessionId ?? props.injected?.sessionId ?? '')}`,
-      style: { width: '100%', height: '100%', minHeight: '640px', border: 0 },
-    });
+    const LOCK_ATTRIBUTE = 'data-preset-enhance-workbench';
+    const LOCK_STYLE_ATTRIBUTE = 'data-preset-enhance-resize-lock';
+    let mountedWorkbenches = 0;
+
+    function useDshResizeLock() {
+      React.useEffect(() => {
+        const root = document.documentElement;
+        let style = document.querySelector('style[' + LOCK_STYLE_ATTRIBUTE + ']');
+        if (!style) {
+          style = document.createElement('style');
+          style.setAttribute(LOCK_STYLE_ATTRIBUTE, '');
+          style.textContent = 'html[' + LOCK_ATTRIBUTE + '] div[data-side="sidebar"],html[' +
+            LOCK_ATTRIBUTE + '] div[data-side="rightbar"]{display:none!important}';
+          document.head.appendChild(style);
+        }
+        mountedWorkbenches++;
+        root.setAttribute(LOCK_ATTRIBUTE, '');
+        return () => {
+          mountedWorkbenches = Math.max(0, mountedWorkbenches - 1);
+          if (mountedWorkbenches > 0) return;
+          root.removeAttribute(LOCK_ATTRIBUTE);
+          style.remove();
+        };
+      }, []);
+    }
+
+    const Frame = props => {
+      useDshResizeLock();
+      const currentSessionId = typeof props.useSessions === 'function'
+        ? props.useSessions(state => state.current)
+        : undefined;
+      const sessionId = props.sessionId ?? props.injected?.sessionId ?? currentSessionId ?? '';
+      return React.createElement('iframe', {
+        title: '预设查看与编辑',
+        src: '/preset-enhance?sessionId=' + encodeURIComponent(sessionId),
+        style: { width: '100%', height: '100%', minHeight: '640px', border: 0 },
+      });
+    };
     const PresetIcon = ({ size = 18 }) => React.createElement('svg', {
       width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8,
       strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true,
@@ -16,7 +49,7 @@ window.__ModuleLoader__.load({
     return { inject: ['slots', 'conversation'], apply(ctx) {
       ctx.slots.inject('conversation.view', () => ctx.slots.register({
         name: 'conversation.view', id: 'preset-enhance-editor', order: 25,
-        label: '预设', inject: sessionId => ({ sessionId }),
+        label: '预设',
       }, Frame));
       ctx.slots.inject('main', () => ctx.slots.register({
         name: 'main', key: 'preset-enhance-editor',
