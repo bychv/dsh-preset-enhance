@@ -4,6 +4,12 @@ const $ = id => document.getElementById(id);
 const sessionId = new URLSearchParams(location.search).get('sessionId') ?? '';
 let state = { presets: [], revision: 0 }, selectedId = '', selectedPrompt = '', dirty = false;
 let preset = blank();
+const PRESET_AUTO_SAVE_KEY = 'dsh-preset-enhance.preset-auto-save';
+const PRESET_AUTO_SAVE_DELAY = 600;
+let presetDraftVersion = 0;
+let presetDraftGeneration = 0;
+let presetAutoSaveTimer = null;
+let presetAutoSaveChain = Promise.resolve();
 
 function blank() {
   return {
@@ -36,8 +42,10 @@ function updateSessionNote() {
 }
 function markDirty() {
   dirty = true;
+  presetDraftVersion++;
   status('草稿未保存');
   updateDefaultButton();
+  schedulePresetAutoSave();
 }
 async function api(body, options = {}) {
   const res = await fetch(`/preset-enhance/api?sessionId=${encodeURIComponent(sessionId)}`, body ? {
@@ -81,6 +89,7 @@ function ensureGroups() {
   }
 }
 function loadDraft(id) {
+  presetDraftGeneration++;
   selectedId = id;
   const record = state.presets.find(item => item.id === id);
   preset = structuredClone(record?.preset ?? blank());
@@ -105,11 +114,19 @@ function loadDraft(id) {
   renderPackageTools(record);
   void refreshPrefillWarning();
 }
-async function reload(id) {
-  const previousToolMode = $('tool-mode').value;
-  state = await api();
+function renderPresetLibrary() {
   $('library').replaceChildren(new Option('新预设', ''), ...state.presets.map(item =>
     new Option(`${item.id === state.selectedPresetId ? '★ ' : ''}${item.name}`, item.id)));
+  $('library').value = selectedId;
+}
+async function reload(id) {
+  if (presetAutoSaveIsOn() && dirty) {
+    const saved = await flushPendingPresetDraft();
+    if (!saved) throw new Error('预设自动保存失败，已保留当前草稿');
+  }
+  const previousToolMode = $('tool-mode').value;
+  state = await api();
+  renderPresetLibrary();
   const binding = state.binding ?? {};
   $('enabled').checked = binding.enabled === true;
   $('user').value = binding.values?.user ?? 'User';
@@ -315,6 +332,100 @@ function groupDiscardOkay() {
   if (!confirm('放弃尚未保存的工具分组草稿？')) return false;
   resetGroupDraft();
   return true;
+}
+
+/* ---------- 预设自动保存（浏览器本地开关，默认关闭） ---------- */
+function presetAutoSaveIsOn() {
+  return $('preset-auto-save').checked === true;
+}
+function cancelPresetAutoSave() {
+  if (presetAutoSaveTimer !== null) {
+    clearTimeout(presetAutoSaveTimer);
+    presetAutoSaveTimer = null;
+  }
+}
+function schedulePresetAutoSave() {
+  if (!presetAutoSaveIsOn()) return;
+  cancelPresetAutoSave();
+  presetAutoSaveTimer = setTimeout(() => {
+    presetAutoSaveTimer = null;
+    void runPresetAutoSave();
+  }, PRESET_AUTO_SAVE_DELAY);
+}
+async function persistPresetDraft({ force = false } = {}) {
+  if (!dirty && !force) return { ok: true, skipped: true };
+  const generation = presetDraftGeneration;
+  const version = presetDraftVersion;
+  const recordId = selectedId;
+  const name = $('name').value;
+  const document = structuredClone(preset);
+  const send = () => api({ action: 'save', id: recordId, name, preset: document });
+  let result;
+  try {
+    result = await send();
+  } catch (error) {
+    if (!isRevisionConflict(error)) return { ok: false, error };
+    try {
+      const latest = await api();
+      state.revision = latest.revision;
+      result = await send();
+    } catch (retryError) {
+      return { ok: false, error: retryError };
+    }
+  }
+
+  state.revision += 1;
+  const savedId = result.id;
+  const existingIndex = state.presets.findIndex(item => item.id === savedId);
+  const existing = existingIndex >= 0 ? state.presets[existingIndex] : undefined;
+  const savedRecord = { ...existing, id: savedId, name: String(name || '未命名预设').slice(0, 200), preset: document };
+  if (existingIndex >= 0) state.presets[existingIndex] = savedRecord;
+  else state.presets.push(savedRecord);
+  state.selectedPresetId = savedId;
+  state.defaultPresetId = savedId;
+  state.modeDefaultPresetId = savedId;
+  state.modeDefaultName = savedRecord.name;
+
+  const sameDraft = presetDraftGeneration === generation && selectedId === recordId;
+  if (sameDraft) {
+    if (!recordId) selectedId = savedId;
+    if (presetDraftVersion === version) {
+      dirty = false;
+    } else {
+      schedulePresetAutoSave();
+    }
+    renderPresetLibrary();
+    updateDefaultButton();
+    updateSessionNote();
+    if (!dirty) void refreshPrefillWarning();
+  }
+  return { ok: true, id: savedId, version, saved: document };
+}
+function runPresetAutoSave() {
+  presetAutoSaveChain = presetAutoSaveChain.then(async () => {
+    const result = await persistPresetDraft();
+    if (result.ok) {
+      if (!result.skipped && !dirty) status('预设已自动保存');
+    } else {
+      status(`预设自动保存失败：${result.error.message}（草稿仍保留，可继续编辑或点击“保存预设”）`, true);
+    }
+    return result;
+  }).catch(error => {
+    status(`预设自动保存失败：${error.message}（草稿仍保留）`, true);
+    return { ok: false, error };
+  });
+  return presetAutoSaveChain;
+}
+async function flushPendingPresetDraft() {
+  if (!presetAutoSaveIsOn() || !dirty) return true;
+  cancelPresetAutoSave();
+  await runPresetAutoSave();
+  return !dirty;
+}
+async function presetDraftReady() {
+  if (!dirty) return true;
+  if (presetAutoSaveIsOn()) return flushPendingPresetDraft();
+  return presetDiscardOkay();
 }
 
 /* ---------- 工具开关自动保存（可关闭；关闭时行为与手工保存完全一致） ---------- */
@@ -1230,17 +1341,17 @@ $('add').onclick = () => {
   renderEditor();
 };
 
-function discardOkay() {
-  return presetDiscardOkay() && toolDiscardOkay() && groupDiscardOkay();
+async function discardOkay() {
+  return await presetDraftReady() && toolDiscardOkay() && groupDiscardOkay();
 }
-$('new').onclick = () => {
+$('new').onclick = guard(async () => {
   // 新建提示词预设与工具配置无关：只确认提示词草稿，工具/分组草稿继续保留。
-  if (!presetDiscardOkay()) return;
+  if (!(await presetDraftReady())) return;
   loadDraft('');
-};
+});
 $('library').onchange = guard(async () => {
   const id = $('library').value;
-  if (!discardOkay()) {
+  if (!(await discardOkay())) {
     $('library').value = selectedId;
     return;
   }
@@ -1254,11 +1365,11 @@ $('library').onchange = guard(async () => {
 });
 $('reload').onclick = guard(async () => {
   // 重新加载只刷新提示词预设草稿；未保存的工具/分组草稿会被保留。
-  if (presetDiscardOkay()) await reload(selectedId);
+  if (await presetDraftReady()) await reload(selectedId);
 });
 $('delete-preset').onclick = guard(async () => {
   if (!selectedId) throw new Error('请选择要删除的已保存预设');
-  if (dirty) throw new Error('请先保存或放弃预设草稿');
+  if (!(await presetDraftReady())) return;
   const record = state.presets.find(item => item.id === selectedId);
   if (!record || !confirm('确定删除预设“' + record.name + '”？此操作无法撤销。')) return;
   const result = await api({ action: 'delete-preset', id: selectedId });
@@ -1267,7 +1378,7 @@ $('delete-preset').onclick = guard(async () => {
 });
 $('import').onchange = guard(async () => {
   const file = $('import').files[0];
-  if (!file || !discardOkay()) return;
+  if (!file || !(await discardOkay())) return;
   try {
     if (file.size > 8_000_000) throw new Error('预设文件不能超过 8 MB');
     const parsed = JSON.parse(await file.text());
@@ -1280,19 +1391,26 @@ $('import').onchange = guard(async () => {
   }
 });
 $('save').onclick = guard(async () => {
-  const result = await api({ action: 'save', id: selectedId, name: $('name').value, preset });
+  cancelPresetAutoSave();
+  await presetAutoSaveChain;
+  const result = await persistPresetDraft({ force: !presetAutoSaveIsOn() });
+  if (!result.ok) throw result.error;
+  if (result.skipped) {
+    status('预设已保存');
+    return;
+  }
   await reload(result.id);
   status('预设已保存');
 });
 $('mode-default').onclick = guard(async () => {
-  if (dirty) throw new Error('请先保存预设草稿');
+  if (!(await presetDraftReady())) return;
   await api({ action: 'set-default', id: selectedId });
   await reload(selectedId);
   status('已设为当前默认注入预设');
 });
 $('bind').disabled = !sessionId;
 $('bind').onclick = guard(async () => {
-  if (dirty) throw new Error('请先保存预设草稿');
+  if (!(await presetDraftReady())) return;
   await api({
     action: 'bind',
     sessionId,
@@ -1302,13 +1420,13 @@ $('bind').onclick = guard(async () => {
   status('会话设置已应用，下一次请求生效');
 });
 $('apply-package-prefill').onclick = guard(async () => {
-  if (!presetDiscardOkay()) return;
+  if (!(await presetDraftReady())) return;
   await api({ action: 'apply-package-prefill', id: selectedId });
   await reload(selectedId);
   status('包内接口设置已应用到全局，下一次请求生效');
 });
 $('save-deepseek-beta').onclick = guard(async () => {
-  if (dirty) throw new Error('请先保存或放弃预设草稿');
+  if (!(await presetDraftReady())) return;
   await api({
     action: 'save-deepseek-beta',
     presetId: selectedId,
@@ -1328,7 +1446,7 @@ $('save-auto-modes').onclick = guard(async () => {
   status('自动启用模式列表已保存，仅影响之后新建的会话');
 });
 $('refresh-tools').onclick = guard(async () => {
-  if (!presetDiscardOkay()) return;
+  if (!(await presetDraftReady())) return;
   await reload(selectedId);
   const { modeId } = toolContext();
   const groups = state.mcpToolGroups?.[modeId] ?? [];
@@ -1503,6 +1621,17 @@ $('inherit-tools').onclick = guard(async () => {
   await reload(selectedId);
   status('当前会话已恢复继承模式默认工具');
 });
+$('preset-auto-save').onchange = () => {
+  const enabled = $('preset-auto-save').checked;
+  storageSet(PRESET_AUTO_SAVE_KEY, enabled ? '1' : '0');
+  if (enabled) {
+    status('已开启预设自动保存');
+    if (dirty) schedulePresetAutoSave();
+  } else {
+    cancelPresetAutoSave();
+    status('已关闭预设自动保存，改动需要点击“保存预设”');
+  }
+};
 $('tool-auto-save').onchange = () => {
   const enabled = $('tool-auto-save').checked;
   storageSet(TOOL_AUTO_SAVE_KEY, enabled ? '1' : '0');
@@ -1634,6 +1763,7 @@ $('last').onclick = guard(async () => {
   show(latest.last.result);
 });
 
+$('preset-auto-save').checked = storageGet(PRESET_AUTO_SAVE_KEY, '0') === '1';
 $('tool-auto-save').checked = storageGet(TOOL_AUTO_SAVE_KEY, '0') === '1';
 $('tool-scope').querySelector('option[value="session"]').disabled = !sessionId;
 $('tool-scope').value = sessionId ? 'session' : 'mode';

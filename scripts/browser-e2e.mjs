@@ -601,6 +601,94 @@ try {
     check('auto-save switch exists', false, 'no #tool-auto-save in the tool card');
   }
 
+  // 14. preset auto-save: debounce edits, persist without the save button, and keep OFF as manual mode
+  const hasPresetAutoSave = await evaluate(`!!document.getElementById('preset-auto-save')`);
+  if (hasPresetAutoSave) {
+    const originalPresetName = await evaluate(`document.getElementById('name').value`);
+    await evaluate(`(() => {
+      if (!window.__origFetch) window.__origFetch = window.fetch;
+      window.fetch = (input, init = {}) => {
+        const url = typeof input === 'string' ? input : input?.url ?? '';
+        if (String(init.method ?? 'GET').toUpperCase() === 'POST' && url.includes('/preset-enhance/api')) {
+          try { window.__apiPosts.push(JSON.parse(init.body).action); } catch { window.__apiPosts.push('unknown'); }
+        }
+        return window.__origFetch(input, init);
+      };
+      const box = document.getElementById('preset-auto-save');
+      if (box.checked) box.click();
+      window.__apiPosts = [];
+    })()`);
+    await evaluate(`document.getElementById('preset-auto-save').click()`);
+    await settle(300);
+    await evaluate(`window.__apiPosts = []`);
+    const firstAutoName = originalPresetName + ' [自动保存验证]';
+    await evaluate(`(() => {
+      const input = document.getElementById('name');
+      input.value = ${JSON.stringify(firstAutoName)};
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+    await settle(1800);
+    const presetAutoPosts = await evaluate(`window.__apiPosts.slice()`);
+    const presetAutoState = await evaluate(`fetch('/preset-enhance/api').then(r => r.json()).then(s => ({
+      name: s.presets.find(p => p.id === s.selectedPresetId)?.name,
+      selected: s.selectedPresetId,
+      status: document.getElementById('status').textContent,
+    }))`);
+    check('preset auto-save persists an edit without clicking 保存预设',
+      presetAutoPosts.filter(action => action === 'save').length === 1 &&
+      presetAutoState.name === firstAutoName && /自动保存/.test(presetAutoState.status),
+      `posts=[${presetAutoPosts.join(',')}] state=${JSON.stringify(presetAutoState)}`);
+
+    await evaluate(`window.__apiPosts = []`);
+    const burstFinalName = originalPresetName + ' [合并验证 3]';
+    await evaluate(`(() => {
+      const input = document.getElementById('name');
+      for (const value of [
+        ${JSON.stringify(originalPresetName + ' [合并验证 1]')},
+        ${JSON.stringify(originalPresetName + ' [合并验证 2]')},
+        ${JSON.stringify(burstFinalName)},
+      ]) {
+        input.value = value;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    })()`);
+    await settle(1800);
+    const presetBurstPosts = await evaluate(`window.__apiPosts.slice()`);
+    const presetBurstName = await evaluate(`fetch('/preset-enhance/api').then(r => r.json()).then(s => s.presets.find(p => p.id === s.selectedPresetId)?.name)`);
+    check('rapid preset edits coalesce into one auto-save request',
+      presetBurstPosts.filter(action => action === 'save').length === 1 && presetBurstName === burstFinalName,
+      `posts=[${presetBurstPosts.join(',')}] saved=${presetBurstName}`);
+
+    await evaluate(`(() => { const box = document.getElementById('preset-auto-save'); if (box.checked) box.click(); window.__apiPosts = []; })()`);
+    await evaluate(`(() => {
+      const input = document.getElementById('name');
+      input.value = ${JSON.stringify(originalPresetName)};
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+    await settle(1200);
+    const presetOff = await evaluate(`({ posts: window.__apiPosts.slice(), status: document.getElementById('status').textContent })`);
+    check('preset auto-save OFF keeps the manual draft behaviour',
+      presetOff.posts.filter(action => action === 'save').length === 0 && /未保存/.test(presetOff.status),
+      JSON.stringify(presetOff));
+    await evaluate(`document.getElementById('save').click()`);
+    await settle(1800);
+    const restoredPresetName = await evaluate(`fetch('/preset-enhance/api').then(r => r.json()).then(s => s.presets.find(p => p.id === s.selectedPresetId)?.name)`);
+    check('manual save still works after preset auto-save is disabled', restoredPresetName === originalPresetName, restoredPresetName);
+    const presetAutoReload = once('Page.loadEventFired');
+    await send('Page.reload', {});
+    await presetAutoReload;
+    await waitReady();
+    await settle(1600);
+    const presetAutoPersisted = await evaluate(`(() => {
+      const box = document.getElementById('preset-auto-save');
+      return { checked: box?.checked ?? null, stored: localStorage.getItem('dsh-preset-enhance.preset-auto-save') };
+    })()`);
+    check('preset auto-save switch state is UI-local and survives reload',
+      presetAutoPersisted.checked === false && presetAutoPersisted.stored === '0', JSON.stringify(presetAutoPersisted));
+  } else {
+    check('preset auto-save switch exists', false, 'no #preset-auto-save in the navigation bar');
+  }
+
   const summary = { verified: results.filter(item => item.pass).length, falsified: results.filter(item => !item.pass).length, results };
   writeFileSync(join(OUT, 'browser-e2e.json'), JSON.stringify(summary, null, 2));
   console.log(`\n${summary.verified} verified / ${summary.falsified} falsified`);
