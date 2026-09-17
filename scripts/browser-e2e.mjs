@@ -140,6 +140,20 @@ try {
   check('workbench page loads', await waitReady());
   await settle(2000);
 
+  const chatHistoryHint = await evaluate(`(() => {
+    const entry = document.querySelector('.entry[data-prompt-id="chatHistory"]');
+    entry?.click();
+    const content = document.getElementById('content');
+    return {
+      entryFound: !!entry,
+      disabled: content.disabled,
+      value: content.value,
+    };
+  })()`);
+  check('chatHistory editor shows its source directly in the disabled content field',
+    chatHistoryHint.entryFound && chatHistoryHint.disabled && chatHistoryHint.value === '此内容从当前聊天记录读取',
+    JSON.stringify(chatHistoryHint));
+
   // 2. static structure from the live API
   const tabs = await evaluate(`[...document.querySelectorAll('#tool-tablist [role="tab"]')].map(b => ({
     id: b.dataset.group, label: b.textContent, selected: b.getAttribute('aria-selected'),

@@ -1101,6 +1101,7 @@ function renderPromptItem(prompt, item, used, term, parent) {
   }
   const button = document.createElement('button');
   button.className = 'entry';
+  button.dataset.promptId = prompt.identifier;
   button.textContent = `${prompt.name ?? prompt.identifier} · ${prompt.marker ? '标记' : prompt.role ?? 'system'}`;
   button.onclick = () => {
     selectedPrompt = prompt.identifier;
@@ -1153,7 +1154,8 @@ function renderEditor() {
   $('position').value = prompt.injection_position ?? 0;
   $('depth').value = prompt.injection_depth ?? 4;
   $('priority').value = prompt.injection_order ?? 100;
-  $('content').value = prompt.content ?? '';
+  const chatHistory = prompt.identifier === 'chatHistory';
+  $('content').value = chatHistory ? '此内容从当前聊天记录读取' : prompt.content ?? '';
   $('content').disabled = !!prompt.marker;
   $('prompt-enabled').checked = item?.enabled ?? false;
   $('prompt-enabled').disabled = !used;
