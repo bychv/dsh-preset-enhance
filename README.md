@@ -4,35 +4,19 @@
 
 ## 安装
 
-从 npm 安装当前 alpha 预览版：
+从 npm 安装当前 RC 版本：
 
 ~~~powershell
-dsh plugin --profile web add dsh-preset-enhance@alpha
+dsh plugin --profile web add dsh-preset-enhance@0.3.2-rc.1
 ~~~
 
-如需固定安装当前 alpha 版本：
+也可以直接安装 GitHub `main` 分支：
 
 ~~~powershell
-dsh plugin --profile web add dsh-preset-enhance@0.3.2-alpha.2
+dsh plugin --profile web add github:bychv/dsh-preset-enhance#main
 ~~~
 
-也可以直接从 GitHub 安装 `alpha` 分支的最新源码：
-
-~~~powershell
-dsh plugin --profile web add github:bychv/dsh-preset-enhance#alpha
-~~~
-
-如需体验 `alpha` 分支正在开发的功能，可以安装 npm 的 alpha 预览版：
-
-~~~powershell
-dsh plugin --profile web add dsh-preset-enhance@alpha
-~~~
-
-也可以直接安装 GitHub 上的 `alpha` 分支：
-
-~~~powershell
-dsh plugin --profile web add github:bychv/dsh-preset-enhance#alpha
-~~~
+`0.3.2-rc.1` 和当前 `main` 分支面向 DSH `>=0.1.5-rc.2 <0.1.6`。此版本之后的 `alpha` 分支将用于 DSH 0.1.6 兼容开发；继续使用 DSH 0.1.5 时请固定安装 `0.3.2-rc.1`。
 
 重新启动 `dsh web` 后，左侧栏会出现“预设工作台”，新建对话的模式列表中会出现“预设模式”。
 
