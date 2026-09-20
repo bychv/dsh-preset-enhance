@@ -154,6 +154,35 @@ try {
     chatHistoryHint.entryFound && chatHistoryHint.disabled && chatHistoryHint.value === '此内容从当前聊天记录读取',
     JSON.stringify(chatHistoryHint));
 
+  const extractionUi = await evaluate(`(() => {
+    const toggle = document.getElementById('prefix-output-extraction');
+    const template = document.getElementById('output-extraction-template');
+    const button = document.getElementById('add-output-extraction-template');
+    button?.click();
+    const ids = [...document.querySelectorAll('#used-prompts .entry')].map(entry => entry.dataset.promptId);
+    const historyIndex = ids.indexOf('chatHistory');
+    const templateIndex = ids.indexOf('dsh-output-extraction-template');
+    return {
+      toggle: !!toggle,
+      defaultOff: toggle?.checked === false,
+      templateLength: template?.value.length ?? 0,
+      hasFinalTokens: template?.value.includes('<｜end▁of▁think｜>') &&
+        template?.value.includes('<｜begin▁of▁output｜>') && template?.value.includes('<content>正文</content>'),
+      insertedAfterHistory: templateIndex === historyIndex + 1,
+      role: document.getElementById('role')?.value,
+      sameContent: document.getElementById('content')?.value === template?.value,
+    };
+  })()`);
+  check('experimental output extraction exposes the final-strategy template and inserts it after chatHistory',
+    extractionUi.toggle && extractionUi.defaultOff && extractionUi.templateLength > 200 && extractionUi.hasFinalTokens &&
+      extractionUi.insertedAfterHistory && extractionUi.role === 'user' && extractionUi.sameContent,
+    JSON.stringify(extractionUi));
+  const extractionReload = once('Page.loadEventFired');
+  await send('Page.reload', {});
+  await extractionReload;
+  await waitReady();
+  await settle(1200);
+
   // 2. static structure from the live API
   const tabs = await evaluate(`[...document.querySelectorAll('#tool-tablist [role="tab"]')].map(b => ({
     id: b.dataset.group, label: b.textContent, selected: b.getAttribute('aria-selected'),

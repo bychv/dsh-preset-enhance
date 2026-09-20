@@ -426,7 +426,7 @@ test('saved imports are global and the last library selection survives reopening
     const first = await post({ revision: 0, action: 'save', name: 'A', preset });
     const second = await post({ revision: 1, action: 'save', name: 'B', preset });
     await post({ revision: 2, action: 'select-preset', id: first.id });
-    await post({ revision: 3, action: 'save-deepseek-beta', enabled: true, toolCalls: true, removeNonOfficialTools: false, postToolPrefixMode: 'custom', postToolPrefixText: 'Review results' });
+    await post({ revision: 3, action: 'save-deepseek-beta', enabled: true, toolCalls: true, extractOutput: true, removeNonOfficialTools: false, postToolPrefixMode: 'custom', postToolPrefixText: 'Review results' });
 
     const reopened = await new PresetStore(file).read();
     assert.deepEqual(reopened.presets.map(item => item.name), ['A', 'B']);
@@ -434,6 +434,7 @@ test('saved imports are global and the last library selection survives reopening
     assert.equal(reopened.defaultPresetId, first.id);
     assert.equal(reopened.deepseekBetaPrefix, true);
     assert.equal(reopened.prefixToolCalls, true);
+    assert.equal(reopened.prefixOutputExtraction, true);
     assert.equal(reopened.postToolPrefixMode, 'custom');
     assert.equal(reopened.postToolPrefixText, 'Review results');
     assert.equal(reopened.prefixNonOfficialRemoveTools, false);
@@ -642,6 +643,16 @@ test('non-official adapter supports pass-through, removal and DSML tool handling
     reasoningPrefix: 'continue the plan',
   });
 
+  const extractingRegistry = new Map([['session-1', new Map([[
+    prefix, { count: 1, extractOutput: true, removeNonOfficialTools: false },
+  ]])]]);
+  const extracting = rewriteDeepSeekPrefixFetch(endpoint, init, [extractingRegistry]);
+  assert.deepEqual(extracting.responseTransform, {
+    contentPrefix: '',
+    reasoningPrefix: '',
+    extractOutput: true,
+  });
+
   const official = rewriteDeepSeekPrefixFetch('https://api.deepseek.com/chat/completions', init, [passThroughRegistry]);
   assert.equal(official.mode, 'official');
   assert.equal(official.input, 'https://api.deepseek.com/beta/chat/completions');
@@ -787,6 +798,7 @@ test('installed fetch bridge converts an emulated adapter response back to tool 
         tool_choice: 'auto',
       }),
     });
+
     const outgoing = JSON.parse(calls[0].init.body);
     assert.equal(outgoing.tools, undefined);
     assert.equal(outgoing.tool_choice, undefined);

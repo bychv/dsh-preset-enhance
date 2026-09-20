@@ -32,6 +32,7 @@
   "prefill": {
     "enabled": true,
     "toolCalls": true,
+    "extractOutput": false,
     "removeNonOfficialTools": true,
     "postToolPrefix": {
       "mode": "inherit",
@@ -63,10 +64,11 @@
 
 ## 预填充配置
 
-`prefill` 非空时，下列字段全部必填：
+`prefill` 非空时，原有字段保持必填；`extractOutput` 是同一主版本新增的可选字段，省略时按 `false` 处理：
 
 - `enabled`：是否启用预填充自动兼容。
 - `toolCalls`：是否启用 DSML 工具调用转换。
+- `extractOutput`：是否启用实验性正文/工具调用提取；按照最终稳定性策略把切换前文本映射到思维链，并移除输出区控制标签。
 - `removeNonOfficialTools`：关闭 DSML 处理时，非官方接口是否移除原生工具字段。官方 Beta 的原有规则不变。
 - `postToolPrefix.mode`：`inherit` 继承原预设，`custom` 使用工具执行后的独立提示词。
 - `postToolPrefix.text`：自定义提示词文本；留空或宏展开为空时继承原预设。

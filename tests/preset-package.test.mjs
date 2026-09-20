@@ -19,6 +19,7 @@ const prompt = () => ({
 });
 const settings = () => ({
   deepseekBetaPrefix: true, prefixToolCalls: true, prefixNonOfficialRemoveTools: false,
+  prefixOutputExtraction: true,
   postToolPrefixMode: 'custom', postToolPrefixText: '<think>\nReview {{lastmessage}}',
 });
 const packet = () => encodePresetPackage({ name: 'Shared draft', preset: prompt() }, settings());
@@ -83,6 +84,7 @@ test('single-file packages retain prompts, macro source and prefill without copy
   assert.equal(document.version, 1);
   assert.deepEqual(document.preset.data, prompt());
   assert.equal(document.prefill.postToolPrefix.text, '<think>\nReview {{lastmessage}}');
+  assert.equal(document.prefill.extractOutput, true);
   assert.deepEqual(document.tools, { version: 1, activePresetId: null, presets: [], groups: [] });
   assert.doesNotMatch(JSON.stringify(document), /LOCAL_ONLY|local-id/);
   const decoded = decodePresetDocument(JSON.parse(JSON.stringify(document)));
@@ -111,6 +113,7 @@ test('editing a package preserves unknown fields and reserved plugin tool groups
   const state = { modeToolPolicies: { standard: { existing: false } } };
   applyPackagePrefill(state, record);
   assert.equal(state.postToolPrefixText, 'New');
+  assert.equal(state.prefixOutputExtraction, true);
   assert.deepEqual(state.modeToolPolicies, { standard: { existing: false } });
 });
 
@@ -122,6 +125,7 @@ test('unsupported versions and malformed packages fail without ST fallback', () 
     { metadata: [] }, { tools: [] }, { tools: null }, { tools: { groups: {} } },
     { tools: { presets: null } }, { extensions: [] },
     { prefill: { ...packet().prefill, enabled: 'true' } },
+    { prefill: { ...packet().prefill, extractOutput: 'true' } },
     { prefill: { ...packet().prefill, postToolPrefix: { mode: 'other', text: '' } } },
     { preset: { format: 'other', data: prompt() } },
   ]) assert.throws(() => validatePresetPackage({ ...packet(), ...invalid }));

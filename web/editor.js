@@ -134,7 +134,9 @@ async function reload(id) {
   $('markers').value = JSON.stringify(binding.markers ?? {}, null, 2);
   $('deepseek-beta-prefix').checked = state.deepseekBetaPrefix === true;
   $('prefix-tool-calls').checked = state.prefixToolCalls === true;
+  $('prefix-output-extraction').checked = state.prefixOutputExtraction === true;
   $('prefix-nonofficial-remove-tools').checked = state.prefixNonOfficialRemoveTools !== false;
+  $('output-extraction-template').value = state.outputExtractionTemplate ?? '';
   $('post-tool-prefix-mode').value = state.postToolPrefixMode ?? 'inherit';
   $('post-tool-prefix-text').value = state.postToolPrefixText ?? '';
   syncPrefixToolControls();
@@ -1313,7 +1315,37 @@ $('prefix-tool-calls').onchange = () => {
   syncPrefixToolControls();
   status('预填充接口设置尚未保存');
 };
+$('prefix-output-extraction').onchange = () => status('预填充接口设置尚未保存');
 $('prefix-nonofficial-remove-tools').onchange = () => status('预填充接口设置尚未保存');
+$('add-output-extraction-template').onclick = () => {
+  const identifier = 'dsh-output-extraction-template';
+  let prompt = preset.prompts.find(item => item.identifier === identifier);
+  if (!prompt) {
+    prompt = {
+      identifier,
+      name: '正文/工具调用提取格式（实验）',
+      role: 'user',
+      content: state.outputExtractionTemplate ?? '',
+      injection_position: 0,
+    };
+    preset.prompts.push(prompt);
+  } else {
+    prompt.name = '正文/工具调用提取格式（实验）';
+    prompt.role = 'user';
+    prompt.content = state.outputExtractionTemplate ?? '';
+    prompt.injection_position = 0;
+  }
+  const items = order();
+  const oldIndex = items.findIndex(item => item.identifier === identifier);
+  if (oldIndex >= 0) items.splice(oldIndex, 1);
+  const historyIndex = items.findIndex(item => item.identifier === 'chatHistory');
+  items.splice(historyIndex < 0 ? items.length : historyIndex + 1, 0, { identifier, enabled: true });
+  selectedPrompt = identifier;
+  markDirty();
+  renderList();
+  renderEditor();
+  status('已将实验格式提示词加入当前预设，请保存预设');
+};
 for (const [id, delta] of [['up', -1], ['down', 1]]) $(id).onclick = () => {
   const items = order();
   const index = items.findIndex(item => item.identifier === selectedPrompt);
@@ -1434,6 +1466,7 @@ $('save-deepseek-beta').onclick = guard(async () => {
     postToolPrefixText: $('post-tool-prefix-text').value,
     enabled: $('deepseek-beta-prefix').checked,
     toolCalls: $('prefix-tool-calls').checked,
+    extractOutput: $('prefix-output-extraction').checked,
     removeNonOfficialTools: $('prefix-nonofficial-remove-tools').checked,
   });
   await reload(selectedId);

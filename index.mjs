@@ -6,6 +6,7 @@ import { PresetStore } from './lib/store.mjs';
 import { compilePreset, validatePreset, getOrder } from './lib/preset.mjs';
 import { decodePresetDocument, encodePresetPackage, attachPrefillSettings, applyPackagePrefill } from './lib/preset-package.mjs';
 import { installDeepSeekBetaBridge } from './lib/deepseek-beta.mjs';
+import { OUTPUT_EXTRACTION_PROMPT_TEMPLATE } from './lib/output-extractor.mjs';
 import {
   normalizeToolGroups, normalizeToolPreset, normalizeToolSelection, assertPresetGroupIds,
   toolPolicySnapshot, effectiveToolEnabled, effectiveToolPolicy, remapToolPackage,
@@ -110,6 +111,7 @@ export async function apply(ctx, config = {}) {
     const releaseBeta = betaPrefix ? deepSeekBeta.activate(options.sessionId, messageText(messages.at(-1)), {
       toolCalls: initial.prefixToolCalls === true,
       removeNonOfficialTools: initial.prefixNonOfficialRemoveTools !== false,
+      extractOutput: initial.prefixOutputExtraction === true,
     }) : () => {};
     routed.add(request);
     try { yield* ctx.llm.stream(request); } finally { releaseBeta(); routed.delete(request); }
@@ -159,7 +161,9 @@ export async function apply(ctx, config = {}) {
             postToolPrefixText: state.postToolPrefixText,
             deepseekBetaPrefix: state.deepseekBetaPrefix === true,
             prefixToolCalls: state.prefixToolCalls === true,
+            prefixOutputExtraction: state.prefixOutputExtraction === true,
             prefixNonOfficialRemoveTools: state.prefixNonOfficialRemoveTools !== false,
+            outputExtractionTemplate: OUTPUT_EXTRACTION_PROMPT_TEMPLATE,
             modeDefaultPresetId: modeDefault?.id ?? null,
             modeDefaultName: modeDefault?.name ?? null,
             presetMode: liveMode === AGENT_PRESET_ID,
@@ -435,6 +439,10 @@ export async function apply(ctx, config = {}) {
               if (typeof body.toolCalls !== 'boolean') throw new Error('工具调用处理开关值无效');
               state.prefixToolCalls = body.toolCalls;
             }
+            if (body.extractOutput !== undefined) {
+              if (typeof body.extractOutput !== 'boolean') throw new Error('正文/工具调用提取开关值无效');
+              state.prefixOutputExtraction = body.extractOutput;
+            }
             if (body.removeNonOfficialTools !== undefined) {
               if (typeof body.removeNonOfficialTools !== 'boolean') throw new Error('非官方接口工具移除开关值无效');
               state.prefixNonOfficialRemoveTools = body.removeNonOfficialTools;
@@ -457,6 +465,7 @@ export async function apply(ctx, config = {}) {
             return {
               enabled: state.deepseekBetaPrefix,
               toolCalls: state.prefixToolCalls === true,
+              extractOutput: state.prefixOutputExtraction === true,
               removeNonOfficialTools: state.prefixNonOfficialRemoveTools !== false,
             };
           }
