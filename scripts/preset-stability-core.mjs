@@ -26,6 +26,12 @@ const BT = String.fromCharCode(96); // 反引号字符，避免在源码里出�
 
 const BAR = '\uFF5C';      // 全角竖线，DeepSeek 特殊 token 的边界字符
 const BLOCK = '\u2581';    // SentencePiece 空格标记
+const DSML_CALLS_OPEN = '<' + BAR + BAR + 'DSML' + BAR + BAR + ' calls>';
+const DSML_CALLS_CLOSE = '</' + BAR + BAR + 'DSML' + BAR + BAR + ' calls>';
+const DSML_INVOKE_OPEN = '<' + BAR + BAR + 'DSML' + BAR + BAR + ' invoke name="工具名">';
+const DSML_INVOKE_CLOSE = '</' + BAR + BAR + 'DSML' + BAR + BAR + ' invoke>';
+const DSML_PARAM = '<' + BAR + BAR + 'DSML' + BAR + BAR +
+  ' parameter name="参数名" string="false">合法 JSON</' + BAR + BAR + 'DSML' + BAR + BAR + ' parameter>';
 
 /** 规范结束思考标记（新格式要求：必须独占一行）。 */
 export const END_MARKER = '<' + BAR + 'end' + BLOCK + 'of' + BLOCK + 'think' + BAR + '>';
@@ -103,6 +109,13 @@ export const DEFAULT_PRESET_TEXT = [
   '把回答正文的内容写在 ' + BT + '<content></content>' + BT + ' 的里面，总字数在1200~1600字之间。',
   '如果上文的回答正文外部需要某种格式，把它们放在 ' + BT + '</content>' + BT + ' 的后面，或者 ' + BT + '<content>' + BT + ' 的前面。',
   '你可以使用系统提供的工具；需要调用工具时，在结束思考标记之后立刻给出工具调用。',
+  '工具调用必须使用下面的 DSML calls 外层格式，不能改成原生工具调用标签、JSON 或 Markdown 代码块：',
+  DSML_CALLS_OPEN,
+  DSML_INVOKE_OPEN,
+  DSML_PARAM,
+  DSML_INVOKE_CLOSE,
+  DSML_CALLS_CLOSE,
+  '每次调用都放在 ' + DSML_CALLS_OPEN + ' 与 ' + DSML_CALLS_CLOSE + ' 之间；字符串参数使用 string="true"，非字符串参数使用 string="false" 并填写合法 JSON。',
 ].join('\n');
 
 export const DEFAULT_ASSISTANT_PREFILL = '<think>好的，现在我将开始';

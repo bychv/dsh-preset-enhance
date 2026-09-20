@@ -2,6 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   ANCHOR_SENTENCE,
+  ASCII_END_MARKER,
+  ASCII_OUTPUT_CLOSE,
+  ASCII_OUTPUT_OPEN,
   END_MARKER,
   OUTPUT_CLOSE,
   OUTPUT_EXTRACTION_PROMPT_TEMPLATE,
@@ -24,6 +27,9 @@ test('the bundled template is the stability test final strategy prompt', () => {
   assert.match(OUTPUT_EXTRACTION_PROMPT_TEMPLATE, new RegExp(OUTPUT_OPEN.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'));
   assert.match(OUTPUT_EXTRACTION_PROMPT_TEMPLATE, /您好，这是约定的内容，请查收/u);
   assert.match(OUTPUT_EXTRACTION_PROMPT_TEMPLATE, /1200~1600/u);
+  assert.match(OUTPUT_EXTRACTION_PROMPT_TEMPLATE, /<｜｜DSML｜｜ calls>/u);
+  assert.match(OUTPUT_EXTRACTION_PROMPT_TEMPLATE, /invoke name="工具名"/u);
+  assert.match(OUTPUT_EXTRACTION_PROMPT_TEMPLATE, /parameter name="参数名" string="false"/u);
 });
 
 test('final strategy separates thinking from the output region and strips control tags', () => {
@@ -42,6 +48,29 @@ test('stream extraction is invariant across split control tags', () => {
     ANCHOR_SENTENCE + '\n<content>流式正文</content>' + OUTPUT_CLOSE;
   const expected = extractOutputText(source);
   for (const size of [1, 2, 5, 13, 40]) {
+    const scanner = createOutputExtractionStream();
+    let reasoning = '', content = '';
+    for (let index = 0; index < source.length; index += size) {
+      const part = scanner.push(source.slice(index, index + size));
+      reasoning += part.reasoning;
+      content += part.content;
+    }
+    const tail = scanner.finish();
+    reasoning += tail.reasoning;
+    content += tail.content;
+    assert.equal(reasoning, expected.reasoning, `reasoning differs at chunk size ${size}`);
+    assert.equal(content, expected.content, `content differs at chunk size ${size}`);
+  }
+});
+
+test('ASCII-pipe underscore output tokens are extracted and stripped across arbitrary chunks', () => {
+  const source = '误写格式前的思考' + ASCII_END_MARKER + ASCII_OUTPUT_OPEN +
+    '<content>误写格式正文</content>' + ASCII_OUTPUT_CLOSE;
+  const expected = extractOutputText(source);
+  assert.equal(expected.switched, true);
+  assert.equal(expected.content, '<content>误写格式正文</content>');
+  assert.doesNotMatch(expected.reasoning + expected.content, /<\|(?:end_of_think|begin_of_output|end_of_output)\|>/u);
+  for (const size of [1, 2, 7, 19]) {
     const scanner = createOutputExtractionStream();
     let reasoning = '', content = '';
     for (let index = 0; index < source.length; index += size) {
@@ -113,6 +142,14 @@ test('empty provider content falls back to the final tagged output inside reason
   assert.equal(message.content, '<content>从思维链迁移的正文</content>');
   assert.match(message.reasoning_content, /先规划/u);
   assert.doesNotMatch(JSON.stringify(message), /end▁of▁think|begin▁of▁output|end▁of▁output/u);
+});
+
+test('reasoning fallback accepts ASCII-pipe underscore output tokens', () => {
+  const fallback = extractTaggedOutputFallback(
+    '继续思考' + ASCII_END_MARKER + ASCII_OUTPUT_OPEN + '误写标签正文' + ASCII_OUTPUT_CLOSE);
+  assert.equal(fallback.matched, true);
+  assert.equal(fallback.content, '误写标签正文');
+  assert.equal(fallback.reasoning, '继续思考');
 });
 
 test('reasoning fallback output can become a standard tool call', () => {
