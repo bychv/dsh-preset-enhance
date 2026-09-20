@@ -154,6 +154,31 @@ try {
     chatHistoryHint.entryFound && chatHistoryHint.disabled && chatHistoryHint.value === '此内容从当前聊天记录读取',
     JSON.stringify(chatHistoryHint));
 
+  const systemPromptTemplate = await evaluate(`(() => {
+    const entries = [...document.querySelectorAll('#used-prompts .entry')];
+    const entry = document.querySelector('.entry[data-prompt-id="dsh-preset-enhance:dsh-system-prompt"]');
+    entry?.click();
+    const locked = ['prompt-name', 'role', 'position', 'depth', 'priority', 'content', 'up', 'down']
+      .every(id => document.getElementById(id)?.disabled === true);
+    const toggle = document.getElementById('prompt-enabled');
+    const before = toggle?.checked;
+    toggle?.click();
+    const after = toggle?.checked;
+    return {
+      pinned: entries[0] === entry,
+      locked,
+      before,
+      after,
+      content: document.getElementById('content')?.value,
+      note: document.getElementById('marker-note')?.textContent,
+    };
+  })()`);
+  check('DSH system prompt is a pinned read-only template whose enable switch edits the preset',
+    systemPromptTemplate.pinned && systemPromptTemplate.locked && systemPromptTemplate.before === true &&
+      systemPromptTemplate.after === false && systemPromptTemplate.content.length > 0 &&
+      systemPromptTemplate.note.includes('只可开关'),
+    JSON.stringify(systemPromptTemplate));
+
   const extractionUi = await evaluate(`(() => {
     const toggle = document.getElementById('prefix-output-extraction');
     const template = document.getElementById('output-extraction-template');

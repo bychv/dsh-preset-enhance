@@ -18,6 +18,7 @@
   "preset": {
     "format": "sillytavern",
     "data": {
+      "dsh_system_prompt_enabled": true,
       "prompts": [
         { "identifier": "chatHistory", "marker": true, "role": "user" }
       ],
@@ -61,6 +62,8 @@
 | `extensions` | 可选的扩展对象，建议使用插件名作为键，避免重名。 |
 
 `format`、`version`、`preset` 必填。文件大小限制与原 JSON 导入相同，为 8 MB。自定义提示词的换行按 JSON 规则写为 `\n`；宏保留源文本，在实际请求时展开。
+
+`preset.data.dsh_system_prompt_enabled` 是可选布尔值，省略时按 `true` 处理。它对应工作台置顶的只读“DSH 系统提示词”模板：在其他 DSH 模式中启用该预设时，`true` 保留模式原有系统提示与运行时注入，`false` 将其移除。专用“预设模式”始终移除这些内容。
 
 ## 预填充配置
 

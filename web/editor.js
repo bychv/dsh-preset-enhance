@@ -4,6 +4,7 @@ const $ = id => document.getElementById(id);
 const sessionId = new URLSearchParams(location.search).get('sessionId') ?? '';
 let state = { presets: [], revision: 0 }, selectedId = '', selectedPrompt = '', dirty = false;
 let preset = blank();
+const DSH_SYSTEM_PROMPT_TEMPLATE_ID = 'dsh-preset-enhance:dsh-system-prompt';
 const PRESET_AUTO_SAVE_KEY = 'dsh-preset-enhance.preset-auto-save';
 const PRESET_AUTO_SAVE_DELAY = 600;
 const GLOBAL_CONFIG_AUTO_SAVE_DELAY = 700;
@@ -22,6 +23,7 @@ let bindingVersion = 0;
 
 function blank() {
   return {
+    dsh_system_prompt_enabled: true,
     prompts: [{ identifier: 'chatHistory', name: 'Chat History', marker: true, role: 'user' }],
     prompt_order: [{ character_id: 100001, order: [{ identifier: 'chatHistory', enabled: true }] }],
   };
@@ -83,7 +85,20 @@ function order() {
   return preset.prompt_order.find(group => String(group.character_id) === $('order').value)?.order ?? [];
 }
 function current() {
+  if (selectedPrompt === DSH_SYSTEM_PROMPT_TEMPLATE_ID) return dshSystemPromptTemplate();
   return preset.prompts.find(prompt => prompt.identifier === selectedPrompt);
+}
+function dshSystemPromptTemplate() {
+  return {
+    identifier: DSH_SYSTEM_PROMPT_TEMPLATE_ID,
+    name: 'DSH 系统提示词',
+    role: 'system',
+    marker: true,
+    content: state.dshSystemPromptText || '此内容从当前 DSH 模式的系统提示词读取',
+  };
+}
+function isDshSystemPromptTemplate(promptOrId) {
+  return (typeof promptOrId === 'string' ? promptOrId : promptOrId?.identifier) === DSH_SYSTEM_PROMPT_TEMPLATE_ID;
 }
 function options() {
   return {
@@ -105,6 +120,7 @@ function loadDraft(id) {
   selectedId = id;
   const record = state.presets.find(item => item.id === id);
   preset = structuredClone(record?.preset ?? blank());
+  if (preset.dsh_system_prompt_enabled === undefined) preset.dsh_system_prompt_enabled = true;
   const packaged = record?.sharePackage;
   $('apply-package-prefill').hidden = !packaged?.prefill;
   $('package-note').textContent = packaged
@@ -1334,11 +1350,15 @@ function renderPackageToolsPreview(result, title) {
 function renderList() {
   const term = $('search').value.toLowerCase();
   const listed = new Set(order().map(item => item.identifier));
-  const used = order().map(item => ({
+  const used = [{
+    item: { identifier: DSH_SYSTEM_PROMPT_TEMPLATE_ID, enabled: preset.dsh_system_prompt_enabled !== false },
+    prompt: dshSystemPromptTemplate(),
+  }, ...order().map(item => ({
     item,
     prompt: preset.prompts.find(prompt => prompt.identifier === item.identifier),
-  })).filter(entry => entry.prompt);
-  const unused = preset.prompts.filter(prompt => !listed.has(prompt.identifier)).map(prompt => ({ prompt }));
+  })).filter(entry => entry.prompt)];
+  const unused = preset.prompts.filter(prompt => prompt.identifier !== DSH_SYSTEM_PROMPT_TEMPLATE_ID &&
+    !listed.has(prompt.identifier)).map(prompt => ({ prompt }));
   $('used-count').textContent = `${used.length} 项`;
   $('unused-count').textContent = `${unused.length} 项`;
   $('used-prompts').replaceChildren();
@@ -1350,6 +1370,7 @@ function renderPromptItem(prompt, item, used, term, parent) {
   if (!`${prompt.name ?? ''} ${prompt.identifier} ${prompt.content ?? ''}`.toLowerCase().includes(term)) return;
   const div = document.createElement('div');
   div.className = `item ${used ? item.enabled ? '' : 'off' : 'unused'} ${selectedPrompt === prompt.identifier ? 'active' : ''}`;
+  const fixed = isDshSystemPromptTemplate(prompt);
   if (used) {
     const toggle = document.createElement('input');
     toggle.type = 'checkbox';
@@ -1365,7 +1386,8 @@ function renderPromptItem(prompt, item, used, term, parent) {
   const button = document.createElement('button');
   button.className = 'entry';
   button.dataset.promptId = prompt.identifier;
-  button.textContent = `${prompt.name ?? prompt.identifier} · ${prompt.marker ? '标记' : prompt.role ?? 'system'}`;
+  button.textContent = fixed ? 'DSH 系统提示词 · 内置模板' :
+    `${prompt.name ?? prompt.identifier} · ${prompt.marker ? '标记' : prompt.role ?? 'system'}`;
   button.onclick = () => {
     selectedPrompt = prompt.identifier;
     renderList();
@@ -1375,7 +1397,7 @@ function renderPromptItem(prompt, item, used, term, parent) {
   membership.className = 'membership';
   membership.type = 'button';
   membership.textContent = used ? '移出' : '加入';
-  membership.disabled = prompt.identifier === 'chatHistory';
+  membership.disabled = fixed || prompt.identifier === 'chatHistory';
   membership.setAttribute('aria-label', `${used ? '移出顺序表' : '加入顺序表'} ${prompt.name ?? prompt.identifier}`);
   membership.onclick = () => {
     used ? removeFromOrder(prompt.identifier) : addToOrder(prompt.identifier);
@@ -1386,6 +1408,11 @@ function renderPromptItem(prompt, item, used, term, parent) {
   parent.append(div);
 }
 function setEnabled(id, enabled) {
+  if (isDshSystemPromptTemplate(id)) {
+    preset.dsh_system_prompt_enabled = enabled;
+    markDirty();
+    return;
+  }
   const item = order().find(entry => entry.identifier === id);
   if (!item) return;
   item.enabled = enabled;
@@ -1398,7 +1425,7 @@ function addToOrder(id) {
   markDirty();
 }
 function removeFromOrder(id) {
-  if (id === 'chatHistory') return;
+  if (id === 'chatHistory' || isDshSystemPromptTemplate(id)) return;
   const index = order().findIndex(item => item.identifier === id);
   if (index >= 0) {
     order().splice(index, 1);
@@ -1411,7 +1438,8 @@ function renderEditor() {
   $('empty').hidden = !!prompt;
   if (!prompt) return;
   const item = order().find(entry => entry.identifier === prompt.identifier);
-  const used = !!item;
+  const fixed = isDshSystemPromptTemplate(prompt);
+  const used = fixed || !!item;
   $('prompt-name').value = prompt.name ?? '';
   $('role').value = prompt.role ?? 'system';
   $('position').value = prompt.injection_position ?? 0;
@@ -1419,12 +1447,14 @@ function renderEditor() {
   $('priority').value = prompt.injection_order ?? 100;
   const chatHistory = prompt.identifier === 'chatHistory';
   $('content').value = chatHistory ? '此内容从当前聊天记录读取' : prompt.content ?? '';
-  $('content').disabled = !!prompt.marker;
-  $('prompt-enabled').checked = item?.enabled ?? false;
+  for (const id of ['prompt-name', 'role', 'position', 'depth', 'priority']) $(id).disabled = fixed;
+  $('content').disabled = fixed || !!prompt.marker;
+  $('prompt-enabled').checked = fixed ? preset.dsh_system_prompt_enabled !== false : item?.enabled ?? false;
   $('prompt-enabled').disabled = !used;
-  $('up').disabled = !used;
-  $('down').disabled = !used;
-  $('marker-note').textContent = prompt.marker ?
+  $('up').disabled = fixed || !used;
+  $('down').disabled = fixed || !used;
+  $('marker-note').textContent = fixed ?
+    '内置模板：控制其他 DSH 模式启用此预设时是否保留该模式的系统提示词；正文从当前模式动态读取，只可开关。' : prompt.marker ?
     `标记 ${prompt.identifier}：chatHistory 展开真实会话；其他标记在下方 JSON 中填写。` :
     `${prompt.identifier}${used ? '' : ' · 当前为闲置条目，加入顺序表后才会参与注入'}`;
 }
@@ -1434,7 +1464,7 @@ for (const [id, key, numeric] of [
   ['depth', 'injection_depth', true], ['priority', 'injection_order', true], ['content', 'content'],
 ]) {
   $(id).oninput = () => {
-    if (!current()) return;
+    if (!current() || isDshSystemPromptTemplate(selectedPrompt)) return;
     current()[key] = numeric ? Number($(id).value) : $(id).value;
     markDirty();
     if (id === 'prompt-name' || id === 'role') renderList();

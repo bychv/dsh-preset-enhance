@@ -3,7 +3,7 @@ import { resolve, join } from 'node:path';
 import { homedir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 import { PresetStore } from './lib/store.mjs';
-import { compilePreset, validatePreset, getOrder } from './lib/preset.mjs';
+import { compilePreset, validatePreset, getOrder, dshSystemPromptEnabled } from './lib/preset.mjs';
 import { decodePresetDocument, encodePresetPackage, attachPrefillSettings, applyPackagePrefill } from './lib/preset-package.mjs';
 import { installDeepSeekBetaBridge } from './lib/deepseek-beta.mjs';
 import { OUTPUT_EXTRACTION_PROMPT_TEMPLATE } from './lib/output-extractor.mjs';
@@ -19,7 +19,7 @@ export const AGENT_PRESET_ID = 'st-preset';
 const BASE = '/preset-enhance';
 const DSH_SYSTEM_PROMPT = '@deepseek-ai/dsh-system-prompt';
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
-const PRESET_COMPILER_VERSION = 3;
+const PRESET_COMPILER_VERSION = 4;
 const ownGet = (object, key) => Object.hasOwn(object, key) ? object[key] : undefined;
 const assign = (object, key, value) => Object.defineProperty(object, key, { value, writable: true, enumerable: true, configurable: true });
 const isRecord = value => value && typeof value === 'object' && !Array.isArray(value);
@@ -82,12 +82,14 @@ export async function apply(ctx, config = {}) {
         if (!binding?.enabled) return null;
         const record = current.presets.find(p => p.id === binding.presetId);
         if (!record) throw new Error('当前会话启用的预设不存在');
+        const presetHistory = !exclusive && !dshSystemPromptEnabled(record.preset)
+          ? presetModeHistory(history) : history;
         const postToolPrefix = current.deepseekBetaPrefix && current.postToolPrefixMode === 'custom'
           ? current.postToolPrefixText : undefined;
-        const key = digest({ compiler: PRESET_COMPILER_VERSION, messages: history, preset: record, binding, postToolPrefix });
+        const key = digest({ compiler: PRESET_COMPILER_VERSION, messages: presetHistory, preset: record, binding, postToolPrefix });
         const prior = ownGet(current.sessions, options.sessionId);
         if (prior?.key === key) return prior.result;
-        const result = compilePreset(record.preset, history, {
+        const result = compilePreset(record.preset, presetHistory, {
           ...binding, seed: key, local: prior?.result.local, global: current.global, postToolPrefix,
         });
         options.signal?.throwIfAborted();
@@ -170,6 +172,7 @@ export async function apply(ctx, config = {}) {
             sessionMode: liveMode,
             agentModes: modes,
             autoEnableModes: state.autoEnableModes,
+            dshSystemPromptText: dshSystemPromptText(session?.deriveMessages?.() ?? []),
             toolCatalogs: catalogs,
             mcpToolGroups: mcpToolGroups(catalogs),
             toolCatalogErrors: discovered.errors,
@@ -598,6 +601,10 @@ function presetModeHistory(messages) {
   return messages.filter(message => message.role !== 'system' &&
     !(message.source?.kind === 'plugin' && message.source.plugin === DSH_SYSTEM_PROMPT));
 }
+function dshSystemPromptText(messages) {
+  return messages.filter(message => message.role === 'system')
+    .map(messageText).filter(Boolean).join('\n\n');
+}
 
 /** Live catalogs plus the last catalog seen for each mode, so a removed plugin is not silently forgotten. */
 function knownToolCatalogs(state, discovered) {
@@ -754,7 +761,8 @@ export async function ensurePresetAgentMode(root, standard) {
 function previewHistory(ctx, body) {
   const session = ctx.sessions.get(body.sessionId);
   const derived = session?.deriveMessages() ?? [];
-  const history = sessionModeId(session) === AGENT_PRESET_ID ? presetModeHistory(derived) : derived;
+  const exclusive = sessionModeId(session) === AGENT_PRESET_ID;
+  const history = exclusive || !dshSystemPromptEnabled(body.preset) ? presetModeHistory(derived) : derived;
   return body.input ? [...history, {
     id: 'preview-user',
     role: 'user',

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { createMacroContext, renderMacros } from '../lib/macros.mjs';
-import { compilePreset } from '../lib/preset.mjs';
+import { compilePreset, dshSystemPromptEnabled, validatePreset } from '../lib/preset.mjs';
 import { PresetStore } from '../lib/store.mjs';
 import { installDeepSeekBetaBridge, rewriteDeepSeekPrefixFetch } from '../lib/deepseek-beta.mjs';
 import { AGENT_PRESET_ID, apply, buildPresetModeComposition, discoverModeToolCatalogs, ensurePresetAgentMode } from '../index.mjs';
@@ -50,6 +50,13 @@ test('selected order controls activation and places assistant after original his
   assert.deepEqual(result.messages.map(x => x.role), ['system', 'user', 'assistant']);
   assert.equal(result.messages[1], history[0]); assert.equal(result.local.unsafe, undefined);
   assert.equal(result.messages[2].content[0].text, 'value');
+});
+test('DSH system prompt switch defaults on and accepts only a boolean override', () => {
+  assert.equal(dshSystemPromptEnabled({ prompts: [] }), true);
+  assert.equal(dshSystemPromptEnabled({ prompts: [], dsh_system_prompt_enabled: true }), true);
+  assert.equal(dshSystemPromptEnabled({ prompts: [], dsh_system_prompt_enabled: false }), false);
+  assert.throws(() => validatePreset({ prompts: [], dsh_system_prompt_enabled: 'false' }),
+    /dsh_system_prompt_enabled 必须是布尔值/);
 });
 test('depth insertion respects original positions and tool-call/result boundaries', () => {
   const history = [msg('u', 'user', 'hi'), { id: 'a', role: 'assistant', content: [{ type: 'tool-call', id: 't', name: 'test', arguments: '{}' }] },
@@ -353,6 +360,61 @@ test('auto-enabled modes only affect conversations created after the mode was se
     }
     assert.deepEqual(calls[0].messages.map(item => item.content[0].text), ['hello']);
     assert.deepEqual(calls[1].messages.map(item => item.content[0].text), ['AUTO', 'hello']);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+test('a preset can remove or retain the DSH system prompt in other modes', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-preset-system-toggle-'));
+  try {
+    const file = join(dir, 'state.json'), store = new PresetStore(file), listeners = {}, calls = [];
+    await store.transaction(state => {
+      state.presets.push({
+        id: 'p', name: 'Auto',
+        preset: {
+          dsh_system_prompt_enabled: false,
+          prompts: [{ identifier: 'p', role: 'system', content: 'PRESET' }],
+        },
+      });
+      state.defaultPresetId = 'p';
+      state.selectedPresetId = 'p';
+      state.autoEnableModes.push('standard');
+      state.autoEnableSince.standard = 0;
+    });
+    const sessions = {
+      off: { id: 'off', header: { agentPreset: 'standard', createdAt: 1 }, snapshotEvents: () => [] },
+      on: { id: 'on', header: { agentPreset: 'standard', createdAt: 2 }, snapshotEvents: () => [] },
+    };
+    const ctx = {
+      sessions: { get: id => sessions[id] },
+      on: (name, fn) => listeners[name] = fn,
+      effect: fn => fn(),
+      webServer: { register: () => () => {} },
+      llm: { stream: options => listeners['llm/stream'](options, async function* () {
+        calls.push(options);
+        yield { type: 'finish', reason: { kind: 'completed' } };
+      }) },
+    };
+    await apply(ctx, { dataFile: file, agentPresetRoot: join(dir, '.agent-presets') });
+    const system = {
+      id: 'dsh-system', role: 'system', content: [{ type: 'text', text: 'DSH SYSTEM' }],
+      source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt' },
+    };
+    const runtime = {
+      id: 'dsh-runtime', role: 'user', content: [{ type: 'text', text: 'DSH RUNTIME' }],
+      source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt', form: 'snapshot' },
+    };
+    const request = sessionId => ({ sessionId, provider: 'mock', model: 'mock',
+      messages: [system, runtime, msg('u', 'user', 'hello')] });
+
+    for await (const _ of ctx.llm.stream(request('off'))) {}
+    assert.deepEqual(calls[0].messages.map(message => message.content[0].text), ['PRESET', 'hello']);
+
+    await store.transaction(state => {
+      state.presets[0].preset.dsh_system_prompt_enabled = true;
+      state.revision++;
+    });
+    for await (const _ of ctx.llm.stream(request('on'))) {}
+    assert.deepEqual(calls[1].messages.map(message => message.content[0].text),
+      ['PRESET', 'DSH SYSTEM', 'DSH RUNTIME', 'hello']);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 test('tool catalogs are resolved independently for every built-in and plugin-provided mode', async () => {
