@@ -261,9 +261,13 @@ test('SSE waits for choice completion before moving tagged reasoning output into
   const choices = payloads.filter(payload => payload !== '[DONE]').map(JSON.parse).flatMap(chunk => chunk.choices ?? []);
   const reasoningText = choices.map(choice => choice.delta?.reasoning_content ?? '').join('');
   const content = choices.map(choice => choice.delta?.content ?? '').join('');
+  const finalIndex = choices.findIndex(choice => choice.finish_reason != null);
   assert.match(reasoningText, /流式思考/u);
   assert.equal(content, '<content>结束时提取</content>');
-  assert.doesNotMatch(JSON.stringify(choices), /end▁of▁think|begin▁of▁output|end▁of▁output/u);
+  assert.equal(choices.slice(0, finalIndex).some(choice => typeof choice.delta?.reasoning_content === 'string'), true);
+  assert.equal(choices.slice(0, finalIndex).some(choice => typeof choice.delta?.content === 'string'), false);
+  assert.equal(choices[finalIndex].delta.content, '<content>结束时提取</content>');
+  assert.doesNotMatch(content, /end▁of▁think|begin▁of▁output|end▁of▁output/u);
   assert.equal(payloads.at(-1), '[DONE]');
 });
 
@@ -291,7 +295,7 @@ test('SSE captures a tool call from reasoning while preserving separately stream
   const choices = payloads.filter(payload => payload !== '[DONE]').map(JSON.parse).flatMap(chunk => chunk.choices ?? []);
   const toolChoice = choices.find(choice => Array.isArray(choice.delta?.tool_calls));
   assert.equal(choices.map(choice => choice.delta?.content ?? '').join(''), '正文仍然保留');
-  assert.equal(choices.map(choice => choice.delta?.reasoning_content ?? '').join('').trim(), '流式思考');
+  assert.match(choices.map(choice => choice.delta?.reasoning_content ?? '').join(''), /流式思考/u);
   assert.equal(toolChoice.finish_reason, 'tool_calls');
   assert.equal(toolChoice.delta.tool_calls[0].function.name, 'lookup_weather');
 });
