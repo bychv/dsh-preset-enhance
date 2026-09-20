@@ -4,15 +4,26 @@ const $ = id => document.getElementById(id);
 const sessionId = new URLSearchParams(location.search).get('sessionId') ?? '';
 let state = { presets: [], revision: 0 }, selectedId = '', selectedPrompt = '', dirty = false;
 let preset = blank();
+const DSH_SYSTEM_PROMPT_TEMPLATE_ID = 'dsh-preset-enhance:dsh-system-prompt';
 const PRESET_AUTO_SAVE_KEY = 'dsh-preset-enhance.preset-auto-save';
 const PRESET_AUTO_SAVE_DELAY = 600;
+const GLOBAL_CONFIG_AUTO_SAVE_DELAY = 700;
 let presetDraftVersion = 0;
 let presetDraftGeneration = 0;
 let presetAutoSaveTimer = null;
 let presetAutoSaveChain = Promise.resolve();
+let globalConfigAutoSaveTimer = null;
+let globalConfigAutoSaveChain = Promise.resolve();
+let prefillSettingsDirty = false;
+let prefillSettingsVersion = 0;
+let autoModesDirty = false;
+let autoModesVersion = 0;
+let bindingDirty = false;
+let bindingVersion = 0;
 
 function blank() {
   return {
+    dsh_system_prompt_enabled: true,
     prompts: [{ identifier: 'chatHistory', name: 'Chat History', marker: true, role: 'user' }],
     prompt_order: [{ character_id: 100001, order: [{ identifier: 'chatHistory', enabled: true }] }],
   };
@@ -22,6 +33,9 @@ function status(text, error = false) {
   const pending = [];
   if (toolDraft.dirty) pending.push('工具开关尚未保存');
   if (groupsDirty) pending.push('工具分组尚未保存');
+  if (prefillSettingsDirty) pending.push('接口设置尚未保存');
+  if (autoModesDirty) pending.push('自动启用模式尚未保存');
+  if (bindingDirty) pending.push('会话设置尚未应用');
   const suffix = !error && pending.length && !text.includes('尚未保存') ? ` · ${pending.join('；')}` : '';
   $('status').textContent = `${text}${suffix}`;
   $('status').className = error ? 'error' : '';
@@ -71,7 +85,20 @@ function order() {
   return preset.prompt_order.find(group => String(group.character_id) === $('order').value)?.order ?? [];
 }
 function current() {
+  if (selectedPrompt === DSH_SYSTEM_PROMPT_TEMPLATE_ID) return dshSystemPromptTemplate();
   return preset.prompts.find(prompt => prompt.identifier === selectedPrompt);
+}
+function dshSystemPromptTemplate() {
+  return {
+    identifier: DSH_SYSTEM_PROMPT_TEMPLATE_ID,
+    name: 'DSH 系统提示词',
+    role: 'system',
+    marker: true,
+    content: state.dshSystemPromptText || '此内容从当前 DSH 模式的系统提示词读取',
+  };
+}
+function isDshSystemPromptTemplate(promptOrId) {
+  return (typeof promptOrId === 'string' ? promptOrId : promptOrId?.identifier) === DSH_SYSTEM_PROMPT_TEMPLATE_ID;
 }
 function options() {
   return {
@@ -93,6 +120,7 @@ function loadDraft(id) {
   selectedId = id;
   const record = state.presets.find(item => item.id === id);
   preset = structuredClone(record?.preset ?? blank());
+  if (preset.dsh_system_prompt_enabled === undefined) preset.dsh_system_prompt_enabled = true;
   const packaged = record?.sharePackage;
   $('apply-package-prefill').hidden = !packaged?.prefill;
   $('package-note').textContent = packaged
@@ -134,7 +162,9 @@ async function reload(id) {
   $('markers').value = JSON.stringify(binding.markers ?? {}, null, 2);
   $('deepseek-beta-prefix').checked = state.deepseekBetaPrefix === true;
   $('prefix-tool-calls').checked = state.prefixToolCalls === true;
+  $('prefix-output-extraction').checked = state.prefixOutputExtraction === true;
   $('prefix-nonofficial-remove-tools').checked = state.prefixNonOfficialRemoveTools !== false;
+  $('output-extraction-template').value = state.outputExtractionTemplate ?? '';
   $('post-tool-prefix-mode').value = state.postToolPrefixMode ?? 'inherit';
   $('post-tool-prefix-text').value = state.postToolPrefixText ?? '';
   syncPrefixToolControls();
@@ -186,6 +216,7 @@ function renderAutoModes() {
     input.dataset.mode = mode.id;
     input.checked = mode.id === 'st-preset' || state.autoEnableModes?.includes(mode.id);
     input.disabled = mode.id === 'st-preset' || !!mode.broken;
+    input.onchange = markAutoModesDirty;
     const text = document.createElement('span');
     text.textContent = mode.name;
     const small = document.createElement('small');
@@ -214,6 +245,7 @@ let autoSaveInFlightVersion = -1;
 let keepaliveFlushedVersion = -1;
 let groupDraft = [];
 let groupsDirty = false;
+let groupDraftVersion = 0;
 let groupPageOpen = false;
 let toolView = { sessionScope: false, modeId: '', tabs: [], active: '@all' };
 let packageToolsRecordId = '';
@@ -316,7 +348,9 @@ function markToolDirty() {
 }
 function markGroupsDirty() {
   groupsDirty = true;
+  groupDraftVersion++;
   status('工具分组草稿尚未保存');
+  scheduleGlobalConfigAutoSave();
 }
 function presetDiscardOkay() {
   return !dirty || confirm('放弃尚未保存的预设草稿？');
@@ -428,13 +462,147 @@ async function presetDraftReady() {
   return presetDiscardOkay();
 }
 
+function markPrefillSettingsDirty() {
+  prefillSettingsDirty = true;
+  prefillSettingsVersion++;
+  status('预填充接口设置尚未保存');
+  scheduleGlobalConfigAutoSave();
+}
+function markAutoModesDirty() {
+  autoModesDirty = true;
+  autoModesVersion++;
+  status('自动启用模式列表尚未保存');
+  scheduleGlobalConfigAutoSave();
+}
+function markBindingDirty() {
+  if (!sessionId) return;
+  bindingDirty = true;
+  bindingVersion++;
+  status('当前会话设置尚未应用');
+  scheduleGlobalConfigAutoSave();
+}
+function cancelGlobalConfigAutoSave() {
+  if (globalConfigAutoSaveTimer !== null) {
+    clearTimeout(globalConfigAutoSaveTimer);
+    globalConfigAutoSaveTimer = null;
+  }
+}
+function scheduleGlobalConfigAutoSave() {
+  if (!presetAutoSaveIsOn()) return;
+  cancelGlobalConfigAutoSave();
+  globalConfigAutoSaveTimer = setTimeout(() => {
+    globalConfigAutoSaveTimer = null;
+    void runGlobalConfigAutoSave();
+  }, GLOBAL_CONFIG_AUTO_SAVE_DELAY);
+}
+async function configWrite(payload) {
+  try {
+    return await api(payload);
+  } catch (error) {
+    if (!isRevisionConflict(error)) throw error;
+    const latest = await api();
+    state.revision = latest.revision;
+    return api(payload);
+  }
+}
+function acceptRevision(result) {
+  state.revision = Number.isInteger(result?.revision) ? result.revision : state.revision + 1;
+}
+function toolGroupsPayload() {
+  return groupDraft.map(group => ({
+    id: group.id,
+    name: group.name ?? '',
+    description: group.description ?? '',
+    order: Number(group.order) || 0,
+    members: (group.members ?? []).map(member => ({ modeId: member.modeId, toolName: member.toolName })),
+  }));
+}
+async function persistPrefillSettingsDraft() {
+  if (!prefillSettingsDirty) return false;
+  const version = prefillSettingsVersion;
+  const payload = prefillSettingsPayload();
+  const result = await configWrite(payload);
+  acceptRevision(result);
+  state.deepseekBetaPrefix = result.enabled === true;
+  state.prefixToolCalls = result.toolCalls === true;
+  state.prefixOutputExtraction = result.extractOutput === true;
+  state.prefixNonOfficialRemoveTools = result.removeNonOfficialTools !== false;
+  state.postToolPrefixMode = payload.postToolPrefixMode;
+  state.postToolPrefixText = payload.postToolPrefixText;
+  if (prefillSettingsVersion === version) prefillSettingsDirty = false;
+  else scheduleGlobalConfigAutoSave();
+  return true;
+}
+async function persistAutoModesDraft() {
+  if (!autoModesDirty) return false;
+  const version = autoModesVersion;
+  const modes = [...$('auto-mode-list').querySelectorAll('input[data-mode]:checked')].map(input => input.dataset.mode);
+  const result = await configWrite({ action: 'save-auto-modes', modes });
+  acceptRevision(result);
+  state.autoEnableModes = result.modes;
+  if (autoModesVersion === version) autoModesDirty = false;
+  else scheduleGlobalConfigAutoSave();
+  return true;
+}
+async function persistGroupDraft() {
+  if (!groupsDirty) return false;
+  const version = groupDraftVersion;
+  const groups = toolGroupsPayload();
+  const result = await configWrite({ action: 'save-tool-groups', groups });
+  acceptRevision(result);
+  state.toolGroups = structuredClone(result.groups ?? groups);
+  if (groupDraftVersion === version) groupsDirty = false;
+  else scheduleGlobalConfigAutoSave();
+  return true;
+}
+async function persistBindingDraft() {
+  if (!bindingDirty || !sessionId) return false;
+  const version = bindingVersion;
+  const binding = { enabled: $('enabled').checked, presetId: selectedId, ...options() };
+  const result = await configWrite({ action: 'bind', sessionId, binding });
+  acceptRevision(result);
+  state.binding = structuredClone(binding);
+  if (bindingVersion === version) bindingDirty = false;
+  else scheduleGlobalConfigAutoSave();
+  return true;
+}
+function runGlobalConfigAutoSave() {
+  globalConfigAutoSaveChain = globalConfigAutoSaveChain.then(async () => {
+    if (!presetAutoSaveIsOn()) return false;
+    if (dirty) {
+      cancelPresetAutoSave();
+      const saved = await runPresetAutoSave();
+      if (!saved?.ok) throw saved?.error ?? new Error('预设自动保存失败');
+    }
+    if (toolDraft.dirty) {
+      cancelAutoSave();
+      const saved = await runAutoSave();
+      if (!saved?.ok) throw saved?.error ?? new Error('工具开关自动保存失败');
+    }
+    const saved = [
+      await persistPrefillSettingsDraft(),
+      await persistAutoModesDraft(),
+      await persistGroupDraft(),
+      await persistBindingDraft(),
+    ].some(Boolean);
+    if (saved) status('全部配置已自动保存');
+    return saved;
+  }).catch(error => {
+    status(`全局自动保存失败：${error.message}（改动仍保留）`, true);
+    return false;
+  });
+  return globalConfigAutoSaveChain;
+}
+
 /* ---------- 工具开关自动保存（可关闭；关闭时行为与手工保存完全一致） ---------- */
 function autoSaveIsOn() {
-  return $('tool-auto-save').checked === true;
+  return presetAutoSaveIsOn() || $('tool-auto-save').checked === true;
 }
 function autoSaveNote() {
-  return autoSaveIsOn()
-    ? '自动保存已开启：工具开关改动即时生效；分组名称、排序和成员结构改动仍需“保存分组”。'
+  return presetAutoSaveIsOn()
+    ? '全局自动保存已开启：工具开关与分组改动会自动保存。'
+    : autoSaveIsOn()
+      ? '已单独开启工具开关自动保存；分组改动仍需“保存分组”。'
     : '自动保存未开启：工具开关改动需点击“保存工具开关”。';
 }
 function cancelAutoSave() {
@@ -1182,11 +1350,15 @@ function renderPackageToolsPreview(result, title) {
 function renderList() {
   const term = $('search').value.toLowerCase();
   const listed = new Set(order().map(item => item.identifier));
-  const used = order().map(item => ({
+  const used = [{
+    item: { identifier: DSH_SYSTEM_PROMPT_TEMPLATE_ID, enabled: preset.dsh_system_prompt_enabled !== false },
+    prompt: dshSystemPromptTemplate(),
+  }, ...order().map(item => ({
     item,
     prompt: preset.prompts.find(prompt => prompt.identifier === item.identifier),
-  })).filter(entry => entry.prompt);
-  const unused = preset.prompts.filter(prompt => !listed.has(prompt.identifier)).map(prompt => ({ prompt }));
+  })).filter(entry => entry.prompt)];
+  const unused = preset.prompts.filter(prompt => prompt.identifier !== DSH_SYSTEM_PROMPT_TEMPLATE_ID &&
+    !listed.has(prompt.identifier)).map(prompt => ({ prompt }));
   $('used-count').textContent = `${used.length} 项`;
   $('unused-count').textContent = `${unused.length} 项`;
   $('used-prompts').replaceChildren();
@@ -1198,6 +1370,7 @@ function renderPromptItem(prompt, item, used, term, parent) {
   if (!`${prompt.name ?? ''} ${prompt.identifier} ${prompt.content ?? ''}`.toLowerCase().includes(term)) return;
   const div = document.createElement('div');
   div.className = `item ${used ? item.enabled ? '' : 'off' : 'unused'} ${selectedPrompt === prompt.identifier ? 'active' : ''}`;
+  const fixed = isDshSystemPromptTemplate(prompt);
   if (used) {
     const toggle = document.createElement('input');
     toggle.type = 'checkbox';
@@ -1213,7 +1386,8 @@ function renderPromptItem(prompt, item, used, term, parent) {
   const button = document.createElement('button');
   button.className = 'entry';
   button.dataset.promptId = prompt.identifier;
-  button.textContent = `${prompt.name ?? prompt.identifier} · ${prompt.marker ? '标记' : prompt.role ?? 'system'}`;
+  button.textContent = fixed ? 'DSH 系统提示词 · 内置模板' :
+    `${prompt.name ?? prompt.identifier} · ${prompt.marker ? '标记' : prompt.role ?? 'system'}`;
   button.onclick = () => {
     selectedPrompt = prompt.identifier;
     renderList();
@@ -1223,7 +1397,7 @@ function renderPromptItem(prompt, item, used, term, parent) {
   membership.className = 'membership';
   membership.type = 'button';
   membership.textContent = used ? '移出' : '加入';
-  membership.disabled = prompt.identifier === 'chatHistory';
+  membership.disabled = fixed || prompt.identifier === 'chatHistory';
   membership.setAttribute('aria-label', `${used ? '移出顺序表' : '加入顺序表'} ${prompt.name ?? prompt.identifier}`);
   membership.onclick = () => {
     used ? removeFromOrder(prompt.identifier) : addToOrder(prompt.identifier);
@@ -1234,6 +1408,11 @@ function renderPromptItem(prompt, item, used, term, parent) {
   parent.append(div);
 }
 function setEnabled(id, enabled) {
+  if (isDshSystemPromptTemplate(id)) {
+    preset.dsh_system_prompt_enabled = enabled;
+    markDirty();
+    return;
+  }
   const item = order().find(entry => entry.identifier === id);
   if (!item) return;
   item.enabled = enabled;
@@ -1246,7 +1425,7 @@ function addToOrder(id) {
   markDirty();
 }
 function removeFromOrder(id) {
-  if (id === 'chatHistory') return;
+  if (id === 'chatHistory' || isDshSystemPromptTemplate(id)) return;
   const index = order().findIndex(item => item.identifier === id);
   if (index >= 0) {
     order().splice(index, 1);
@@ -1259,7 +1438,8 @@ function renderEditor() {
   $('empty').hidden = !!prompt;
   if (!prompt) return;
   const item = order().find(entry => entry.identifier === prompt.identifier);
-  const used = !!item;
+  const fixed = isDshSystemPromptTemplate(prompt);
+  const used = fixed || !!item;
   $('prompt-name').value = prompt.name ?? '';
   $('role').value = prompt.role ?? 'system';
   $('position').value = prompt.injection_position ?? 0;
@@ -1267,12 +1447,14 @@ function renderEditor() {
   $('priority').value = prompt.injection_order ?? 100;
   const chatHistory = prompt.identifier === 'chatHistory';
   $('content').value = chatHistory ? '此内容从当前聊天记录读取' : prompt.content ?? '';
-  $('content').disabled = !!prompt.marker;
-  $('prompt-enabled').checked = item?.enabled ?? false;
+  for (const id of ['prompt-name', 'role', 'position', 'depth', 'priority']) $(id).disabled = fixed;
+  $('content').disabled = fixed || !!prompt.marker;
+  $('prompt-enabled').checked = fixed ? preset.dsh_system_prompt_enabled !== false : item?.enabled ?? false;
   $('prompt-enabled').disabled = !used;
-  $('up').disabled = !used;
-  $('down').disabled = !used;
-  $('marker-note').textContent = prompt.marker ?
+  $('up').disabled = fixed || !used;
+  $('down').disabled = fixed || !used;
+  $('marker-note').textContent = fixed ?
+    '内置模板：控制其他 DSH 模式启用此预设时是否保留该模式的系统提示词；正文从当前模式动态读取，只可开关。' : prompt.marker ?
     `标记 ${prompt.identifier}：chatHistory 展开真实会话；其他标记在下方 JSON 中填写。` :
     `${prompt.identifier}${used ? '' : ' · 当前为闲置条目，加入顺序表后才会参与注入'}`;
 }
@@ -1282,7 +1464,7 @@ for (const [id, key, numeric] of [
   ['depth', 'injection_depth', true], ['priority', 'injection_order', true], ['content', 'content'],
 ]) {
   $(id).oninput = () => {
-    if (!current()) return;
+    if (!current() || isDshSystemPromptTemplate(selectedPrompt)) return;
     current()[key] = numeric ? Number($(id).value) : $(id).value;
     markDirty();
     if (id === 'prompt-name' || id === 'role') renderList();
@@ -1305,15 +1487,47 @@ $('prefill').oninput = () => {
 };
 $('post-tool-prefix-mode').onchange = () => {
   syncPrefixToolControls();
-  status('预填充接口设置尚未保存');
+  markPrefillSettingsDirty();
 };
-$('post-tool-prefix-text').oninput = () => status('预填充接口设置尚未保存');
-$('deepseek-beta-prefix').onchange = () => status('预填充接口设置尚未保存');
+$('post-tool-prefix-text').oninput = markPrefillSettingsDirty;
+$('deepseek-beta-prefix').onchange = markPrefillSettingsDirty;
 $('prefix-tool-calls').onchange = () => {
   syncPrefixToolControls();
-  status('预填充接口设置尚未保存');
+  markPrefillSettingsDirty();
 };
-$('prefix-nonofficial-remove-tools').onchange = () => status('预填充接口设置尚未保存');
+$('prefix-output-extraction').onchange = markPrefillSettingsDirty;
+$('prefix-nonofficial-remove-tools').onchange = markPrefillSettingsDirty;
+for (const id of ['user', 'char', 'markers']) $(id).oninput = markBindingDirty;
+$('enabled').onchange = markBindingDirty;
+$('add-output-extraction-template').onclick = () => {
+  const identifier = 'dsh-output-extraction-template';
+  let prompt = preset.prompts.find(item => item.identifier === identifier);
+  if (!prompt) {
+    prompt = {
+      identifier,
+      name: '正文/工具调用提取格式（实验）',
+      role: 'user',
+      content: state.outputExtractionTemplate ?? '',
+      injection_position: 0,
+    };
+    preset.prompts.push(prompt);
+  } else {
+    prompt.name = '正文/工具调用提取格式（实验）';
+    prompt.role = 'user';
+    prompt.content = state.outputExtractionTemplate ?? '';
+    prompt.injection_position = 0;
+  }
+  const items = order();
+  const oldIndex = items.findIndex(item => item.identifier === identifier);
+  if (oldIndex >= 0) items.splice(oldIndex, 1);
+  const historyIndex = items.findIndex(item => item.identifier === 'chatHistory');
+  items.splice(historyIndex < 0 ? items.length : historyIndex + 1, 0, { identifier, enabled: true });
+  selectedPrompt = identifier;
+  markDirty();
+  renderList();
+  renderEditor();
+  status('已将实验格式提示词加入当前预设，请保存预设');
+};
 for (const [id, delta] of [['up', -1], ['down', 1]]) $(id).onclick = () => {
   const items = order();
   const index = items.findIndex(item => item.identifier === selectedPrompt);
@@ -1425,23 +1639,31 @@ $('apply-package-prefill').onclick = guard(async () => {
   await reload(selectedId);
   status('包内接口设置已应用到全局，下一次请求生效');
 });
-$('save-deepseek-beta').onclick = guard(async () => {
-  if (!(await presetDraftReady())) return;
-  await api({
+function prefillSettingsPayload() {
+  return {
     action: 'save-deepseek-beta',
     presetId: selectedId,
     postToolPrefixMode: $('post-tool-prefix-mode').value,
     postToolPrefixText: $('post-tool-prefix-text').value,
     enabled: $('deepseek-beta-prefix').checked,
     toolCalls: $('prefix-tool-calls').checked,
+    extractOutput: $('prefix-output-extraction').checked,
     removeNonOfficialTools: $('prefix-nonofficial-remove-tools').checked,
-  });
+  };
+}
+$('save-deepseek-beta').onclick = guard(async () => {
+  if (!(await presetDraftReady())) return;
+  const result = await api(prefillSettingsPayload());
+  acceptRevision(result);
+  prefillSettingsDirty = false;
   await reload(selectedId);
   status('预填充接口设置已保存');
 });
 $('save-auto-modes').onclick = guard(async () => {
   const modes = [...$('auto-mode-list').querySelectorAll('input[data-mode]:checked')].map(input => input.dataset.mode);
-  await api({ action: 'save-auto-modes', modes });
+  const result = await api({ action: 'save-auto-modes', modes });
+  acceptRevision(result);
+  autoModesDirty = false;
   await reload(selectedId);
   status('自动启用模式列表已保存，仅影响之后新建的会话');
 });
@@ -1624,13 +1846,19 @@ $('inherit-tools').onclick = guard(async () => {
 $('preset-auto-save').onchange = () => {
   const enabled = $('preset-auto-save').checked;
   storageSet(PRESET_AUTO_SAVE_KEY, enabled ? '1' : '0');
+  $('tool-auto-save').disabled = enabled;
   if (enabled) {
-    status('已开启预设自动保存');
+    status('已开启全局自动保存');
     if (dirty) schedulePresetAutoSave();
+    if (toolDraft.dirty) scheduleAutoSave();
+    if (groupsDirty || prefillSettingsDirty || autoModesDirty || bindingDirty) scheduleGlobalConfigAutoSave();
   } else {
     cancelPresetAutoSave();
-    status('已关闭预设自动保存，改动需要点击“保存预设”');
+    cancelGlobalConfigAutoSave();
+    if (!$('tool-auto-save').checked) cancelAutoSave();
+    status('已关闭全局自动保存，改动需要使用各区域的保存按钮');
   }
+  renderToolPanel();
 };
 $('tool-auto-save').onchange = () => {
   const enabled = $('tool-auto-save').checked;
@@ -1686,14 +1914,9 @@ $('group-new').onclick = () => {
   renderToolTabs();
 };
 $('group-save').onclick = guard(async () => {
-  const groups = groupDraft.map(group => ({
-    id: group.id,
-    name: group.name ?? '',
-    description: group.description ?? '',
-    order: Number(group.order) || 0,
-    members: (group.members ?? []).map(member => ({ modeId: member.modeId, toolName: member.toolName })),
-  }));
+  const groups = toolGroupsPayload();
   const result = await api({ action: 'save-tool-groups', groups });
+  acceptRevision(result);
   resetGroupDraft();
   await reload(selectedId);
   const warnings = result.warnings ?? [];
@@ -1765,6 +1988,7 @@ $('last').onclick = guard(async () => {
 
 $('preset-auto-save').checked = storageGet(PRESET_AUTO_SAVE_KEY, '0') === '1';
 $('tool-auto-save').checked = storageGet(TOOL_AUTO_SAVE_KEY, '0') === '1';
+$('tool-auto-save').disabled = presetAutoSaveIsOn();
 $('tool-scope').querySelector('option[value="session"]').disabled = !sessionId;
 $('tool-scope').value = sessionId ? 'session' : 'mode';
 window.addEventListener('beforeunload', event => {

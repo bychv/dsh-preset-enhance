@@ -1,4 +1,12 @@
 node_modules/
 *.tgz
-.test-data/
 sample/
+
+# 预设稳定性测试的运行产物：报告 / 流水 / 沙箱临时目录
+# （CLI 默认 --out 就是 .test-data/preset-stability/<时间戳>/）
+.test-data/
+.stability-scratch/
+
+# 显式保留策略实现及其依赖：策略模块、核心常量、测试与基准都不忽略
+!scripts/preset-stability-strategy.mjs
+!scripts/preset-stability-core.mjs

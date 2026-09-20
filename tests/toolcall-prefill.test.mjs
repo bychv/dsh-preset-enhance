@@ -3,7 +3,11 @@ import assert from 'node:assert/strict';
 import {
   DSML_CALLS_OPEN,
   DSML_CALLS_CLOSE,
+  buildToolsPrompt,
   emulateToolCallRequest,
+  inlineToolHistory,
+  parseDsmlCalls,
+  parseToolCallsFromText,
   transformToolCallJson,
   transformToolCallResponse,
 } from '../lib/toolcall-prefill.mjs';
@@ -95,6 +99,83 @@ test('non-stream response restores prefixes and converts DSML into standard tool
   assert.deepEqual(JSON.parse(choice.message.tool_calls[0].function.arguments), { city: 'Shanghai', days: 2 });
 });
 
+test('DSML parser accepts official, V3.2 and whitespace-drift variants without requiring newlines', () => {
+  const variants = [
+    '<｜DSML｜tool_calls><｜DSML｜invoke name = "lookup_weather"><｜DSML｜parameter string = "true" name = "city">Shanghai</｜DSML｜parameter><｜DSML｜parameter name = "days">2</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>',
+    "<|DSML|function_calls ><|DSML|invoke name='lookup_weather'><|DSML|parameter name='city' string='true'>Shanghai</|DSML|parameter><|DSML|parameter string='false'name='days'>2</|DSML|parameter></|DSML|invoke></|DSML|function_calls>",
+    '<｜DSML｜toolcalls> <｜DSML｜ invoke name=“lookup_weather”> <｜DSML｜ parameter name=“city” string=“true”>Shanghai</｜DSML｜ parameter> </｜DSML｜ invoke> </｜DSML｜tool_calls>',
+    '<｜DSML｜tool><｜DSML｜invoke name="lookup_weather"><｜DSML｜parameter name="city" string="true">Shanghai</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>',
+  ];
+  for (const [index, text] of variants.entries()) {
+    const parsed = parseToolCallsFromText('checking' + text);
+    assert.equal(parsed.content, 'checking', `content variant ${index}`);
+    assert.equal(parsed.toolCalls?.[0].function.name, 'lookup_weather', `name variant ${index}`);
+    const args = JSON.parse(parsed.toolCalls[0].function.arguments);
+    assert.equal(args.city, 'Shanghai', `city variant ${index}`);
+    if (index < 2) assert.equal(args.days, 2, `days variant ${index}`);
+  }
+});
+
+test('DSML parser preserves the V4.1 namespace-qualified tool format', () => {
+  const text = '<｜DSML｜ calls><｜DSML｜ invoke name="search::lookup">' +
+    '<｜DSML｜ parameter name="query" string="true">DeepSeek V4.1</｜DSML｜ parameter>' +
+    '</｜DSML｜ invoke></｜DSML｜ calls>';
+  const parsed = parseToolCallsFromText(text);
+  assert.equal(parsed.content, '');
+  assert.equal(parsed.toolCalls[0].namespace, 'search');
+  assert.equal(parsed.toolCalls[0].function.name, 'lookup');
+  assert.deepEqual(JSON.parse(parsed.toolCalls[0].function.arguments), { query: 'DeepSeek V4.1' });
+});
+
+test('V4.1 namespace-qualified tool names round trip through prompts and history', () => {
+  const tool = {
+    type: 'function',
+    namespace: { name: 'search', description: 'Search tools.' },
+    function: { name: 'lookup', description: 'Look up a value.', parameters: { type: 'object' } },
+  };
+  assert.match(buildToolsPrompt([tool]), /^### search::lookup$/mu);
+  const messages = inlineToolHistory([{
+    role: 'assistant',
+    content: '',
+    tool_calls: [{
+      id: 'call-search',
+      type: 'function',
+      namespace: 'search',
+      function: { name: 'lookup', arguments: '{"query":"DeepSeek V4.1"}' },
+    }],
+  }]);
+  assert.match(messages[0].content, /invoke name="search::lookup"/u);
+});
+
+test('DSML parser accepts spaced double pipes and ignores duplicate invoke closes', () => {
+  const text = '< | | DSML | | invoke name="skill">' +
+    '< | | DSML | | parameter name="name" string="true">anima-tagger</ | | DSML | | parameter>' +
+    '</ | | DSML | | invoke></ | | DSML | | invoke>' +
+    '< | | DSML | | invoke name="read_image">' +
+    '< | | DSML | | parameter name="file_path" string="true">C:\\images\\sample.png</ | | DSML | | parameter>' +
+    '</ | | DSML | | invoke></ | | DSML | | calls>';
+  const parsed = parseToolCallsFromText(text);
+  assert.equal(parsed.content, '');
+  assert.deepEqual(parsed.toolCalls.map(call => call.function.name), ['skill', 'read_image']);
+  assert.deepEqual(JSON.parse(parsed.toolCalls[0].function.arguments), { name: 'anima-tagger' });
+  assert.deepEqual(JSON.parse(parsed.toolCalls[1].function.arguments), { file_path: 'C:\\images\\sample.png' });
+});
+
+test('DSML parser recovers complete orphan invokes and missing parameter close tags conservatively', () => {
+  const orphan = '<｜DSML｜invoke name="lookup_weather">' +
+    '<｜DSML｜parameter name="city" string="true">Shanghai' +
+    '<｜DSML｜parameter name="days" string="false">2</｜DSML｜parameter>' +
+    '</｜DSML｜invoke></｜DSML｜tool_calls>';
+  const parsed = parseToolCallsFromText('checking\\' + orphan);
+  assert.equal(parsed.content, 'checking');
+  assert.deepEqual(JSON.parse(parsed.toolCalls[0].function.arguments), { city: 'Shanghai', days: 2 });
+
+  const incomplete = 'ordinary text <｜DSML｜invoke name="lookup_weather">' +
+    '<｜DSML｜parameter name="city" string="true">Shanghai';
+  assert.deepEqual(parseToolCallsFromText(incomplete), { content: incomplete, toolCalls: null });
+  assert.equal(parseDsmlCalls('<invoke name="not_dsml"></invoke>').length, 0);
+});
+
 test('stream response recognizes a split DSML marker and emits an OpenAI tool-call delta', async () => {
   const dsml = DSML_CALLS_OPEN + '\n' + invoke('lookup_weather', [['city', 'true', 'Shanghai']]) +
     '\n' + DSML_CALLS_CLOSE;
@@ -142,6 +223,39 @@ test('stream response recognizes a split DSML marker and emits an OpenAI tool-ca
   assert.equal(reasoning, 'prefix suffix');
   assert.equal(toolChoice.finish_reason, 'tool_calls');
   assert.equal(toolChoice.delta.tool_calls[0].index, 0);
+  assert.equal(toolChoice.delta.tool_calls[0].function.name, 'lookup_weather');
+  assert.deepEqual(JSON.parse(toolChoice.delta.tool_calls[0].function.arguments), { city: 'Shanghai' });
+  assert.equal(payloads.at(-1), '[DONE]');
+});
+
+test('stream response captures compact whitespace-drift DSML across single-character deltas', async () => {
+  const dsml = '<｜DSML｜toolcalls ><｜DSML｜ invoke name = \'lookup_weather\'>' +
+    '<｜DSML｜ parameter string = \'true\' name = \'city\'>Shanghai</｜DSML｜ parameter>' +
+    '</｜DSML｜ invoke></｜DSML｜tool_calls>';
+  const sse = value => 'data: ' + (typeof value === 'string' ? value : JSON.stringify(value)) + '\n\n';
+  const events = [...('checking' + dsml)].map((content, index) => sse({
+    id: 'r',
+    choices: [{ index: 0, delta: index === 0 ? { role: 'assistant', content } : { content }, finish_reason: null }],
+  }));
+  events.push(sse({ id: 'r', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }), sse('[DONE]'));
+  const encoder = new TextEncoder();
+  const response = new Response(new ReadableStream({
+    start(controller) {
+      for (const event of events) controller.enqueue(encoder.encode(event));
+      controller.close();
+    },
+  }), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+
+  const transformed = await transformToolCallResponse(response, {});
+  const payloads = (await transformed.text()).split(/\n\n/u).filter(Boolean)
+    .map(event => event.replace(/^data: /u, ''));
+  const choices = payloads.filter(payload => payload !== '[DONE]').map(JSON.parse)
+    .flatMap(chunk => chunk.choices ?? []);
+  const content = choices.map(choice => choice.delta?.content ?? '').join('');
+  const toolChoice = choices.find(choice => Array.isArray(choice.delta?.tool_calls));
+
+  assert.equal(content, 'checking');
+  assert.equal(toolChoice.finish_reason, 'tool_calls');
   assert.equal(toolChoice.delta.tool_calls[0].function.name, 'lookup_weather');
   assert.deepEqual(JSON.parse(toolChoice.delta.tool_calls[0].function.arguments), { city: 'Shanghai' });
   assert.equal(payloads.at(-1), '[DONE]');
