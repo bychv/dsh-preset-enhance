@@ -183,6 +183,31 @@ try {
   await waitReady();
   await settle(1200);
 
+  await evaluate(`document.getElementById('prefix-output-extraction').click()`);
+  await evaluate(`document.getElementById('save-deepseek-beta').click()`);
+  await settle(1800);
+  const extractionSaved = await evaluate(`fetch('/preset-enhance/api').then(r => r.json()).then(s => ({
+    stored: s.prefixOutputExtraction,
+    checked: document.getElementById('prefix-output-extraction').checked,
+    status: document.getElementById('status').textContent,
+  }))`);
+  const extractionPersistenceReload = once('Page.loadEventFired');
+  await send('Page.reload', {});
+  await extractionPersistenceReload;
+  await waitReady();
+  await settle(1200);
+  const extractionAfterReload = await evaluate(`document.getElementById('prefix-output-extraction').checked`);
+  check('output extraction switch saves through interface settings and survives reload',
+    extractionSaved.stored === true && extractionSaved.checked === true &&
+      /已保存/.test(extractionSaved.status) && extractionAfterReload === true,
+    JSON.stringify({ extractionSaved, extractionAfterReload }));
+  await evaluate(`document.getElementById('prefix-output-extraction').click()`);
+  await evaluate(`document.getElementById('save-deepseek-beta').click()`);
+  await settle(1800);
+  const extractionRestored = await evaluate(`fetch('/preset-enhance/api').then(r => r.json()).then(s => s.prefixOutputExtraction)`);
+  check('manual interface settings save can disable output extraction',
+    extractionRestored === false, String(extractionRestored));
+
   // 2. static structure from the live API
   const tabs = await evaluate(`[...document.querySelectorAll('#tool-tablist [role="tab"]')].map(b => ({
     id: b.dataset.group, label: b.textContent, selected: b.getAttribute('aria-selected'),
@@ -630,7 +655,7 @@ try {
     check('auto-save switch exists', false, 'no #tool-auto-save in the tool card');
   }
 
-  // 14. preset auto-save: debounce edits, persist without the save button, and keep OFF as manual mode
+  // 14. global auto-save: every configuration family persists; preset edits still debounce
   const hasPresetAutoSave = await evaluate(`!!document.getElementById('preset-auto-save')`);
   if (hasPresetAutoSave) {
     const originalPresetName = await evaluate(`document.getElementById('name').value`);
@@ -650,6 +675,71 @@ try {
     await evaluate(`document.getElementById('preset-auto-save').click()`);
     await settle(300);
     await evaluate(`window.__apiPosts = []`);
+    const globalBefore = await evaluate(`fetch('/preset-enhance/api').then(s => s.json()).then(s => ({
+      extraction: s.prefixOutputExtraction,
+      modes: s.autoEnableModes,
+      groupCount: s.toolGroups.length,
+      mode: document.getElementById('tool-mode').value,
+    }))`);
+    const globalTargets = await evaluate(`(() => {
+      const extraction = document.getElementById('prefix-output-extraction');
+      const mode = [...document.querySelectorAll('#auto-mode-list input[data-mode]')].find(box => !box.disabled);
+      const tool = [...document.querySelectorAll('#tool-list input[data-tool]')].find(box => box.checked);
+      extraction.click();
+      mode?.click();
+      tool?.click();
+      document.getElementById('manage-groups').click();
+      document.getElementById('group-new').click();
+      return {
+        modeId: mode?.dataset.mode ?? null,
+        modeChecked: mode?.checked ?? null,
+        toolName: tool?.dataset.tool ?? null,
+        toolChecked: tool?.checked ?? null,
+        toolAutoDisabled: document.getElementById('tool-auto-save').disabled,
+      };
+    })()`);
+    await settle(2600);
+    const globalPosts = await evaluate(`window.__apiPosts.slice()`);
+    const globalSaved = await evaluate(`fetch('/preset-enhance/api').then(s => s.json()).then(s => ({
+      extraction: s.prefixOutputExtraction,
+      modes: s.autoEnableModes,
+      groupCount: s.toolGroups.length,
+      tool: s.modeToolPolicies[${JSON.stringify(globalBefore.mode)}]?.[${JSON.stringify(globalTargets.toolName)}],
+    }))`);
+    check('global auto-save persists interface, mode, tool and group configuration',
+      globalTargets.modeId && globalTargets.toolName && globalTargets.toolAutoDisabled &&
+        globalSaved.extraction !== globalBefore.extraction &&
+        globalSaved.modes.includes(globalTargets.modeId) === globalTargets.modeChecked &&
+        globalSaved.groupCount === globalBefore.groupCount + 1 &&
+        globalSaved.tool === globalTargets.toolChecked &&
+        ['save-deepseek-beta', 'save-auto-modes', 'save-mode-tools', 'save-tool-groups']
+          .every(action => globalPosts.includes(action)),
+      JSON.stringify({ globalTargets, globalPosts, globalSaved, globalBefore }));
+    await evaluate(`(() => {
+      document.getElementById('prefix-output-extraction').click();
+      const mode = [...document.querySelectorAll('#auto-mode-list input[data-mode]')]
+        .find(box => box.dataset.mode === ${JSON.stringify(globalTargets.modeId)});
+      mode?.click();
+      const tool = [...document.querySelectorAll('#tool-list input[data-tool]')]
+        .find(box => box.dataset.tool === ${JSON.stringify(globalTargets.toolName)});
+      tool?.click();
+      const groups = [...document.querySelectorAll('#group-list .group-editor')];
+      groups.at(-1)?.querySelector('button.danger')?.click();
+    })()`);
+    await settle(2600);
+    const globalRestored = await evaluate(`fetch('/preset-enhance/api').then(s => s.json()).then(s => ({
+      extraction: s.prefixOutputExtraction,
+      modes: s.autoEnableModes,
+      groupCount: s.toolGroups.length,
+      tool: s.modeToolPolicies[${JSON.stringify(globalBefore.mode)}]?.[${JSON.stringify(globalTargets.toolName)}],
+    }))`);
+    check('global auto-save persists restoration of every changed configuration',
+      globalRestored.extraction === globalBefore.extraction &&
+        JSON.stringify([...globalRestored.modes].sort()) === JSON.stringify([...globalBefore.modes].sort()) &&
+        globalRestored.groupCount === globalBefore.groupCount &&
+        globalRestored.tool === true,
+      JSON.stringify(globalRestored));
+    await evaluate(`window.__apiPosts = []`);
     const firstAutoName = originalPresetName + ' [自动保存验证]';
     await evaluate(`(() => {
       const input = document.getElementById('name');
@@ -663,7 +753,7 @@ try {
       selected: s.selectedPresetId,
       status: document.getElementById('status').textContent,
     }))`);
-    check('preset auto-save persists an edit without clicking 保存预设',
+    check('global auto-save persists a preset edit without clicking 保存预设',
       presetAutoPosts.filter(action => action === 'save').length === 1 &&
       presetAutoState.name === firstAutoName && /自动保存/.test(presetAutoState.status),
       `posts=[${presetAutoPosts.join(',')}] state=${JSON.stringify(presetAutoState)}`);
@@ -684,7 +774,7 @@ try {
     await settle(1800);
     const presetBurstPosts = await evaluate(`window.__apiPosts.slice()`);
     const presetBurstName = await evaluate(`fetch('/preset-enhance/api').then(r => r.json()).then(s => s.presets.find(p => p.id === s.selectedPresetId)?.name)`);
-    check('rapid preset edits coalesce into one auto-save request',
+    check('rapid preset edits coalesce into one global auto-save request',
       presetBurstPosts.filter(action => action === 'save').length === 1 && presetBurstName === burstFinalName,
       `posts=[${presetBurstPosts.join(',')}] saved=${presetBurstName}`);
 
@@ -696,13 +786,13 @@ try {
     })()`);
     await settle(1200);
     const presetOff = await evaluate(`({ posts: window.__apiPosts.slice(), status: document.getElementById('status').textContent })`);
-    check('preset auto-save OFF keeps the manual draft behaviour',
+    check('global auto-save OFF keeps the manual preset draft behaviour',
       presetOff.posts.filter(action => action === 'save').length === 0 && /未保存/.test(presetOff.status),
       JSON.stringify(presetOff));
     await evaluate(`document.getElementById('save').click()`);
     await settle(1800);
     const restoredPresetName = await evaluate(`fetch('/preset-enhance/api').then(r => r.json()).then(s => s.presets.find(p => p.id === s.selectedPresetId)?.name)`);
-    check('manual save still works after preset auto-save is disabled', restoredPresetName === originalPresetName, restoredPresetName);
+    check('manual save still works after global auto-save is disabled', restoredPresetName === originalPresetName, restoredPresetName);
     const presetAutoReload = once('Page.loadEventFired');
     await send('Page.reload', {});
     await presetAutoReload;
@@ -712,7 +802,7 @@ try {
       const box = document.getElementById('preset-auto-save');
       return { checked: box?.checked ?? null, stored: localStorage.getItem('dsh-preset-enhance.preset-auto-save') };
     })()`);
-    check('preset auto-save switch state is UI-local and survives reload',
+    check('global auto-save switch state is UI-local and survives reload',
       presetAutoPersisted.checked === false && presetAutoPersisted.stored === '0', JSON.stringify(presetAutoPersisted));
   } else {
     check('preset auto-save switch exists', false, 'no #preset-auto-save in the navigation bar');

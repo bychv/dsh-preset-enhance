@@ -6,10 +6,19 @@ let state = { presets: [], revision: 0 }, selectedId = '', selectedPrompt = '', 
 let preset = blank();
 const PRESET_AUTO_SAVE_KEY = 'dsh-preset-enhance.preset-auto-save';
 const PRESET_AUTO_SAVE_DELAY = 600;
+const GLOBAL_CONFIG_AUTO_SAVE_DELAY = 700;
 let presetDraftVersion = 0;
 let presetDraftGeneration = 0;
 let presetAutoSaveTimer = null;
 let presetAutoSaveChain = Promise.resolve();
+let globalConfigAutoSaveTimer = null;
+let globalConfigAutoSaveChain = Promise.resolve();
+let prefillSettingsDirty = false;
+let prefillSettingsVersion = 0;
+let autoModesDirty = false;
+let autoModesVersion = 0;
+let bindingDirty = false;
+let bindingVersion = 0;
 
 function blank() {
   return {
@@ -22,6 +31,9 @@ function status(text, error = false) {
   const pending = [];
   if (toolDraft.dirty) pending.push('工具开关尚未保存');
   if (groupsDirty) pending.push('工具分组尚未保存');
+  if (prefillSettingsDirty) pending.push('接口设置尚未保存');
+  if (autoModesDirty) pending.push('自动启用模式尚未保存');
+  if (bindingDirty) pending.push('会话设置尚未应用');
   const suffix = !error && pending.length && !text.includes('尚未保存') ? ` · ${pending.join('；')}` : '';
   $('status').textContent = `${text}${suffix}`;
   $('status').className = error ? 'error' : '';
@@ -188,6 +200,7 @@ function renderAutoModes() {
     input.dataset.mode = mode.id;
     input.checked = mode.id === 'st-preset' || state.autoEnableModes?.includes(mode.id);
     input.disabled = mode.id === 'st-preset' || !!mode.broken;
+    input.onchange = markAutoModesDirty;
     const text = document.createElement('span');
     text.textContent = mode.name;
     const small = document.createElement('small');
@@ -216,6 +229,7 @@ let autoSaveInFlightVersion = -1;
 let keepaliveFlushedVersion = -1;
 let groupDraft = [];
 let groupsDirty = false;
+let groupDraftVersion = 0;
 let groupPageOpen = false;
 let toolView = { sessionScope: false, modeId: '', tabs: [], active: '@all' };
 let packageToolsRecordId = '';
@@ -318,7 +332,9 @@ function markToolDirty() {
 }
 function markGroupsDirty() {
   groupsDirty = true;
+  groupDraftVersion++;
   status('工具分组草稿尚未保存');
+  scheduleGlobalConfigAutoSave();
 }
 function presetDiscardOkay() {
   return !dirty || confirm('放弃尚未保存的预设草稿？');
@@ -430,13 +446,147 @@ async function presetDraftReady() {
   return presetDiscardOkay();
 }
 
+function markPrefillSettingsDirty() {
+  prefillSettingsDirty = true;
+  prefillSettingsVersion++;
+  status('预填充接口设置尚未保存');
+  scheduleGlobalConfigAutoSave();
+}
+function markAutoModesDirty() {
+  autoModesDirty = true;
+  autoModesVersion++;
+  status('自动启用模式列表尚未保存');
+  scheduleGlobalConfigAutoSave();
+}
+function markBindingDirty() {
+  if (!sessionId) return;
+  bindingDirty = true;
+  bindingVersion++;
+  status('当前会话设置尚未应用');
+  scheduleGlobalConfigAutoSave();
+}
+function cancelGlobalConfigAutoSave() {
+  if (globalConfigAutoSaveTimer !== null) {
+    clearTimeout(globalConfigAutoSaveTimer);
+    globalConfigAutoSaveTimer = null;
+  }
+}
+function scheduleGlobalConfigAutoSave() {
+  if (!presetAutoSaveIsOn()) return;
+  cancelGlobalConfigAutoSave();
+  globalConfigAutoSaveTimer = setTimeout(() => {
+    globalConfigAutoSaveTimer = null;
+    void runGlobalConfigAutoSave();
+  }, GLOBAL_CONFIG_AUTO_SAVE_DELAY);
+}
+async function configWrite(payload) {
+  try {
+    return await api(payload);
+  } catch (error) {
+    if (!isRevisionConflict(error)) throw error;
+    const latest = await api();
+    state.revision = latest.revision;
+    return api(payload);
+  }
+}
+function acceptRevision(result) {
+  state.revision = Number.isInteger(result?.revision) ? result.revision : state.revision + 1;
+}
+function toolGroupsPayload() {
+  return groupDraft.map(group => ({
+    id: group.id,
+    name: group.name ?? '',
+    description: group.description ?? '',
+    order: Number(group.order) || 0,
+    members: (group.members ?? []).map(member => ({ modeId: member.modeId, toolName: member.toolName })),
+  }));
+}
+async function persistPrefillSettingsDraft() {
+  if (!prefillSettingsDirty) return false;
+  const version = prefillSettingsVersion;
+  const payload = prefillSettingsPayload();
+  const result = await configWrite(payload);
+  acceptRevision(result);
+  state.deepseekBetaPrefix = result.enabled === true;
+  state.prefixToolCalls = result.toolCalls === true;
+  state.prefixOutputExtraction = result.extractOutput === true;
+  state.prefixNonOfficialRemoveTools = result.removeNonOfficialTools !== false;
+  state.postToolPrefixMode = payload.postToolPrefixMode;
+  state.postToolPrefixText = payload.postToolPrefixText;
+  if (prefillSettingsVersion === version) prefillSettingsDirty = false;
+  else scheduleGlobalConfigAutoSave();
+  return true;
+}
+async function persistAutoModesDraft() {
+  if (!autoModesDirty) return false;
+  const version = autoModesVersion;
+  const modes = [...$('auto-mode-list').querySelectorAll('input[data-mode]:checked')].map(input => input.dataset.mode);
+  const result = await configWrite({ action: 'save-auto-modes', modes });
+  acceptRevision(result);
+  state.autoEnableModes = result.modes;
+  if (autoModesVersion === version) autoModesDirty = false;
+  else scheduleGlobalConfigAutoSave();
+  return true;
+}
+async function persistGroupDraft() {
+  if (!groupsDirty) return false;
+  const version = groupDraftVersion;
+  const groups = toolGroupsPayload();
+  const result = await configWrite({ action: 'save-tool-groups', groups });
+  acceptRevision(result);
+  state.toolGroups = structuredClone(result.groups ?? groups);
+  if (groupDraftVersion === version) groupsDirty = false;
+  else scheduleGlobalConfigAutoSave();
+  return true;
+}
+async function persistBindingDraft() {
+  if (!bindingDirty || !sessionId) return false;
+  const version = bindingVersion;
+  const binding = { enabled: $('enabled').checked, presetId: selectedId, ...options() };
+  const result = await configWrite({ action: 'bind', sessionId, binding });
+  acceptRevision(result);
+  state.binding = structuredClone(binding);
+  if (bindingVersion === version) bindingDirty = false;
+  else scheduleGlobalConfigAutoSave();
+  return true;
+}
+function runGlobalConfigAutoSave() {
+  globalConfigAutoSaveChain = globalConfigAutoSaveChain.then(async () => {
+    if (!presetAutoSaveIsOn()) return false;
+    if (dirty) {
+      cancelPresetAutoSave();
+      const saved = await runPresetAutoSave();
+      if (!saved?.ok) throw saved?.error ?? new Error('预设自动保存失败');
+    }
+    if (toolDraft.dirty) {
+      cancelAutoSave();
+      const saved = await runAutoSave();
+      if (!saved?.ok) throw saved?.error ?? new Error('工具开关自动保存失败');
+    }
+    const saved = [
+      await persistPrefillSettingsDraft(),
+      await persistAutoModesDraft(),
+      await persistGroupDraft(),
+      await persistBindingDraft(),
+    ].some(Boolean);
+    if (saved) status('全部配置已自动保存');
+    return saved;
+  }).catch(error => {
+    status(`全局自动保存失败：${error.message}（改动仍保留）`, true);
+    return false;
+  });
+  return globalConfigAutoSaveChain;
+}
+
 /* ---------- 工具开关自动保存（可关闭；关闭时行为与手工保存完全一致） ---------- */
 function autoSaveIsOn() {
-  return $('tool-auto-save').checked === true;
+  return presetAutoSaveIsOn() || $('tool-auto-save').checked === true;
 }
 function autoSaveNote() {
-  return autoSaveIsOn()
-    ? '自动保存已开启：工具开关改动即时生效；分组名称、排序和成员结构改动仍需“保存分组”。'
+  return presetAutoSaveIsOn()
+    ? '全局自动保存已开启：工具开关与分组改动会自动保存。'
+    : autoSaveIsOn()
+      ? '已单独开启工具开关自动保存；分组改动仍需“保存分组”。'
     : '自动保存未开启：工具开关改动需点击“保存工具开关”。';
 }
 function cancelAutoSave() {
@@ -1307,16 +1457,18 @@ $('prefill').oninput = () => {
 };
 $('post-tool-prefix-mode').onchange = () => {
   syncPrefixToolControls();
-  status('预填充接口设置尚未保存');
+  markPrefillSettingsDirty();
 };
-$('post-tool-prefix-text').oninput = () => status('预填充接口设置尚未保存');
-$('deepseek-beta-prefix').onchange = () => status('预填充接口设置尚未保存');
+$('post-tool-prefix-text').oninput = markPrefillSettingsDirty;
+$('deepseek-beta-prefix').onchange = markPrefillSettingsDirty;
 $('prefix-tool-calls').onchange = () => {
   syncPrefixToolControls();
-  status('预填充接口设置尚未保存');
+  markPrefillSettingsDirty();
 };
-$('prefix-output-extraction').onchange = () => status('预填充接口设置尚未保存');
-$('prefix-nonofficial-remove-tools').onchange = () => status('预填充接口设置尚未保存');
+$('prefix-output-extraction').onchange = markPrefillSettingsDirty;
+$('prefix-nonofficial-remove-tools').onchange = markPrefillSettingsDirty;
+for (const id of ['user', 'char', 'markers']) $(id).oninput = markBindingDirty;
+$('enabled').onchange = markBindingDirty;
 $('add-output-extraction-template').onclick = () => {
   const identifier = 'dsh-output-extraction-template';
   let prompt = preset.prompts.find(item => item.identifier === identifier);
@@ -1457,9 +1609,8 @@ $('apply-package-prefill').onclick = guard(async () => {
   await reload(selectedId);
   status('包内接口设置已应用到全局，下一次请求生效');
 });
-$('save-deepseek-beta').onclick = guard(async () => {
-  if (!(await presetDraftReady())) return;
-  await api({
+function prefillSettingsPayload() {
+  return {
     action: 'save-deepseek-beta',
     presetId: selectedId,
     postToolPrefixMode: $('post-tool-prefix-mode').value,
@@ -1468,13 +1619,21 @@ $('save-deepseek-beta').onclick = guard(async () => {
     toolCalls: $('prefix-tool-calls').checked,
     extractOutput: $('prefix-output-extraction').checked,
     removeNonOfficialTools: $('prefix-nonofficial-remove-tools').checked,
-  });
+  };
+}
+$('save-deepseek-beta').onclick = guard(async () => {
+  if (!(await presetDraftReady())) return;
+  const result = await api(prefillSettingsPayload());
+  acceptRevision(result);
+  prefillSettingsDirty = false;
   await reload(selectedId);
   status('预填充接口设置已保存');
 });
 $('save-auto-modes').onclick = guard(async () => {
   const modes = [...$('auto-mode-list').querySelectorAll('input[data-mode]:checked')].map(input => input.dataset.mode);
-  await api({ action: 'save-auto-modes', modes });
+  const result = await api({ action: 'save-auto-modes', modes });
+  acceptRevision(result);
+  autoModesDirty = false;
   await reload(selectedId);
   status('自动启用模式列表已保存，仅影响之后新建的会话');
 });
@@ -1657,13 +1816,19 @@ $('inherit-tools').onclick = guard(async () => {
 $('preset-auto-save').onchange = () => {
   const enabled = $('preset-auto-save').checked;
   storageSet(PRESET_AUTO_SAVE_KEY, enabled ? '1' : '0');
+  $('tool-auto-save').disabled = enabled;
   if (enabled) {
-    status('已开启预设自动保存');
+    status('已开启全局自动保存');
     if (dirty) schedulePresetAutoSave();
+    if (toolDraft.dirty) scheduleAutoSave();
+    if (groupsDirty || prefillSettingsDirty || autoModesDirty || bindingDirty) scheduleGlobalConfigAutoSave();
   } else {
     cancelPresetAutoSave();
-    status('已关闭预设自动保存，改动需要点击“保存预设”');
+    cancelGlobalConfigAutoSave();
+    if (!$('tool-auto-save').checked) cancelAutoSave();
+    status('已关闭全局自动保存，改动需要使用各区域的保存按钮');
   }
+  renderToolPanel();
 };
 $('tool-auto-save').onchange = () => {
   const enabled = $('tool-auto-save').checked;
@@ -1719,14 +1884,9 @@ $('group-new').onclick = () => {
   renderToolTabs();
 };
 $('group-save').onclick = guard(async () => {
-  const groups = groupDraft.map(group => ({
-    id: group.id,
-    name: group.name ?? '',
-    description: group.description ?? '',
-    order: Number(group.order) || 0,
-    members: (group.members ?? []).map(member => ({ modeId: member.modeId, toolName: member.toolName })),
-  }));
+  const groups = toolGroupsPayload();
   const result = await api({ action: 'save-tool-groups', groups });
+  acceptRevision(result);
   resetGroupDraft();
   await reload(selectedId);
   const warnings = result.warnings ?? [];
@@ -1798,6 +1958,7 @@ $('last').onclick = guard(async () => {
 
 $('preset-auto-save').checked = storageGet(PRESET_AUTO_SAVE_KEY, '0') === '1';
 $('tool-auto-save').checked = storageGet(TOOL_AUTO_SAVE_KEY, '0') === '1';
+$('tool-auto-save').disabled = presetAutoSaveIsOn();
 $('tool-scope').querySelector('option[value="session"]').disabled = !sessionId;
 $('tool-scope').value = sessionId ? 'session' : 'mode';
 window.addEventListener('beforeunload', event => {

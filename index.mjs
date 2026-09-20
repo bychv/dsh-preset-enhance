@@ -224,7 +224,7 @@ export async function apply(ctx, config = {}) {
             current.toolGroups = groups;
             current.revision++;
             refreshPolicies(current);
-            return { groups: current.toolGroups, warnings };
+            return { revision: current.revision, groups: current.toolGroups, warnings };
           }));
         }
 
@@ -463,6 +463,7 @@ export async function apply(ctx, config = {}) {
             }
             state.revision++;
             return {
+              revision: state.revision,
               enabled: state.deepseekBetaPrefix,
               toolCalls: state.prefixToolCalls === true,
               extractOutput: state.prefixOutputExtraction === true,
@@ -481,12 +482,12 @@ export async function apply(ctx, config = {}) {
             state.autoEnableSince[AGENT_PRESET_ID] = 0;
             state.autoEnableModes = selected;
             state.revision++;
-            return { modes: selected };
+            return { revision: state.revision, modes: selected };
           }
           if (body.action === 'bind') {
             validateBinding(state, body);
             state.revision++;
-            return { ok: true };
+            return { revision: state.revision, ok: true };
           }
           throw new Error('未知操作');
         });
