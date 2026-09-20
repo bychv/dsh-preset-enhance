@@ -1,6 +1,6 @@
 {
   "name": "dsh-preset-enhance",
-  "version": "0.3.2-alpha.3",
+  "version": "0.3.2-rc.2",
   "type": "module",
   "description": "SillyTavern prompt presets, macros and editor for DeepSeek Harness",
   "author": "bychv <89071107+bychv@users.noreply.github.com>",
