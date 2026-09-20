@@ -10,7 +10,8 @@ import {
   extractOutputText,
 } from '../lib/output-extractor.mjs';
 import {
-  DSML_CALLS_CLOSE, DSML_CALLS_OPEN, transformToolCallJson, transformToolCallResponse,
+  DSML_CALLS_CLOSE, DSML_CALLS_OPEN, TOOL_CALLS_CLOSE, TOOL_CALLS_OPEN,
+  transformToolCallJson, transformToolCallResponse,
 } from '../lib/toolcall-prefill.mjs';
 
 const invoke = '<｜｜DSML｜｜ invoke name="lookup_weather">\n' +
@@ -69,6 +70,27 @@ test('extracted DSML becomes a standard tool call while thinking remains separat
   assert.deepEqual(JSON.parse(choice.message.tool_calls[0].function.arguments), { city: '上海' });
 });
 
+test('inline extraction tokens and a tool_calls-wrapped DSML call are removed and converted', () => {
+  const webInvoke = '<｜｜DSML｜｜ invoke name="web_search"> ' +
+    '<｜｜DSML｜｜ parameter name="queries" string="false">' +
+    '["龙族 江南 ","龙族 ","龙族 电子书 阅读平台 正版"]' +
+    '</｜｜DSML｜｜ parameter> </｜｜DSML｜｜ invoke>';
+  const source = END_MARKER + ' ' + OUTPUT_OPEN + ' ' + TOOL_CALLS_OPEN + ' ' +
+    webInvoke + ' ' + TOOL_CALLS_CLOSE + ' ' + OUTPUT_CLOSE;
+  const transformed = transformToolCallJson({
+    choices: [{ message: { role: 'assistant', content: source }, finish_reason: 'stop' }],
+  }, { extractOutput: true });
+  const choice = transformed.choices[0];
+  const serialized = JSON.stringify(choice);
+  assert.equal(choice.finish_reason, 'tool_calls');
+  assert.equal(choice.message.content, null);
+  assert.equal(choice.message.tool_calls[0].function.name, 'web_search');
+  assert.deepEqual(JSON.parse(choice.message.tool_calls[0].function.arguments), {
+    queries: ['龙族 江南 ', '龙族 ', '龙族 电子书 阅读平台 正版'],
+  });
+  assert.doesNotMatch(serialized, /end▁of▁think|begin▁of▁output|end▁of▁output|<\/?tool_calls>/u);
+});
+
 test('native reasoning makes plain provider content an already-separated body', () => {
   const transformed = transformToolCallJson({
     choices: [{ message: { role: 'assistant', reasoning_content: 'native plan', content: 'plain answer' }, finish_reason: 'stop' }],
@@ -113,4 +135,33 @@ test('SSE extraction survives split markers and emits a standard tool-call delta
   assert.equal(toolChoice.delta.tool_calls[0].function.name, 'lookup_weather');
   assert.deepEqual(JSON.parse(toolChoice.delta.tool_calls[0].function.arguments), { city: '上海' });
   assert.equal(payloads.at(-1), '[DONE]');
+});
+
+test('SSE extraction handles an inline tool_calls wrapper and never leaks special tokens', async () => {
+  const webInvoke = '<｜｜DSML｜｜ invoke name="web_search"><｜｜DSML｜｜ parameter name="queries" string="false">' +
+    '["龙族 江南 ","龙族 "]</｜｜DSML｜｜ parameter></｜｜DSML｜｜ invoke>';
+  const source = END_MARKER + ' ' + OUTPUT_OPEN + ' ' + TOOL_CALLS_OPEN + webInvoke +
+    TOOL_CALLS_CLOSE + OUTPUT_CLOSE;
+  const sse = value => 'data: ' + (typeof value === 'string' ? value : JSON.stringify(value)) + '\n\n';
+  const frames = [];
+  for (let index = 0; index < source.length; index += 3) {
+    frames.push(sse({ id: 'wrapped', choices: [{
+      index: 0, delta: { ...(index === 0 ? { role: 'assistant' } : {}), content: source.slice(index, index + 3) },
+      finish_reason: null,
+    }] }));
+  }
+  frames.push(sse({ id: 'wrapped', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }), sse('[DONE]'));
+  const encoder = new TextEncoder();
+  const transformed = await transformToolCallResponse(new Response(new ReadableStream({
+    start(controller) { controller.enqueue(encoder.encode(frames.join(''))); controller.close(); },
+  }), { headers: { 'content-type': 'text/event-stream' } }), { extractOutput: true });
+  const payloads = (await transformed.text()).split(/\n\n/u).filter(Boolean).map(event => event.replace(/^data: /u, ''));
+  const choices = payloads.filter(payload => payload !== '[DONE]').map(JSON.parse).flatMap(chunk => chunk.choices ?? []);
+  const serialized = JSON.stringify(choices);
+  const toolChoice = choices.find(choice => Array.isArray(choice.delta?.tool_calls));
+  assert.equal(choices.map(choice => choice.delta?.content ?? '').join('').trim(), '');
+  assert.equal(toolChoice.finish_reason, 'tool_calls');
+  assert.equal(toolChoice.delta.tool_calls[0].function.name, 'web_search');
+  assert.deepEqual(JSON.parse(toolChoice.delta.tool_calls[0].function.arguments), { queries: ['龙族 江南 ', '龙族 '] });
+  assert.doesNotMatch(serialized, /end▁of▁think|begin▁of▁output|end▁of▁output|<\/?tool_calls>/u);
 });
