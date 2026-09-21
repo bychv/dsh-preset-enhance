@@ -203,31 +203,96 @@ try {
   check('workbench page loads', await waitReady());
   await settle(2000);
 
-  // T12-1. the protocol-switch UI was removed from the page; the notice must stay hidden
+  // T14-1. the connection-protocol switch now lives inside the prefill card; the old global block is gone
   const protocolUi = await evaluate(`(() => {
     const removed = ['protocol-mode', 'save-protocol-mode', 'protocol-mode-hint'];
     const words = ['改投', '翻译', '协议设置'];
     const shown = document.body.innerText ?? '';
     const markup = document.documentElement.outerHTML ?? '';
+    const select = document.getElementById('connection-protocol');
+    const save = document.getElementById('save-connection-protocol');
+    const note = document.getElementById('connection-note');
+    const card = select ? select.closest('details.config-card') : null;
     const notice = document.getElementById('protocol-notice');
     return {
       removedPresent: removed.filter(id => document.getElementById(id)),
       shownWords: words.filter(word => shown.indexOf(word) >= 0),
       markupWords: words.filter(word => markup.indexOf(word) >= 0),
+      selectExists: !!select,
+      saveExists: !!save,
+      noteExists: !!note,
+      inPrefillCard: !!(card && (card.querySelector('summary')?.textContent ?? '').indexOf('Assistant 预填充接口') >= 0),
+      selectValue: select ? select.value : null,
+      selectDisabled: select ? select.disabled : null,
+      buttonDisabled: save ? save.disabled : null,
+      options: select ? [...select.options].map(option => option.value) : [],
+      noteText: note ? note.innerText.trim() : null,
       noticeExists: !!notice,
       noticeHidden: notice ? notice.hidden === true : null,
       noticeDisplay: notice ? getComputedStyle(notice).display : null,
-      noticeText: notice ? notice.innerText.trim() : null,
     };
   })()`);
-  check('protocol-switch UI is gone from the page',
-    protocolUi.removedPresent.length === 0, `present=${JSON.stringify(protocolUi.removedPresent)}`);
+  const connection = await evaluate(`fetch('/preset-enhance/api').then(r => r.json()).then(s => s.connection)`);
+  check('old protocol-switch ids are gone and the connection switch lives inside the prefill card',
+    protocolUi.removedPresent.length === 0 && protocolUi.selectExists && protocolUi.saveExists && protocolUi.noteExists &&
+      protocolUi.inPrefillCard && protocolUi.selectDisabled === false && protocolUi.buttonDisabled === false,
+    JSON.stringify({ removedPresent: protocolUi.removedPresent, inPrefillCard: protocolUi.inPrefillCard, selectDisabled: protocolUi.selectDisabled, buttonDisabled: protocolUi.buttonDisabled }));
+  check('the rendered connection protocol equals GET connection.protocol',
+    !!connection && protocolUi.selectValue === connection.protocol && protocolUi.options.includes(connection.protocol),
+    JSON.stringify({ rendered: protocolUi.selectValue, api: connection && connection.protocol, options: protocolUi.options }));
+  check('#connection-note names the detected connection and its current protocol',
+    !!connection && typeof protocolUi.noteText === 'string' &&
+      protocolUi.noteText.indexOf('检测到的连接：' + connection.displayName) >= 0 &&
+      protocolUi.noteText.indexOf('立即生效') >= 0,
+    JSON.stringify({ note: protocolUi.noteText, displayName: connection && connection.displayName }));
   check('no 改投/翻译/协议设置 wording is shown on the workbench',
     protocolUi.shownWords.length === 0,
     `shown=${JSON.stringify(protocolUi.shownWords)} markup=${JSON.stringify(protocolUi.markupWords)}`);
-  check('#protocol-notice exists but is hidden with nothing to report',
+  check('#protocol-notice still exists and is hidden with nothing to report',
     protocolUi.noticeExists && protocolUi.noticeHidden === true && protocolUi.noticeDisplay === 'none',
-    JSON.stringify(protocolUi));
+    JSON.stringify({ noticeExists: protocolUi.noticeExists, noticeHidden: protocolUi.noticeHidden, noticeDisplay: protocolUi.noticeDisplay }));
+
+  // T14-2. real save round trip through the UI; alpha must end on chat-completions
+  const stateRevisionBefore = await evaluate(`fetch('/preset-enhance/api').then(r => r.json()).then(s => s.revision)`);
+  await evaluate(`(() => {
+    window.__connOrigFetch = window.fetch;
+    window.__connPosts = [];
+    window.fetch = function (input, init) {
+      const options = init || {};
+      const url = typeof input === 'string' ? input : (input && input.url) || '';
+      if (String(options.method || 'GET').toUpperCase() === 'POST' && url.indexOf('/preset-enhance/api') >= 0) {
+        let body = null;
+        try { body = JSON.parse(options.body); } catch (error) { body = null; }
+        window.__connPosts.push(body ? { action: body.action, protocol: body.protocol } : null);
+      }
+      return window.__connOrigFetch.call(window, input, init);
+    };
+  })()`);
+  await evaluate(`(() => { const select = document.getElementById('connection-protocol'); select.value = 'messages'; select.dispatchEvent(new Event('change')); })()`);
+  await evaluate(`document.getElementById('save-connection-protocol').click()`);
+  await settle(2400);
+  const connPosts = await evaluate(`window.__connPosts.slice()`);
+  const connAfterSave = await evaluate(`fetch('/preset-enhance/api').then(r => r.json()).then(s => ({ protocol: s.connection && s.connection.protocol, revision: s.revision, connectionRevision: s.connection && s.connection.revision, selected: document.getElementById('connection-protocol').value, status: document.getElementById('status').textContent }))`);
+  const connSaves = connPosts.filter(entry => entry && entry.action === 'save-connection-protocol');
+  check('switching to messages posts exactly one save-connection-protocol with protocol=messages',
+    connSaves.length === 1 && connSaves[0].protocol === 'messages',
+    JSON.stringify({ saves: connSaves, allPosts: connPosts }));
+  // The write targets the HOST connection settings, so the connection's own revision advances
+  // while the plugin state revision is untouched by design.
+  check('GET reports messages after the save and the connection revision advanced',
+    connAfterSave.protocol === 'messages' && connAfterSave.selected === 'messages' &&
+      Number.isFinite(connAfterSave.connectionRevision) &&
+      connAfterSave.connectionRevision > ((connection && connection.revision) ?? -1) &&
+      /已保存/.test(connAfterSave.status),
+    JSON.stringify({ connectionBefore: connection && connection.revision, stateRevisionBefore, connAfterSave }));
+  await evaluate(`(() => { const select = document.getElementById('connection-protocol'); select.value = 'chat-completions'; select.dispatchEvent(new Event('change')); })()`);
+  await evaluate(`document.getElementById('save-connection-protocol').click()`);
+  await settle(2400);
+  const connRestored = await evaluate(`fetch('/preset-enhance/api').then(r => r.json()).then(s => ({ protocol: s.connection && s.connection.protocol, selected: document.getElementById('connection-protocol').value, status: document.getElementById('status').textContent }))`);
+  await evaluate(`(() => { if (window.__connOrigFetch) { window.fetch = window.__connOrigFetch; window.__connOrigFetch = null; } })()`);
+  check('switching back restores chat-completions through the UI (alpha left on chat-completions)',
+    connRestored.protocol === 'chat-completions' && connRestored.selected === 'chat-completions' && /已保存/.test(connRestored.status),
+    JSON.stringify(connRestored));
 
   const chatHistoryHint = await evaluate(`(() => {
     const entry = document.querySelector('.entry[data-prompt-id="chatHistory"]');

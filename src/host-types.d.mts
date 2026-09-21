@@ -145,7 +145,37 @@ export interface PluginCommand {
   handler: (invocation: CommandInvocation) => CommandResult | Promise<CommandResult>;
 }
 
+/** One provider route the host can activate through configuration. */
+export interface ConfigurableProviderInfo {
+  provider: string;
+  displayName: string;
+  settingsNs: string;
+  settingsPath: readonly string[];
+  declared?: boolean;
+  error?: string;
+}
+
+/** One registered settings namespace, as described by the settings service. */
+export interface SettingsDescriptorInfo {
+  ns: string;
+  /** Resolved value of the namespace. */
+  value: unknown;
+  revision: number;
+}
+
+export interface SettingsServiceLike {
+  describe?(options?: { redactSecrets?: boolean }): SettingsDescriptorInfo[];
+  update?(ns: string, patch: object, expectedRevision?: number): Promise<void>;
+}
+
 export interface PluginContext {
+  /** Run a callback once the named services are available (host's own optional-dependency pattern). */
+  inject?(names: string[], callback: (scoped: any) => void): unknown;
+  /**
+   * Resolve any registered service by name without declaring a dependency.
+   * Used for optional services (`settings`) so a profile without them still loads.
+   */
+  get?<T = any>(name: string): T | undefined;
   /**
    * A disposer may be synchronous or asynchronous. The host awaits an async
    * disposer before the activation is considered unloaded, which is what lets
@@ -156,7 +186,11 @@ export interface PluginContext {
   effect(callback: () => void | (() => void | Promise<void>), label?: string): void;
   on(event: 'llm/stream', handler: (options: StreamOptions, next: () => AsyncIterable<unknown>) => AsyncIterable<unknown>): void;
   on(event: string, handler: (...args: any[]) => any): void;
-  llm: { stream(options: StreamOptions): AsyncIterable<unknown> };
+  llm: {
+    stream(options: StreamOptions): AsyncIterable<unknown>;
+    /** Routes the host can activate through configuration; absent on older hosts. */
+    listConfigurableProviders?(): ConfigurableProviderInfo[];
+  };
   sessions: { get(id: string): SessionLike | undefined };
   webServer: { register(route: WebRoute): void };
   commands?: { register(command: PluginCommand): void };

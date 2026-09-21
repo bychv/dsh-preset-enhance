@@ -32,16 +32,18 @@ dsh plugin --profile web add github:bychv/dsh-preset-enhance#main
 dsh plugin --profile web add github:bychv/dsh-preset-enhance#0.1.6
 ```
 
-DSH 0.1.6 的官方连接默认改用 Messages 协议，网页界面没有切换入口。**推荐在 profile 的 `cordis.patch.yml` 里指定使用对话补全接口，然后重启：**
+DSH 0.1.6 的官方连接默认改用 Messages 协议。插件启动时会**自动检测当前连接使用的协议**，并在“Assistant 预填充接口”里给出该连接的协议开关：切换后立即生效，不需要重启，也不需要改配置文件。
+
+- **对话补全接口**：预填充续写、工具调用转换与正文提取都正常工作。
+- **Messages 接口**：仅提供有限的预设注入兼容，预填充续写、工具调用转换与正文提取不会应用。历史中段或末尾的 system 提示可能被重排或覆盖；需要准确保持预设顺序时请使用对话补全接口。插件会把预设开头的多条 system 提示合并后发送，避免其中内容被丢弃；工作台会说明该连接下哪些能力不可用。
+
+也可以直接改宿主配置（例如不使用本插件的界面）：在 profile 的 `cordis.patch.yml` 里指定后重启。
 
 ```yaml
 - id: llm-deepseek
   config:
     protocol: chat-completions
 ```
-
-- **对话补全接口**：预填充续写、工具调用转换与正文提取都正常工作。
-- **Messages 接口**：仅提供有限的预设注入兼容，预填充续写、工具调用转换与正文提取不会应用。历史中段或末尾的 system 提示可能被重排或覆盖；需要准确保持预设顺序时请使用对话补全接口。插件会把预设开头的多条 system 提示合并后发送，避免其中内容被丢弃；工作台会说明该连接下哪些能力不可用。
 
 ### 本地双协议测试端点
 

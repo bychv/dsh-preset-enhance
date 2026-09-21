@@ -1001,7 +1001,7 @@ test('chat mode + non-official endpoint: never rerouted, mismatch is explained',
       assert.equal(got.payload.protocol?.skipped, true, 'the compatibility path could not run');
       assert.equal(got.payload.protocolSwitched, false);
       assert.equal(typeof got.payload.protocolMismatch, 'string');
-      assert.match(got.payload.protocolMismatch, /protocol: chat-completions/);
+      assert.match(got.payload.protocolMismatch, /Assistant 预填充接口/);
     },
   });
 });
@@ -1025,7 +1025,7 @@ test('the in-app official request switch stays parked unless the plugin opts in'
       const got = await pluginApi(harness, 'GET', { sessionId: SESSION_ID });
       assert.equal(got.payload.protocolSwitched, false);
       assert.equal(typeof got.payload.protocolMismatch, 'string');
-      assert.match(got.payload.protocolMismatch, /protocol: chat-completions/);
+      assert.match(got.payload.protocolMismatch, /Assistant 预填充接口/);
     },
   });
 });

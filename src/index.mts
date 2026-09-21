@@ -7,6 +7,8 @@ import { compilePreset, validatePreset, getOrder, dshSystemPromptEnabled } from 
 import { decodePresetDocument, encodePresetPackage, attachPrefillSettings, applyPackagePrefill } from './lib/preset-package.mjs';
 import { installDeepSeekBetaBridge } from './lib/deepseek-beta.mjs';
 import { createProtocolObserver } from './lib/protocol.mjs';
+import { readConnectionProtocol, writeConnectionProtocol } from './lib/connection.mjs';
+import type { ConnectionProtocol, ConnectionProtocolInfo } from './lib/connection.mjs';
 import { adaptPresetForMessages } from './lib/messages.mjs';
 import {
   clearPresetEnhanceUnavailableReason, markPresetEnhanceActive, setPresetEnhanceUnavailableReason,
@@ -155,6 +157,14 @@ export async function apply(ctx: PluginContext, config: PluginConfig = {}) {
   // assistant-prefix/toolcall compatibility bridge cannot apply. Observations are
   // recorded per session so the workbench can say so instead of pretending.
   const protocolObserver = createProtocolObserver();
+  // Detected from the host's own connection settings at start-up (no network call), so
+  // the workbench can show and change the protocol of the connection in use.
+  let connectionInfo: ConnectionProtocolInfo | null = readConnectionProtocol(ctx);
+  // The settings service may arrive after this plugin; the host's own pattern is a scoped
+  // inject callback, so detection re-runs once it is available.
+  ctx.inject?.(['settings'], (scoped: { settings?: unknown }) => {
+    connectionInfo = readConnectionProtocol(ctx, scoped?.settings as never);
+  });
   // The in-app official-request switch is parked behind an explicit opt-in; the shipped
   // default leaves the host's own protocol behaviour untouched.
   const deepSeekBeta = installDeepSeekBetaBridge(ctx, {
@@ -267,7 +277,7 @@ export async function apply(ctx: PluginContext, config: PluginConfig = {}) {
           ? presetModeHistory(history) : history;
         const postToolPrefix = current.deepseekBetaPrefix && current.postToolPrefixMode === 'custom'
           ? current.postToolPrefixText : undefined;
-        const key = digest({ compiler: PRESET_COMPILER_VERSION, messages: presetHistory, preset: record, binding, postToolPrefix, protocol: current.protocolMode });
+        const key = digest({ compiler: PRESET_COMPILER_VERSION, messages: presetHistory, preset: record, binding, postToolPrefix, protocol: connectionProtocolFor(current, connectionInfo) });
         const prior = ownGet(current.sessions, sessionId);
         if (prior?.key === key) return prior.result;
         const compiledResult = compilePreset(record.preset, presetHistory, {
@@ -283,7 +293,7 @@ export async function apply(ctx: PluginContext, config: PluginConfig = {}) {
         // the chat path is reached by rerouting an official Messages request, because that
         // collapse already happened before the fetch bridge could reroute anything.
         const adapted = adaptPresetForMessages(compiledResult.messages);
-        const messagesMode = current.protocolMode === 'messages';
+        const messagesMode = connectionProtocolFor(current, connectionInfo) === 'messages';
         const result: CompiledPreset = messagesMode ? {
           ...compiledResult,
           messages: adapted.messages,
@@ -311,7 +321,7 @@ export async function apply(ctx: PluginContext, config: PluginConfig = {}) {
     const request = routedRequest(options, messages, filteredTools);
     // The compatibility bridge is chat-completions only: under the Messages mode it
     // must never arm, so an unadapted prefix is never sent.
-    const betaPrefix = initial.protocolMode !== 'messages' &&
+    const betaPrefix = connectionProtocolFor(initial, connectionInfo) !== 'messages' &&
       initial.deepseekBetaPrefix === true && compiled?.assistantPrefix?.active === true;
     // Arm the fetch bridge only when this request actually carries an injected preset:
     // with no preset the plugin must not intervene at all (no reroute, no translation).
@@ -320,7 +330,7 @@ export async function apply(ctx: PluginContext, config: PluginConfig = {}) {
     // the bridge to the reroute/translation role for ordinary injected requests.
     const prefixKey = betaPrefix ? messageText(messages.at(-1)) : '';
     const releaseBeta = compiled !== null ? deepSeekBeta.activate(sessionId, prefixKey, {
-      mode: initial.protocolMode === 'messages' ? 'messages' : 'chat-completions',
+      mode: connectionProtocolFor(initial, connectionInfo),
       toolCalls: initial.prefixToolCalls === true,
       removeNonOfficialTools: initial.prefixNonOfficialRemoveTools !== false,
       extractOutput: initial.prefixOutputExtraction === true,
@@ -418,9 +428,10 @@ export async function apply(ctx: PluginContext, config: PluginConfig = {}) {
             // session's (or a session-less) observation.
             protocol: sessionId ? protocolObserver.last(sessionId) ?? null : null,
             protocolMode: state.protocolMode,
+            connection: connectionInfo,
             protocolNotes: ownGet(state.sessions, sessionId)?.protocolNotes ?? [],
             protocolSwitched: Boolean(sessionId && protocolObserver.last(sessionId)?.switchedFrom),
-            protocolMismatch: presetProtocolMismatch(state, sessionId, session, protocolObserver),
+            protocolMismatch: presetProtocolMismatch(state, sessionId, session, protocolObserver, connectionInfo),
           });
         }
         if (req.method !== 'POST') return respond(res, 405, { error: 'Method not allowed' });
@@ -451,6 +462,18 @@ export async function apply(ctx: PluginContext, config: PluginConfig = {}) {
         const knownModes = new Set(modeRows.map(mode => mode.id));
         const discovered: DiscoveredCatalogs = CATALOG_ACTIONS.has(body.action) ?
           await discoverModeToolCatalogs(ctx, modeRows) : { catalogs: {}, errors: {} };
+
+        if (body.action === 'save-connection-protocol') {
+          const protocol = body.protocol;
+          if (protocol !== 'chat-completions' && protocol !== 'messages') throw new Error('连接协议无效');
+          // Re-read right before writing so the merge carries a fresh settings revision.
+          const info = readConnectionProtocol(ctx);
+          if (!info) throw new Error('当前 DSH 未暴露可配置的连接，无法切换协议');
+          if (info.source !== 'settings') throw new Error('当前 DSH 未提供设置服务，无法切换连接协议');
+          await writeConnectionProtocol(ctx, info, protocol);
+          connectionInfo = readConnectionProtocol(ctx);
+          return respond(res, 200, { connection: connectionInfo });
+        }
 
         if (body.action === 'save-tool-groups') {
           const state = (await store.read()) as PresetState;
@@ -826,8 +849,9 @@ function presetProtocolMismatch(
   sessionId: string,
   session: SessionLike | undefined,
   observer: ReturnType<typeof createProtocolObserver>,
+  connection: ConnectionProtocolInfo | null,
 ): string | null {
-  if (state.protocolMode === 'messages') return null;
+  if (connectionProtocolFor(state, connection) === 'messages') return null;
   const binding = ownGet(state.bindings, sessionId);
   const enabled = binding?.enabled ??
     (session ? shouldAutoEnable(state, session) && !!defaultRecord(state) : false);
@@ -836,10 +860,24 @@ function presetProtocolMismatch(
   if (!observed) return null;
   if (observed.protocol === 'messages' && !observed.switchedFrom) {
     return '当前连接使用 Messages 协议：预填充续写、工具调用转换与正文提取不会生效，插件也不会改写该请求。'
-      + '如需这些能力，请在 profile 的 cordis.patch.yml 里给 llm-deepseek 设置 protocol: chat-completions 后重启，'
-      + '由宿主原生使用对话补全接口。';
+      + '可在工作台的「Assistant 预填充接口」里把这个连接的协议切换为对话补全接口，保存后立即生效。';
   }
   return null;
+}
+
+/**
+ * Protocol this request will really travel over.
+ *
+ * The host connection's own setting wins because that is what serializes the request;
+ * the plugin-local preference is only a fallback for a host that does not expose it.
+ */
+function connectionProtocolFor(
+  state: PresetState, connection: ConnectionProtocolInfo | null,
+): ConnectionProtocol {
+  if (connection?.protocol === 'messages' || connection?.protocol === 'chat-completions') {
+    return connection.protocol;
+  }
+  return state.protocolMode === 'messages' ? 'messages' : 'chat-completions';
 }
 
 function defaultRecord(state: PresetState): PresetRecord | undefined {
