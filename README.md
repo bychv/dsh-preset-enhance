@@ -22,16 +22,13 @@ dsh plugin --profile web add github:bychv/dsh-preset-enhance#main
 
 该字段是**声明性的**：DSH 0.1.6-alpha.2 的安装器不读取、也不校验 `engines.dsh`（宿主 `packages/util/package-manifest` 只声明该字段的类型，源码树中没有消费方，其 README 也写明“兼容性是声明性的”）。范围既不会阻止安装，也不会阻止加载，它只描述本插件验证过哪些宿主版本。
 
-### 协议开关（默认对话补全接口）
+### Messages 连接的兼容说明
 
-工作台里新增“协议设置”，只有两项，默认 **对话补全接口（chat/completions）**：
+DSH 0.1.6 把官方连接的默认协议从 `chat-completions` 改成了 `messages`：宿主只是改了默认值（`packages/llm/llm-deepseek/src/config.ts:81` 仍同时接受两者），`protocols/chat-completions/` 整套实现（serialize/sse/translate/adapter）都保留。DSH Web 没有协议选择器，只能在 Cordis YAML 里改。
 
-- **对话补全接口（默认）**：完整兼容。官方 `api.deepseek.com` 的 Messages 请求会被改投到官方 `chat/completions` 端点并做请求/响应翻译（`x-api-key` 转 `Authorization: Bearer`、Anthropic 请求体转 Chat 请求体、Chat SSE 转 Anthropic SSE），与“预填充自动兼容”改投官方 `beta` 地址是同一套机制。**只有官方端点会被改投**，非官方连接保持原样，工作台会明确提示。
-- **Messages 接口（尽量兼容）**：不改投。插件只做尽力预设兼容：前导的多条 system 消息按原顺序合并成一条（宿主 Messages 序列化只保留最后一条 system 快照，不合并就会直接丢掉前面的预设文本），不发送 assistant 预填充标记，并在工作台列出 Messages 线格式无法表达的能力（中途 system 注入、assistant 预填充等）。
+本插件**不改写用户的请求**：协议怎么走由宿主决定，插件只在连接是 messages 时对预设注入做尽力兼容。
 
-宿主**并没有删掉** chat-completions：0.1.6-alpha.2 只是把官方连接的默认协议从 `chat-completions` 改成 `messages`（宿主 `packages/llm/llm-deepseek/src/config.ts:81` 仍是 `z.union(['chat-completions','messages']).default('messages')`），`protocol` 依旧可配置，`protocols/chat-completions/*` 整套实现（serialize/sse/translate/adapter）都还在。区别只是 DSH Web 界面没有协议选择器，只能在 Cordis YAML 里改。
-
-所以如果你愿意改宿主配置，最干净的做法是直接给官方连接指定协议，不必依赖本插件的请求改投：
+- **推荐：让宿主原生使用对话补全接口。** 在 profile 的 `cordis.patch.yml` 里加一条 id 定向覆盖并重启：
 
 ```yaml
 - id: llm-deepseek
@@ -39,12 +36,18 @@ dsh plugin --profile web add github:bychv/dsh-preset-enhance#main
     protocol: chat-completions
 ```
 
-此时官方根地址为 `https://api.deepseek.com`，请求发往 `POST https://api.deepseek.com/chat/completions`（宿主 `config.ts:292-293` 选择根地址，`protocols/chat-completions/adapter.ts:330` 发送），与 chat 模式的改投目标完全一致。
-**不开启预设则不介入**：当前会话没有启用预设注入时，插件不介入请求——不改投、不翻译、不改写请求体，原样放行；工作台会显示这一点。
+  此后官方根地址为 `https://api.deepseek.com`，请求发往 `POST https://api.deepseek.com/chat/completions`（宿主 `config.ts:292-293` 选择根地址，`protocols/chat-completions/adapter.ts:330` 发送）。预填充续写、DSML 工具调用转换与正文提取都在宿主原生路径上生效。
 
-无论选择哪一项，插件都会把开头连续的多条 system 消息按原顺序合并成一条：宿主 Messages 序列化只保留最后一条 system 快照（`serialize.ts:83-95` 后一条覆盖前一条），合并后无论宿主最终走哪种协议都不会丢掉预设文本。代价是原生 chat/completions 连接上的消息形态会从多条 system 变为一条（文本与顺序不变），因此这属于保内容、不属丢失，不额外显示为警告。
+- **连接仍是 messages 时**：预设注入照常执行，但宿主 Messages 序列化只保留最后一条前导 system 快照（`serialize.ts:83-95` 后一条覆盖前一条），所以插件会把开头连续的多条 system 消息按原顺序合并成一条，避免预设文本被丢弃；assistant 预填充标记无法通过 Messages 线格式表达。这些无法保留的能力会逐条列在工作台里，工作台也会说明该协议下兼容路径不适用，并指向上面的宿主侧做法。
 
-Messages 线格式仍无法等价表达的部分不会被静默忽略，而是逐条列在工作台里；未实现的能力以文字标注，不计为已生效。
+#### 关于“改投并翻译”方案（当前隐藏）
+
+计划中设计过由插件把官方 Messages 请求改投到 `chat/completions` 并双向翻译的实现。代码完整保留在 `src/lib/messages-translate.mts` 与 `src/lib/deepseek-beta.mts`，单元测试与端到端测试都在（含“默认关闭”的专门用例），但**当前版本默认不启用，界面上也不提供**。重新启用需要两步：
+
+1. 打开 `src/index.mts` 传给 `installDeepSeekBetaBridge` 的开关（`reroute: config.reroute === true` 改为 `reroute: true`，或通过插件配置项 `reroute` 打开）；
+2. 恢复 `web/index.html` 中被注释掉的协议开关区块；`web/editor.js` 的接线仍在，元素恢复后自动生效。
+
+**不开启预设则不介入**：当前会话没有启用预设注入时，插件完全不介入请求，请求原样放行。
 
 ### 本地双协议测试端点
 

@@ -12,6 +12,13 @@ export interface PluginConfig {
   dataFile?: string;
   agentPresetRoot?: string;
   standardComposition?: string;
+  /**
+   * Opt into switching an official Messages request to the official chat/completions
+   * endpoint. PARKED and off by default: the supported fix is the host's own
+   * profile-level `protocol: chat-completions` setting, which needs no translation.
+   * Set it (and re-check the translation notes) to bring the in-app switch back.
+   */
+  reroute?: boolean;
 }
 
 export interface ContentBlock {

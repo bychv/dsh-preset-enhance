@@ -425,7 +425,7 @@ test('no activation leaves an official Messages request byte-identical', async (
     return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
   };
   try {
-    const controller = installDeepSeekBetaBridge(harness, { observer: createProtocolObserver() });
+    const controller = installDeepSeekBetaBridge(harness, { observer: createProtocolObserver(), reroute: true });
     const init = messagesInit();
     await globalThis.fetch(MESSAGES_BASE_URL + '/v1/messages', init);
     assert.equal(calls.length, 1);
@@ -450,7 +450,7 @@ test('an activation armed for messages mode never switches protocols', async () 
   };
   const observer = createProtocolObserver();
   try {
-    const controller = installDeepSeekBetaBridge(harness, { observer });
+    const controller = installDeepSeekBetaBridge(harness, { observer, reroute: true });
     const release = controller.activate('s', '', { mode: 'messages', removeNonOfficialTools: true });
     const init = messagesInit();
     await globalThis.fetch(MESSAGES_BASE_URL + '/v1/messages', init);
@@ -488,7 +488,7 @@ test('chat mode switches the official Messages request and translates the respon
   };
   const observer = createProtocolObserver();
   try {
-    const controller = installDeepSeekBetaBridge(harness, { observer });
+    const controller = installDeepSeekBetaBridge(harness, { observer, reroute: true });
     const release = controller.activate('s', '', { mode: 'chat-completions', removeNonOfficialTools: true });
     const response = await globalThis.fetch(MESSAGES_BASE_URL + '/v1/messages', messagesInit());
     const text = await response.text();
@@ -533,7 +533,7 @@ test('an assistant prefill key switches a Messages request to the beta endpoint 
     return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
   };
   try {
-    const controller = installDeepSeekBetaBridge(harness);
+    const controller = installDeepSeekBetaBridge(harness, { reroute: true });
     const release = controller.activate('s', 'Continue: ', { mode: 'chat-completions', toolCalls: true });
     await globalThis.fetch(MESSAGES_BASE_URL + '/v1/messages', messagesInit({
       body: JSON.stringify(anthropicRequest({
@@ -576,7 +576,7 @@ test('the prefill reroute composes DSML emulation with the protocol translation'
   ]);
   globalThis.fetch = async () => new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } });
   try {
-    const controller = installDeepSeekBetaBridge(harness);
+    const controller = installDeepSeekBetaBridge(harness, { reroute: true });
     const release = controller.activate('s', 'Continue: ', { mode: 'chat-completions', toolCalls: true });
     const response = await globalThis.fetch(MESSAGES_BASE_URL + '/v1/messages', messagesInit({
       body: JSON.stringify(anthropicRequest({
@@ -614,7 +614,7 @@ test('a reroute without a prefill keeps native tools translated', async () => {
     return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
   };
   try {
-    const controller = installDeepSeekBetaBridge(harness);
+    const controller = installDeepSeekBetaBridge(harness, { reroute: true });
     const release = controller.activate('s', '', { mode: 'chat-completions', toolCalls: true });
     await globalThis.fetch(MESSAGES_BASE_URL + '/v1/messages', messagesInit({
       body: JSON.stringify(anthropicRequest({
@@ -645,7 +645,7 @@ test('an empty activation key never arms a prefix continuation', async () => {
     return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
   };
   try {
-    const controller = installDeepSeekBetaBridge(harness);
+    const controller = installDeepSeekBetaBridge(harness, { reroute: true });
     // The host arms every injected request with '' when the preset has no prefill.
     const release = controller.activate('s', '', { mode: 'chat-completions' });
     await globalThis.fetch(MESSAGES_BASE_URL + '/v1/messages', messagesInit({
@@ -676,7 +676,7 @@ test('a non-official Messages endpoint is never switched', async () => {
   };
   const observer = createProtocolObserver();
   try {
-    const controller = installDeepSeekBetaBridge(harness, { observer });
+    const controller = installDeepSeekBetaBridge(harness, { observer, reroute: true });
     const release = controller.activate('s', '', { mode: 'chat-completions' });
     const init = messagesInit();
     await globalThis.fetch('https://gateway.example.com/v1/messages', init);
@@ -700,7 +700,7 @@ test('a rewritten response is translated while an untouched one is not', async (
   const body = chatSseBody(CHAT_TEXT_STREAM);
   globalThis.fetch = async () => new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } });
   try {
-    const controller = installDeepSeekBetaBridge(harness);
+    const controller = installDeepSeekBetaBridge(harness, { reroute: true });
     // Not armed: the raw chat/completions bytes reach the caller untouched.
     const raw = await globalThis.fetch(MESSAGES_BASE_URL + '/v1/messages', messagesInit());
     assert.equal(await raw.text(), body);
@@ -745,7 +745,7 @@ test('the full switch works over a real HTTP chat/completions endpoint', async (
     return realFetch(input, init);
   };
   try {
-    const controller = installDeepSeekBetaBridge(harness);
+    const controller = installDeepSeekBetaBridge(harness, { reroute: true });
     const release = controller.activate('real', '', { mode: 'chat-completions' });
     const response = await globalThis.fetch(MESSAGES_BASE_URL + '/v1/messages', messagesInit({
       headers: { 'x-api-key': 'secret', 'anthropic-version': '2023-06-01', [SESSION_ID_HEADER]: 'real', accept: 'text/event-stream' },

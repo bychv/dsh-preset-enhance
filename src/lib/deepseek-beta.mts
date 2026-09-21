@@ -188,6 +188,7 @@ export interface DeepSeekPrefixRewrite {
  */
 export function rewriteDeepSeekPrefixFetch(
   input: FetchInput, init: RequestInitLike = {}, registries: readonly SessionRegistry[] = [],
+  options: { reroute?: boolean } = {},
 ): DeepSeekPrefixRewrite {
   const detected = detectProtocol(input, init);
   const untouched: DeepSeekPrefixRewrite = {
@@ -195,7 +196,7 @@ export function rewriteDeepSeekPrefixFetch(
   };
   const url = parsedUrl(input);
   const pathProtocol = url ? classifyProtocolPath(url.pathname) : 'unknown';
-  if (pathProtocol === 'messages' && url) {
+  if (pathProtocol === 'messages' && url && options.reroute === true) {
     // Chat mode switches the OFFICIAL Messages endpoint to the official
     // chat/completions endpoint and translates both directions. Everything
     // else (non-official host, no armed chat-mode activation, unparseable
@@ -349,6 +350,13 @@ function switchOfficialMessagesRequest(
 /* ------------------------------------------------------- global fetch bridge */
 
 interface BridgeHost {
+  /**
+   * Whether an installed controller opted into switching official Messages requests
+   * to the official chat/completions endpoint. PARKED by default: the shipped plugin
+   * leaves it off, so users keep the host's own protocol behaviour. Re-enable by
+   * passing `reroute: true` from the plugin (see installDeepSeekBetaBridge).
+   */
+  reroute: boolean;
   original: FetchLike;
   wrapped: FetchLike;
   registries: Set<ActivationRegistry>;
@@ -381,7 +389,7 @@ function createWrapper(host: BridgeHost): FetchLike {
       const observation = observeProtocolRequest(input, init, observer);
       if (observation) seen.push({ observer, observation });
     }
-    const rewritten = rewriteDeepSeekPrefixFetch(input, init, registries);
+    const rewritten = rewriteDeepSeekPrefixFetch(input, init, registries, { reroute: host.reroute });
     if (rewritten.skipped) {
       for (const { observer, observation } of seen) {
         observer.record({ ...observation, skipped: true, skippedReason: rewritten.skipped.reason });
@@ -429,6 +437,7 @@ function acquireHost(): BridgeHost | null {
     wrapped: undefined as unknown as FetchLike,
     registries: new Set(),
     observers: new Set(),
+    reroute: false,
   };
   host.wrapped = createWrapper(host);
   Object.defineProperty(globalThis, BRIDGE, { value: host, configurable: true, writable: true });
@@ -467,6 +476,14 @@ export interface DeepSeekBetaActivationOptions {
 export interface DeepSeekBetaBridgeOptions {
   /** Receives one observation per outbound request that looks like an LLM call. */
   observer?: ProtocolObserver;
+  /**
+   * Switch an official Messages request to the official chat/completions endpoint and
+   * translate both directions. PARKED and off by default: DSH still ships the native
+   * chat-completions protocol, so a profile-level `protocol: chat-completions`
+   * override is the supported fix and needs no translation. The implementation is
+   * retained and covered by tests; pass `true` to bring the in-app switch back.
+   */
+  reroute?: boolean;
 }
 
 export interface DeepSeekBetaBridgeStatus {
@@ -523,6 +540,7 @@ export function installDeepSeekBetaBridge(
   }
   const registry: ActivationRegistry = new Map();
   host?.registries.add(registry);
+  if (options.reroute === true && host) host.reroute = true;
   const observer = options.observer;
   if (host && observer) host.observers.add(observer);
   let disposed = false;

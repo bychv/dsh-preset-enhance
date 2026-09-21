@@ -136,7 +136,11 @@ export async function apply(ctx, config = {}) {
     // assistant-prefix/toolcall compatibility bridge cannot apply. Observations are
     // recorded per session so the workbench can say so instead of pretending.
     const protocolObserver = createProtocolObserver();
-    const deepSeekBeta = installDeepSeekBetaBridge(ctx, { observer: protocolObserver });
+    // The in-app official-request switch is parked behind an explicit opt-in; the shipped
+    // default leaves the host's own protocol behaviour untouched.
+    const deepSeekBeta = installDeepSeekBetaBridge(ctx, {
+        observer: protocolObserver, reroute: config.reroute === true,
+    });
     // Startup is staged and names the failing stage together with its path. It must
     // NOT throw: this plugin is a required root bundle entry, so a throw is fatal to
     // the whole host and would take away the very web UI the user needs to fix the
@@ -849,8 +853,9 @@ function presetProtocolMismatch(state, sessionId, session, observer) {
     if (!observed)
         return null;
     if (observed.protocol === 'messages' && !observed.switchedFrom) {
-        return '当前连接走 Messages 协议，插件未能把它切到对话补全接口（仅官方 api.deepseek.com 端点会自动切换）：'
-            + '预填充、工具调用转换与正文提取不会生效。';
+        return '当前连接使用 Messages 协议：预填充续写、工具调用转换与正文提取不会生效，插件也不会改写该请求。'
+            + '如需这些能力，请在 profile 的 cordis.patch.yml 里给 llm-deepseek 设置 protocol: chat-completions 后重启，'
+            + '由宿主原生使用对话补全接口。';
     }
     return null;
 }

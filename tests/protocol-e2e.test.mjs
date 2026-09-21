@@ -520,7 +520,9 @@ async function withPlugin(options, body) {
       if (options.protocolMode) state.protocolMode = options.protocolMode;
     });
     harness = createHarness({ protocol: options.protocol, server, endpoint: options.endpoint });
-    await apply(harness.ctx, { dataFile: file, agentPresetRoot: join(dir, '.agent-presets') });
+    await apply(harness.ctx, {
+      dataFile: file, agentPresetRoot: join(dir, '.agent-presets'), reroute: options.reroute === true,
+    });
     if (options.beforeTurn) await options.beforeTurn(harness, file);
     await options.turn(harness, server);
   } finally {
@@ -933,6 +935,9 @@ test('chat mode + host Messages request: reroute to the chat path, Anthropic res
   skip: REROUTE_BUILT ? false : 'awaiting src/lib/messages-translate.mts + the built lib/messages-translate.mjs',
 }, async () => {
   await withPlugin({
+    // The in-app switch is parked by default; this case opts in to keep the retained
+    // implementation covered.
+    reroute: true,
     protocol: 'messages',
     preset: TWO_SYSTEM_PRESET,
     reply: OK_REPLY,
@@ -996,17 +1001,43 @@ test('chat mode + non-official endpoint: never rerouted, mismatch is explained',
       assert.equal(got.payload.protocol?.skipped, true, 'the compatibility path could not run');
       assert.equal(got.payload.protocolSwitched, false);
       assert.equal(typeof got.payload.protocolMismatch, 'string');
-      assert.match(got.payload.protocolMismatch, /官方|api\.deepseek\.com/);
+      assert.match(got.payload.protocolMismatch, /protocol: chat-completions/);
+    },
+  });
+});
+
+test('the in-app official request switch stays parked unless the plugin opts in', async () => {
+  await withPlugin({
+    protocol: 'messages',
+    preset: TWO_SYSTEM_PRESET,
+    reply: OK_REPLY,
+    turn: async (harness, server) => {
+      await harness.runTurn();
+      const call = harness.hostCalls[0];
+      const record = server.last();
+      // Shipped default: the official Messages request is never rewritten or translated.
+      assert.equal(record.path, '/anthropic/v1/messages', 'the official Messages request must reach the endpoint unchanged');
+      assert.equal(record.rawBody, call.sentBody, 'byte-identical pass-through');
+      assert.equal(record.headers['x-api-key'], API_KEY);
+      assert.equal(record.headers.authorization, undefined);
+      // The workbench still explains that the compatibility path does not apply and points
+      // at the host-level fix instead of offering the plugin's own switch.
+      const got = await pluginApi(harness, 'GET', { sessionId: SESSION_ID });
+      assert.equal(got.payload.protocolSwitched, false);
+      assert.equal(typeof got.payload.protocolMismatch, 'string');
+      assert.match(got.payload.protocolMismatch, /protocol: chat-completions/);
     },
   });
 });
 
 test('chat mode reroute preserves every leading preset system prompt', async () => {
+  // Parked by default; opts in to keep the retained reroute covered.
   // The host Messages serializer collapses leading system messages (last-wins) BEFORE the
   // fetch bridge can reroute, so the plugin merges them into one ordered message while it
   // compiles the preset. Every leading prompt therefore survives the reroute, in order.
 
   await withPlugin({
+    reroute: true,
     protocol: 'messages',
     preset: TWO_SYSTEM_PRESET,
     reply: OK_REPLY,
