@@ -69,7 +69,7 @@ const DSML_INVOKE_OPEN_RE = new RegExp('<' + PAD_SOURCE + DSML_PREFIX_SOURCE + '
 const DSML_INVOKE_CLOSE_RE = new RegExp('</' + PAD_SOURCE + DSML_PREFIX_SOURCE + 'invoke' + PAD_SOURCE + '>', 'iu');
 const DSML_WRAPPER_CLOSE_RE = new RegExp('</' + PAD_SOURCE + DSML_PREFIX_SOURCE + DSML_WRAPPER_SOURCE + PAD_SOURCE + '>', 'iu');
 const TOOL_CALLS_CLOSE_RE = new RegExp('</' + PAD_SOURCE + 'tool' + PAD_SOURCE + '_?' + PAD_SOURCE + 'calls?' + PAD_SOURCE + '>', 'iu');
-const DSML_PARAM_OPEN_RE = new RegExp('<' + PAD_SOURCE + DSML_PREFIX_SOURCE + 'parameter' + PAD_SOURCE + '([^>]*)>', 'giu');
+const DSML_PARAM_OPEN_RE = new RegExp('<' + PAD_SOURCE + DSML_PREFIX_SOURCE + 'parameter' + PAD_SOURCE + '([^>]*?)' + PAD_SOURCE + '(/?)>', 'giu');
 const DSML_PARAM_CLOSE_RE = new RegExp('</' + PAD_SOURCE + DSML_PREFIX_SOURCE + 'parameter' + PAD_SOURCE + '>', 'iu');
 const ZERO_WIDTH_RE = new RegExp('[' + String.fromCharCode(0x200B, 0x200C, 0x200D, 0xFEFF) + ']', 'gu');
 // A leading backslash before a marker is an escaping artefact some models emit.
@@ -88,7 +88,7 @@ const OFFICIAL_BEGIN_RE = new RegExp('<' + PAD_SOURCE + officialMarker('begin') 
 const OFFICIAL_END_RE = new RegExp('<' + PAD_SOURCE + OPTIONAL_SLASH + officialMarker('end') + PAD_SOURCE + '>', 'iu');
 const OFFICIAL_INVOKE_OPEN_RE = new RegExp('<' + PAD_SOURCE + '(?:' + DSML_PREFIX_SOURCE + '|' + PIPE_SOURCE + ')invoke' + PAD_SOURCE + '([^>]*)>', 'giu');
 const OFFICIAL_INVOKE_CLOSE_RE = new RegExp('<' + PAD_SOURCE + '(?:' + PIPE_SOURCE + ')?' + PAD_SOURCE + '/' + PAD_SOURCE + '(?:' + DSML_PREFIX_SOURCE + '|' + PIPE_SOURCE + ')?invoke' + PAD_SOURCE + '(?:' + PIPE_SOURCE + ')?' + PAD_SOURCE + '>', 'iu');
-const OFFICIAL_PARAM_OPEN_RE = new RegExp('<' + PAD_SOURCE + '(?:' + DSML_PREFIX_SOURCE + '|' + PIPE_SOURCE + ')parameter' + PAD_SOURCE + '([^>]*)>', 'giu');
+const OFFICIAL_PARAM_OPEN_RE = new RegExp('<' + PAD_SOURCE + '(?:' + DSML_PREFIX_SOURCE + '|' + PIPE_SOURCE + ')parameter' + PAD_SOURCE + '([^>]*?)' + PAD_SOURCE + '(/?)>', 'giu');
 const OFFICIAL_PARAM_CLOSE_RE = new RegExp('<' + PAD_SOURCE + '(?:' + PIPE_SOURCE + ')?' + PAD_SOURCE + '/' + PAD_SOURCE + '(?:' + DSML_PREFIX_SOURCE + '|' + PIPE_SOURCE + ')?parameter' + PAD_SOURCE + '(?:' + PIPE_SOURCE + ')?' + PAD_SOURCE + '>', 'iu');
 const DATA_URI_RE = /data:(image\/[\w.+-]+);base64,[A-Za-z0-9+/=]{100,}/gu;
 const B64_BODY_RE = /^[A-Za-z0-9+/=\s]{200,}$/u;
@@ -361,20 +361,26 @@ function parseInvokeCalls(segment: string, patterns: InvokePatterns): ParsedTool
       const parameter = parameters[parameterIndex];
       const rawStart = parameter.index + parameter[0].length;
       const nextParameter = parameters[parameterIndex + 1]?.index ?? Number.POSITIVE_INFINITY;
-      const parameterClose = matchAfter(patterns.paramClose, body, rawStart);
+      const closeMatch = matchAfter(patterns.paramClose, body, rawStart);
+      // A close tag after the next parameter open belongs to that parameter, not to this
+      // one, so only a close that comes first terminates this value.
+      const parameterClose = closeMatch && closeMatch.index < nextParameter ? closeMatch : null;
+      const selfClosing = parameter[2] === "/";
       const rawEnd = Math.min(nextParameter, parameterClose?.index ?? body.length, body.length);
       const parameterName = attributeValue(parameter[1], "name")?.trim();
       if (!parameterName) continue;
       const stringFlag = attributeValue(parameter[1], "string")?.trim().toLowerCase();
-      const raw = body.slice(rawStart, rawEnd);
-      // With a closing tag the value is exact; without one the value ends at the invoke or
-      // wrapper bound, where the surrounding padding is formatting rather than content.
-      if (stringFlag === "true") args[parameterName] = parameterClose ? raw : raw.trimEnd();
+      // A self-closing tag carries no value at all; its "/" was consumed by the marker pattern.
+      const raw = selfClosing ? "" : body.slice(rawStart, rawEnd);
+      // With a closing tag the value is exact; otherwise it ends at the invoke or wrapper
+      // bound, where the surrounding padding is formatting rather than content.
+      if (stringFlag === "true") args[parameterName] = selfClosing || parameterClose ? raw : raw.trimEnd();
       else {
         try { args[parameterName] = JSON.parse(raw.trim()); }
         catch { args[parameterName] = raw.trim(); }
       }
     }
+
     const separator = name.indexOf("::");
     const namespace = separator > 0 && separator === name.lastIndexOf("::") ? name.slice(0, separator) : null;
     const functionName = namespace ? name.slice(separator + 2) : name;

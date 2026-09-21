@@ -356,3 +356,44 @@ test('a Markdown code fence around a DSML block neither hides nor invents a call
   const plainXml = fence + 'xml' + '\n' + '<tool_calls><invoke name="lookup_weather"><parameter name="city">Shanghai</parameter></invoke></tool_calls>' + '\n' + fence;
   assert.deepEqual(parseToolCallsFromText(plainXml), { content: plainXml, toolCalls: null });
 });
+test('self-closing parameters never leak the trailing slash into a value', () => {
+  const NL = String.fromCharCode(10);
+  const prefix = BAR + BAR + 'DSML' + BAR + BAR;
+  const callsOpen = '<' + prefix + ' calls>';
+  const callsClose = '</' + prefix + ' calls>';
+  const invokeOpen = '<' + prefix + ' invoke name="lookup_weather">';
+  const invokeClose = '</' + prefix + ' invoke>';
+  const selfClosingCity = '<' + prefix + ' parameter name="city" string="true"/>';
+  const argsOf = text => JSON.parse(parseToolCallsFromText(text).toolCalls[0].function.arguments);
+
+  // 1. only child, same line as the closing invoke.
+  assert.deepEqual(argsOf(callsOpen + invokeOpen + selfClosingCity + invokeClose + callsClose), { city: '' });
+
+  // 2. only child, newline before the closing invoke.
+  assert.deepEqual(argsOf([callsOpen, invokeOpen, selfClosingCity, invokeClose, callsClose].join(NL)), { city: '' });
+
+  // 3. followed by another parameter on the SAME line.
+  const nextSameLine = callsOpen + invokeOpen + selfClosingCity + '<' + prefix + ' parameter name="days" string="false">2</' + prefix + ' parameter>' + invokeClose + callsClose;
+  assert.deepEqual(argsOf(nextSameLine), { city: '', days: 2 });
+
+  // 4. followed by another parameter on the NEXT line (this used to leak the newline as the value).
+  const nextLine = [callsOpen, invokeOpen, selfClosingCity, '<' + prefix + ' parameter name="days" string="false">2</' + prefix + ' parameter>', invokeClose, callsClose].join(NL);
+  assert.deepEqual(argsOf(nextLine), { city: '', days: 2 });
+
+  // 5. string="false" self-closing parameter.
+  const falseFlag = callsOpen + invokeOpen + '<' + prefix + ' parameter name="limit" string="false"/>' + invokeClose + callsClose;
+  assert.deepEqual(argsOf(falseFlag), { limit: '' });
+
+  // 6. official envelope self-closing, with and without the trailing pipe.
+  const official = suffix => ['<' + BAR + 'tool' + BLK + 'calls' + BLK + 'begin' + BAR + '>',
+    '<' + BAR + 'invoke name="lookup_weather"' + suffix + '>',
+    '<' + BAR + 'parameter name="city" string="true"' + suffix + '/>',
+    '<' + BAR + '/invoke' + suffix + '>',
+    '<' + BAR + 'tool' + BLK + 'calls' + BLK + 'end' + BAR + '>'].join(NL);
+  assert.deepEqual(argsOf(official(BAR)), { city: '' });
+  assert.deepEqual(argsOf(official('')), { city: '' });
+
+  // A slash that belongs to a closed value is preserved, never mistaken for self-closing.
+  const slashValue = callsOpen + invokeOpen + '<' + prefix + ' parameter name="path" string="true">/tmp/x/</' + prefix + ' parameter>' + invokeClose + callsClose;
+  assert.deepEqual(argsOf(slashValue), { path: '/tmp/x/' });
+});
