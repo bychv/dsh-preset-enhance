@@ -80,6 +80,69 @@ async function waitReady() {
   return false;
 }
 async function settle(ms = 1200) { await sleep(ms); }
+/**
+ * Install one POST recorder on the page's fetch; survives until the next reload.
+ * window.__origFetch always resolves to the untouched native fetch, so later sections
+ * that wrap it delegate to the real one and never double-count a request.
+ */
+async function installRecorder() {
+  await evaluate(`(() => {
+    if (!window.__nativeFetch) {
+      const candidate = window.fetch;
+      window.__nativeFetch = candidate && candidate.__presetEnhanceRecorder === true ? candidate.__previous : candidate;
+    }
+    const previous = window.fetch;
+    const recorder = function (input, init) {
+      const options = init || {};
+      const url = typeof input === 'string' ? input : (input && input.url) || '';
+      if (String(options.method || 'GET').toUpperCase() === 'POST' && url.indexOf('/preset-enhance/api') >= 0) {
+        let action = 'unparsed';
+        try { action = JSON.parse(options.body).action; } catch (error) { action = 'unparsed'; }
+        window.__apiPosts.push(action);
+      }
+      return previous.call(window, input, init);
+    };
+    recorder.__presetEnhanceRecorder = true;
+    recorder.__previous = previous;
+    window.__origFetch = window.__nativeFetch;
+    window.__apiPosts = [];
+    window.fetch = recorder;
+    return true;
+  })()`);
+}
+/** Record POSTs that carry keepalive:true, i.e. the unload/hidden flush path. */
+async function installKeepaliveRecorder() {
+  await evaluate(`(() => {
+    if (!window.__origFetch) window.__origFetch = window.fetch;
+    const previous = window.fetch;
+    window.__keepalivePosts = [];
+    window.__keepaliveStatus = null;
+    window.fetch = function (input, init) {
+      const options = init || {};
+      const url = typeof input === 'string' ? input : (input && input.url) || '';
+      let entry = null;
+      if (String(options.method || 'GET').toUpperCase() === 'POST' && url.indexOf('/preset-enhance/api') >= 0) {
+        let action = 'unparsed';
+        try { action = JSON.parse(options.body).action; } catch (error) { action = 'unparsed'; }
+        entry = { action: action, keepalive: options.keepalive === true, status: null };
+        window.__keepalivePosts.push(entry);
+      }
+      const result = previous.call(window, input, init);
+      if (entry && result && typeof result.then === 'function') {
+        result.then(function (response) {
+          entry.status = response.status;
+          window.__keepaliveStatus = response.status;
+          if (!response.ok && typeof response.clone === 'function') {
+            response.clone().text().then(function (text) { window.__keepaliveError = text; },
+              function () { window.__keepaliveError = ''; });
+          }
+        }, function () { window.__keepaliveStatus = -1; });
+      }
+      return result;
+    };
+    return true;
+  })()`);
+}
 async function shot(name) {
   const { data } = await send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true });
   const file = join(OUT, name);
@@ -140,6 +203,32 @@ try {
   check('workbench page loads', await waitReady());
   await settle(2000);
 
+  // T12-1. the protocol-switch UI was removed from the page; the notice must stay hidden
+  const protocolUi = await evaluate(`(() => {
+    const removed = ['protocol-mode', 'save-protocol-mode', 'protocol-mode-hint'];
+    const words = ['改投', '翻译', '协议设置'];
+    const shown = document.body.innerText ?? '';
+    const markup = document.documentElement.outerHTML ?? '';
+    const notice = document.getElementById('protocol-notice');
+    return {
+      removedPresent: removed.filter(id => document.getElementById(id)),
+      shownWords: words.filter(word => shown.indexOf(word) >= 0),
+      markupWords: words.filter(word => markup.indexOf(word) >= 0),
+      noticeExists: !!notice,
+      noticeHidden: notice ? notice.hidden === true : null,
+      noticeDisplay: notice ? getComputedStyle(notice).display : null,
+      noticeText: notice ? notice.innerText.trim() : null,
+    };
+  })()`);
+  check('protocol-switch UI is gone from the page',
+    protocolUi.removedPresent.length === 0, `present=${JSON.stringify(protocolUi.removedPresent)}`);
+  check('no 改投/翻译/协议设置 wording is shown on the workbench',
+    protocolUi.shownWords.length === 0,
+    `shown=${JSON.stringify(protocolUi.shownWords)} markup=${JSON.stringify(protocolUi.markupWords)}`);
+  check('#protocol-notice exists but is hidden with nothing to report',
+    protocolUi.noticeExists && protocolUi.noticeHidden === true && protocolUi.noticeDisplay === 'none',
+    JSON.stringify(protocolUi));
+
   const chatHistoryHint = await evaluate(`(() => {
     const entry = document.querySelector('.entry[data-prompt-id="chatHistory"]');
     entry?.click();
@@ -179,7 +268,9 @@ try {
       systemPromptTemplate.note.includes('只可开关'),
     JSON.stringify(systemPromptTemplate));
 
+  const extractionBefore = await evaluate(`fetch('/preset-enhance/api').then(r => r.json()).then(s => s.prefixOutputExtraction === true)`);
   const extractionUi = await evaluate(`(() => {
+    const stored = ${JSON.stringify(extractionBefore)};
     const toggle = document.getElementById('prefix-output-extraction');
     const template = document.getElementById('output-extraction-template');
     const button = document.getElementById('add-output-extraction-template');
@@ -189,7 +280,7 @@ try {
     const templateIndex = ids.indexOf('dsh-output-extraction-template');
     return {
       toggle: !!toggle,
-      defaultOff: toggle?.checked === false,
+      reflectsStored: toggle?.checked === stored,
       templateLength: template?.value.length ?? 0,
       hasFinalTokens: template?.value.includes('<｜end▁of▁think｜>') &&
         template?.value.includes('<｜begin▁of▁output｜>') && template?.value.includes('<content>正文</content>'),
@@ -199,7 +290,7 @@ try {
     };
   })()`);
   check('experimental output extraction exposes the final-strategy template and inserts it after chatHistory',
-    extractionUi.toggle && extractionUi.defaultOff && extractionUi.templateLength > 200 && extractionUi.hasFinalTokens &&
+    extractionUi.toggle && extractionUi.reflectsStored && extractionUi.templateLength > 200 && extractionUi.hasFinalTokens &&
       extractionUi.insertedAfterHistory && extractionUi.role === 'user' && extractionUi.sameContent,
     JSON.stringify(extractionUi));
   const extractionReload = once('Page.loadEventFired');
@@ -208,6 +299,7 @@ try {
   await waitReady();
   await settle(1200);
 
+  const extractionTarget = !extractionBefore;
   await evaluate(`document.getElementById('prefix-output-extraction').click()`);
   await evaluate(`document.getElementById('save-deepseek-beta').click()`);
   await settle(1800);
@@ -223,16 +315,71 @@ try {
   await settle(1200);
   const extractionAfterReload = await evaluate(`document.getElementById('prefix-output-extraction').checked`);
   check('output extraction switch saves through interface settings and survives reload',
-    extractionSaved.stored === true && extractionSaved.checked === true &&
-      /已保存/.test(extractionSaved.status) && extractionAfterReload === true,
-    JSON.stringify({ extractionSaved, extractionAfterReload }));
+    extractionSaved.stored === extractionTarget && extractionSaved.checked === extractionTarget &&
+      /已保存/.test(extractionSaved.status) && extractionAfterReload === extractionTarget,
+    JSON.stringify({ extractionBefore, extractionTarget, extractionSaved, extractionAfterReload }));
   await evaluate(`document.getElementById('prefix-output-extraction').click()`);
   await evaluate(`document.getElementById('save-deepseek-beta').click()`);
   await settle(1800);
   const extractionRestored = await evaluate(`fetch('/preset-enhance/api').then(r => r.json()).then(s => s.prefixOutputExtraction)`);
-  check('manual interface settings save can disable output extraction',
-    extractionRestored === false, String(extractionRestored));
+  check('manual interface settings save writes the other value too (state relative)',
+    extractionRestored === extractionBefore, `before=${extractionBefore} after=${String(extractionRestored)}`);
 
+  // T12-2. the prefill interface panel must stay fully functional
+  const prefillIds = ['deepseek-beta-prefix', 'prefix-tool-calls', 'prefix-output-extraction'];
+  const prefillBefore = await evaluate(`fetch('/preset-enhance/api').then(r => r.json()).then(s => ({
+    enabled: s.deepseekBetaPrefix === true,
+    toolCalls: s.prefixToolCalls === true,
+    extraction: s.prefixOutputExtraction === true,
+  }))`);
+  const prefillUi = await evaluate("(() => { const ids = " + JSON.stringify(prefillIds) + "; return ids.map(id => {" +
+    " const el = document.getElementById(id); if (!el) return { id: id, exists: false };" +
+    " const label = el.closest('label'); const rect = el.getBoundingClientRect();" +
+    " return { id: id, exists: true, type: el.type, disabled: el.disabled, checked: el.checked," +
+    " visible: rect.width > 0 && rect.height > 0 && getComputedStyle(label || el).display !== 'none'," +
+    " labelText: (label ? label.innerText.trim().split('\\n')[0] : '') }; }); })()");
+  check('the three prefill switches exist, are enabled and visible',
+    prefillUi.every(item => item.exists && item.type === 'checkbox' && item.disabled === false && item.visible),
+    JSON.stringify(prefillUi));
+  const prefillTargets = { enabled: !prefillBefore.enabled, toolCalls: !prefillBefore.toolCalls, extraction: !prefillBefore.extraction };
+  await evaluate("(() => { for (const id of " + JSON.stringify(prefillIds) + ") document.getElementById(id).click(); })()");
+  await settle(300);
+  await evaluate(`document.getElementById('save-deepseek-beta').click()`);
+  await settle(1800);
+  const prefillSaved = await evaluate(`fetch('/preset-enhance/api').then(r => r.json()).then(s => ({
+    enabled: s.deepseekBetaPrefix === true, toolCalls: s.prefixToolCalls === true, extraction: s.prefixOutputExtraction === true,
+    status: document.getElementById('status').textContent,
+  }))`);
+  const prefillReload = once('Page.loadEventFired');
+  await send('Page.reload', {});
+  await prefillReload;
+  await waitReady();
+  await settle(1500);
+  const prefillRedisplayed = await evaluate(`(() => ({
+    enabled: document.getElementById('deepseek-beta-prefix').checked,
+    toolCalls: document.getElementById('prefix-tool-calls').checked,
+    extraction: document.getElementById('prefix-output-extraction').checked,
+  }))()`);
+  check('prefill switches save through 保存接口设置 and re-display after reload',
+    prefillSaved.enabled === prefillTargets.enabled && prefillSaved.toolCalls === prefillTargets.toolCalls &&
+      prefillSaved.extraction === prefillTargets.extraction &&
+      prefillRedisplayed.enabled === prefillTargets.enabled &&
+      prefillRedisplayed.toolCalls === prefillTargets.toolCalls &&
+      prefillRedisplayed.extraction === prefillTargets.extraction &&
+      /已保存/.test(prefillSaved.status),
+    JSON.stringify({ prefillBefore, prefillTargets, prefillSaved, prefillRedisplayed }));
+  await evaluate("(() => { const want = " + JSON.stringify(prefillBefore) + ";" +
+    " const map = [['deepseek-beta-prefix', 'enabled'], ['prefix-tool-calls', 'toolCalls'], ['prefix-output-extraction', 'extraction']];" +
+    " for (const pair of map) { const el = document.getElementById(pair[0]); if (el.checked !== want[pair[1]]) el.click(); } })()");
+  await evaluate(`document.getElementById('save-deepseek-beta').click()`);
+  await settle(1800);
+  const prefillRestored = await evaluate(`fetch('/preset-enhance/api').then(r => r.json()).then(s => ({
+    enabled: s.deepseekBetaPrefix === true, toolCalls: s.prefixToolCalls === true, extraction: s.prefixOutputExtraction === true,
+  }))`);
+  check('prefill settings were restored to their original values',
+    prefillRestored.enabled === prefillBefore.enabled && prefillRestored.toolCalls === prefillBefore.toolCalls &&
+      prefillRestored.extraction === prefillBefore.extraction,
+    JSON.stringify(prefillRestored));
   // 2. static structure from the live API
   const tabs = await evaluate(`[...document.querySelectorAll('#tool-tablist [role="tab"]')].map(b => ({
     id: b.dataset.group, label: b.textContent, selected: b.getAttribute('aria-selected'),
@@ -257,7 +404,8 @@ try {
   await evaluate(`document.getElementById('clear-all-tools').click()`);
   await settle(300);
   const afterClear = await evaluate(`(() => ({
-    checked: [...document.querySelectorAll('#tool-group-panels input[data-tool]')].filter(i => i.checked).length,
+    checked: [...document.querySelectorAll('#tool-group-panels input[data-tool]')].filter(i => i.checked && !i.disabled).length,
+    locked: [...document.querySelectorAll('#tool-group-panels input[data-tool]')].filter(i => i.disabled).map(i => i.dataset.tool),
     status: document.getElementById('status').textContent,
     tri: (() => { const s = document.querySelector('.group-switch'); return s ? s.checked : null; })(),
   }))()`);
@@ -395,7 +543,7 @@ try {
     const draft = await evaluate(`(() => {
       const id = document.querySelector('#tool-tablist [aria-selected="true"]').getAttribute('aria-controls');
       const panel = document.getElementById(id);
-      const checked = [...panel.querySelectorAll('input[data-tool]')].filter(i => i.checked).map(i => i.dataset.tool);
+      const checked = [...panel.querySelectorAll('input[data-tool]')].filter(i => i.checked && !i.disabled).map(i => i.dataset.tool);
       return { checked, status: document.getElementById('status').textContent };
     })()`);
     await evaluate(`(() => { const t = [...document.querySelectorAll('#tool-tablist [role="tab"]')].find(b => b.dataset.group === '@all'); t?.click(); })()`);
@@ -403,8 +551,8 @@ try {
     const overall = await evaluate(`(() => {
       const id = document.querySelector('#tool-tablist [aria-selected="true"]').getAttribute('aria-controls');
       const panel = document.getElementById(id);
-      const checked = [...panel.querySelectorAll('input[data-tool]')].filter(i => i.checked).map(i => i.dataset.tool);
-      const total = panel.querySelectorAll('input[data-tool]').length;
+      const checked = [...panel.querySelectorAll('input[data-tool]')].filter(i => i.checked && !i.disabled).map(i => i.dataset.tool);
+      const total = [...panel.querySelectorAll('input[data-tool]')].filter(i => !i.disabled).length;
       return { checked, total };
     })()`);
     check('仅启用此组 keeps exactly the group members enabled',
@@ -553,7 +701,8 @@ try {
   } catch { /* logged below */ }
   const modePolicy = cookieState?.modeToolPolicies?.[modeSwitch] ?? null;
   check('保存工具开关 persists through the real API', /已保存|生效/.test(status) && modePolicy !== null &&
-    Object.values(modePolicy).every(value => value === false), `${modeSwitch}: ${JSON.stringify(modePolicy)}`);
+    Object.entries(modePolicy).every(([name, value]) => name === 'run_code' ? value === true : value === false),
+    `${modeSwitch}: ${JSON.stringify(modePolicy)}`);
   await evaluate(`document.getElementById('select-all-tools').click()`);
   await settle(300);
   await evaluate(`document.getElementById('save-tools').click()`);
@@ -571,7 +720,7 @@ try {
   })()`);
   await settle(1400);
   const persistenceDraft = await evaluate(`(() => {
-    const all = [...document.querySelectorAll('#tool-list input[data-tool]')];
+    const all = [...document.querySelectorAll('#tool-list input[data-tool]')].filter(box => !box.disabled);
     const beforeOff = all.filter(box => !box.checked).map(box => box.dataset.tool);
     const targets = all.filter(box => box.checked).slice(0, 2);
     for (const box of targets) box.click();
@@ -634,7 +783,7 @@ try {
     await settle(500);
     await evaluate(`window.__apiPosts = []`);
     const autoTarget = await evaluate(`(() => {
-      const box = [...document.querySelectorAll('#tool-list input[data-tool]')].find(item => item.checked);
+      const box = [...document.querySelectorAll('#tool-list input[data-tool]')].find(item => item.checked && !item.disabled);
       box.click();
       return box.dataset.tool;
     })()`);
@@ -647,7 +796,7 @@ try {
       autoPolicy?.[autoTarget] === false,
       `${autoTarget}: posts=[${autoPosts.join(',')}] saved=${autoPolicy?.[autoTarget]} status=${autoStatus}`);
     await evaluate(`window.__apiPosts = []`);
-    await evaluate(`(() => { for (const box of [...document.querySelectorAll('#tool-list input[data-tool]')].slice(0, 4)) box.click(); })()`);
+    await evaluate(`(() => { for (const box of [...document.querySelectorAll('#tool-list input[data-tool]')].filter(item => !item.disabled).slice(0, 4)) box.click(); })()`);
     await settle(2200);
     const burstPosts = await evaluate(`window.__apiPosts.slice()`);
     check('rapid edits coalesce into a single auto-save request',
@@ -655,7 +804,7 @@ try {
     await evaluate(`(() => { const box = document.getElementById('tool-auto-save'); if (box.checked) box.click(); })()`);
     await settle(400);
     await evaluate(`window.__apiPosts = []`);
-    await evaluate(`(() => { document.querySelector('#tool-list input[data-tool]').click(); })()`);
+    await evaluate(`(() => { [...document.querySelectorAll('#tool-list input[data-tool]')].find(item => !item.disabled).click(); })()`);
     await settle(1800);
     const offPosts = await evaluate(`window.__apiPosts.slice()`);
     const offStatus = await evaluate(`document.getElementById('status').textContent`);
@@ -680,6 +829,164 @@ try {
     check('auto-save switch exists', false, 'no #tool-auto-save in the tool card');
   }
 
+  // T12-3. auto-save details in the real UI + the locked program-call entry
+  const originalToolMode = await evaluate(`document.getElementById('tool-mode').value`);
+  const modeIds = await evaluate(`[...document.getElementById('tool-mode').options].map(option => option.value)`);
+  const entrySweep = [];
+  for (const modeId of modeIds) {
+    await evaluate(`(() => { const select = document.getElementById('tool-mode'); select.value = ${JSON.stringify(modeId)}; select.dispatchEvent(new Event('change')); })()`);
+    await settle(1100);
+    entrySweep.push(await evaluate(`(() => {
+      const box = document.querySelector('#tool-list input[data-tool="run_code"]');
+      return { mode: document.getElementById('tool-mode').value, hasEntry: !!box,
+        locked: box ? box.disabled === true : null, checked: box ? box.checked === true : null,
+        note: box ? (box.closest('label')?.querySelector('small')?.textContent ?? '') : null };
+    })()`));
+  }
+  check('every mode that lists run_code renders it as a locked, always-on entry',
+    entrySweep.every(item => !item.hasEntry || (item.locked === true && item.checked === true)),
+    JSON.stringify(entrySweep));
+  const seenEntries = entrySweep.filter(item => item.hasEntry);
+  check('the locked entry explains why it cannot be switched off',
+    seenEntries.length > 0 && seenEntries.every(item => (item.note ?? '').includes('始终启用')),
+    JSON.stringify(seenEntries.length ? seenEntries.map(item => ({ mode: item.mode, note: item.note })) : entrySweep));
+  await evaluate(`(() => { const select = document.getElementById('tool-mode'); select.value = ${JSON.stringify(originalToolMode)}; select.dispatchEvent(new Event('change')); })()`);
+  await settle(1200);
+  const autoMode = await evaluate(`document.getElementById('tool-mode').value`);
+  const readAutoPolicy = () => evaluate("fetch('/preset-enhance/api').then(r => r.json()).then(s => s.modeToolPolicies[" + JSON.stringify(autoMode) + "] ?? null)");
+  const autoBefore = await readAutoPolicy();
+  await installRecorder();
+  await evaluate(`(() => {
+    const box = document.getElementById('tool-auto-save');
+    if (!box.checked) box.click();
+  })()`);
+  await evaluate(`window.__apiPosts = []`);
+  await settle(400);
+  const autoFlip = await evaluate(`(() => {
+    const box = [...document.querySelectorAll('#tool-list input[data-tool]')].find(item => !item.disabled);
+    box.click();
+    return { name: box.dataset.tool, checked: box.checked };
+  })()`);
+  await settle(2200);
+  const autoPosts = await evaluate(`window.__apiPosts.slice()`);
+  const autoStatus = await evaluate(`document.getElementById('status').textContent`);
+  const autoPolicyAfterFlip = await readAutoPolicy();
+  check('auto-save debounces a single toggle into exactly one save request',
+    autoPosts.filter(action => action === 'save-mode-tools' || action === 'save-session-tools').length === 1,
+    `${autoFlip.name}: posts=[${autoPosts.join(',')}]`);
+  check('auto-save shows 已自动保存 in the status line', /已自动保存/.test(autoStatus), autoStatus);
+  check('auto-save stores the toggled value without 保存工具开关',
+    autoPolicyAfterFlip !== null && autoPolicyAfterFlip[autoFlip.name] === autoFlip.checked,
+    JSON.stringify({ flip: autoFlip, stored: autoPolicyAfterFlip && autoPolicyAfterFlip[autoFlip.name] }));
+  const autoReload = once('Page.loadEventFired');
+  await send('Page.reload', {});
+  await autoReload;
+  await waitReady();
+  await settle(2000);
+  await installRecorder();
+  const autoAfterReload = await evaluate("(() => { const boxes = [...document.querySelectorAll('#tool-list input[data-tool]')]; const box = boxes.find(item => item.dataset.tool === " + JSON.stringify(autoFlip.name) + "); const auto = document.getElementById('tool-auto-save'); return { exists: !!box, checked: box ? box.checked : null, autoChecked: auto ? auto.checked : null }; })()");
+  check('the auto-saved toggle survives a page reload',
+    autoAfterReload.exists === true && autoAfterReload.checked === autoFlip.checked && autoAfterReload.autoChecked === true,
+    JSON.stringify({ autoFlip, autoAfterReload }));
+  await evaluate(`window.__apiPosts = []`);
+  const autoOff = await evaluate(`(() => { const box = document.getElementById('tool-auto-save'); if (box.checked) box.click(); return box.checked; })()`);
+  await settle(300);
+  const offBefore = await readAutoPolicy();
+  const offFlip = await evaluate(`(() => {
+    const box = [...document.querySelectorAll('#tool-list input[data-tool]')].find(item => !item.disabled);
+    box.click();
+    return { name: box.dataset.tool, checked: box.checked };
+  })()`);
+  await settle(1800);
+  const offPosts = await evaluate(`window.__apiPosts.slice()`);
+  const offStored = await readAutoPolicy();
+  const offStatus = await evaluate(`document.getElementById('status').textContent`);
+  check('auto-save OFF sends no request and keeps the change out of the stored policy',
+    autoOff === false && offPosts.length === 0 && offStored !== null &&
+      offStored[offFlip.name] === (offBefore ?? {})[offFlip.name] && offStored[offFlip.name] !== offFlip.checked,
+    JSON.stringify({ posts: offPosts, status: offStatus, before: (offBefore ?? {})[offFlip.name], stored: offStored && offStored[offFlip.name] }));
+  await evaluate(`document.getElementById('save-tools').click()`);
+  await settle(2000);
+  const offSaved = await readAutoPolicy();
+  check('保存工具开关 still writes the change after auto-save is off',
+    offSaved !== null && offSaved[offFlip.name] === offFlip.checked,
+    JSON.stringify({ flip: offFlip, stored: offSaved && offSaved[offFlip.name] }));
+  await installKeepaliveRecorder();
+  await evaluate(`(() => { const box = document.getElementById('tool-auto-save'); if (!box.checked) box.click(); })()`);
+  await settle(400);
+  await evaluate(`window.__keepalivePosts = []`);
+  const flushTarget = await evaluate(`(() => {
+    const box = [...document.querySelectorAll('#tool-list input[data-tool]')].find(item => !item.disabled);
+    box.click();
+    window.dispatchEvent(new Event('pagehide'));
+    return { name: box.dataset.tool, checked: box.checked };
+  })()`);
+  await settle(1600);
+  const flushPosts = await evaluate(`window.__keepalivePosts.slice()`);
+  const flushStored = await readAutoPolicy();
+  check('a pending auto-save change is flushed on pagehide with keepalive, exactly once',
+    flushPosts.filter(item => item.action === 'save-mode-tools' || item.action === 'save-session-tools').length === 1 &&
+      flushPosts.every(item => item.keepalive === true) && flushStored !== null && flushStored[flushTarget.name] === flushTarget.checked,
+    JSON.stringify({ target: flushTarget, posts: flushPosts, stored: flushStored && flushStored[flushTarget.name] }));
+  // A second hide/close in the same page lifetime must still flush: the keepalive request
+  // now accepts the revision its own response returned, so the next post is not stale.
+  const flushDrift = await evaluate(`(() => {
+    const box = [...document.querySelectorAll('#tool-list input[data-tool]')].find(item => !item.disabled);
+    window.__keepaliveStatus = null;
+    box.click();
+    try { Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true }); } catch (error) { /* ignore */ }
+    document.dispatchEvent(new Event('visibilitychange'));
+    return { name: box.dataset.tool, checked: box.checked };
+  })()`);
+  await settle(1600);
+  const driftStatus = await evaluate(`window.__keepaliveStatus`);
+  const driftError = await evaluate(`String(window.__keepaliveError || '').slice(0, 160)`);
+  const driftStored = await readAutoPolicy();
+  check('a repeated hide in the same page lifetime still flushes (the flush accepts its own revision)',
+    driftStatus === 200 && driftStored !== null && driftStored[flushDrift.name] === flushDrift.checked,
+    `second flush ${flushDrift.name}=${flushDrift.checked} answered ${driftStatus} ${driftError} stored=${driftStored && driftStored[flushDrift.name]}`);
+  await evaluate(`Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })`);
+  // Reload so the visibilitychange case below starts from a freshly read page revision and
+  // the value the previous flush actually stored.
+  const flushReload = once('Page.loadEventFired');
+  await send('Page.reload', {});
+  await flushReload;
+  await waitReady();
+  await settle(1800);
+  await installKeepaliveRecorder();
+  await evaluate(`window.__keepalivePosts = []`);
+  const visTarget = await evaluate(`(() => {
+    const box = [...document.querySelectorAll('#tool-list input[data-tool]')].find(item => !item.disabled);
+    box.click();
+    try { Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true }); } catch (error) { /* ignore */ }
+    document.dispatchEvent(new Event('visibilitychange'));
+    return { name: box.dataset.tool, checked: box.checked };
+  })()`);
+  await settle(1600);
+  const visPosts = await evaluate(`window.__keepalivePosts.slice()`);
+  const visStored = await readAutoPolicy();
+  check('a pending auto-save change is flushed when the page becomes hidden',
+    visPosts.filter(item => item.action === 'save-mode-tools' || item.action === 'save-session-tools').length === 1 &&
+      visStored !== null && visStored[visTarget.name] === visTarget.checked,
+    JSON.stringify({ target: visTarget, posts: visPosts, stored: visStored && visStored[visTarget.name] }));
+  await evaluate(`Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })`);
+  const restoreReload = once('Page.loadEventFired');
+  await send('Page.reload', {});
+  await restoreReload;
+  await waitReady();
+  await settle(1800);
+  await evaluate(`(() => {
+    const auto = document.getElementById('tool-auto-save');
+    if (auto.checked) auto.click();
+    document.getElementById('select-all-tools').click();
+  })()`);
+  await settle(300);
+  await evaluate(`document.getElementById('save-tools').click()`);
+  await settle(2000);
+  const autoRestored = await readAutoPolicy();
+  check('the auto-save section restores the mode policy to all-enabled',
+    autoRestored !== null && Object.values(autoRestored).every(value => value === true),
+    JSON.stringify(autoRestored));
   // 14. global auto-save: every configuration family persists; preset edits still debounce
   const hasPresetAutoSave = await evaluate(`!!document.getElementById('preset-auto-save')`);
   if (hasPresetAutoSave) {
@@ -709,7 +1016,7 @@ try {
     const globalTargets = await evaluate(`(() => {
       const extraction = document.getElementById('prefix-output-extraction');
       const mode = [...document.querySelectorAll('#auto-mode-list input[data-mode]')].find(box => !box.disabled);
-      const tool = [...document.querySelectorAll('#tool-list input[data-tool]')].find(box => box.checked);
+      const tool = [...document.querySelectorAll('#tool-list input[data-tool]')].find(box => box.checked && !box.disabled);
       extraction.click();
       mode?.click();
       tool?.click();

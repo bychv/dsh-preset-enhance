@@ -774,7 +774,12 @@ function flushToolDraftKeepalive() {
   if (!modeId || (scope === 'session' && !sessionId)) return 0;
   keepaliveFlushedVersion = toolDraftVersion;
   const policy = { ...toolDraft.policy };
-  void api(toolSaveRequest(scope, modeId, policy), { keepalive: true }).catch(() => {});
+  // Keep the revision in sync even though this request is fire-and-forget: without it a
+  // second hide/close in the same page lifetime would post the pre-flush revision and be
+  // rejected as stale.
+  void api(toolSaveRequest(scope, modeId, policy), { keepalive: true })
+    .then(result => { acceptRevision(result); })
+    .catch(() => {});
   return 1;
 }
 // 返回 true 表示没有待处理的自动保存；false 表示自动保存失败且草稿仍处于未保存状态。
