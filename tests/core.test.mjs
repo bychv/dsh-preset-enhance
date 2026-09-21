@@ -413,8 +413,13 @@ test('a preset can remove or retain the DSH system prompt in other modes', async
       state.revision++;
     });
     for await (const _ of ctx.llm.stream(request('on'))) {}
+    // The two leading system messages (the preset's own prompt and the retained DSH
+    // system prompt) are merged into one ordered message. The host's Messages serializer
+    // keeps only the LAST leading system snapshot (protocols/messages/serialize.ts:83-95),
+    // so leaving them split would silently drop the preset prompt on a Messages
+    // connection - and on the chat path reached by rerouting an official Messages request.
     assert.deepEqual(calls[1].messages.map(message => message.content[0].text),
-      ['PRESET', 'DSH SYSTEM', 'DSH RUNTIME', 'hello']);
+      ['PRESET\n\nDSH SYSTEM', 'DSH RUNTIME', 'hello']);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 test('tool catalogs are resolved independently for every built-in and plugin-provided mode', async () => {

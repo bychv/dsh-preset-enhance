@@ -22,10 +22,29 @@ dsh plugin --profile web add github:bychv/dsh-preset-enhance#main
 
 该字段是**声明性的**：DSH 0.1.6-alpha.2 的安装器不读取、也不校验 `engines.dsh`（宿主 `packages/util/package-manifest` 只声明该字段的类型，源码树中没有消费方，其 README 也写明“兼容性是声明性的”）。范围既不会阻止安装，也不会阻止加载，它只描述本插件验证过哪些宿主版本。
 
-### 0.1.6 兼容范围
+### 协议开关（默认对话补全接口）
 
-- **Chat Completions 连接**：完整支持。预填充自动兼容、DSML 工具调用转换、正文流式提取只在连接实际请求 `/chat/completions` 时生效。
-- **Messages 连接（0.1.6 默认协议）**：尚未实现等价支持。新版官方连接默认走 `https://api.deepseek.com/anthropic` 的 `/messages` 协议，本插件不会把该请求改写成 `/chat/completions`，也不会假装预填充已经生效。工作台会显示当前连接的协议与明确原因；在该协议下，预填充、工具调用转换与正文提取**均未生效**，多条前置 system 消息、历史中注入位置与深度注入的等价语义也尚未实现。需要精确保留注入顺序时请使用 Chat Completions 连接。
+工作台里新增“协议设置”，只有两项，默认 **对话补全接口（chat/completions）**：
+
+- **对话补全接口（默认）**：完整兼容。官方 `api.deepseek.com` 的 Messages 请求会被改投到官方 `chat/completions` 端点并做请求/响应翻译（`x-api-key` 转 `Authorization: Bearer`、Anthropic 请求体转 Chat 请求体、Chat SSE 转 Anthropic SSE），与“预填充自动兼容”改投官方 `beta` 地址是同一套机制。**只有官方端点会被改投**，非官方连接保持原样，工作台会明确提示。
+- **Messages 接口（尽量兼容）**：不改投。插件只做尽力预设兼容：前导的多条 system 消息按原顺序合并成一条（宿主 Messages 序列化只保留最后一条 system 快照，不合并就会直接丢掉前面的预设文本），不发送 assistant 预填充标记，并在工作台列出 Messages 线格式无法表达的能力（中途 system 注入、assistant 预填充等）。
+
+**不开启预设则不介入**：当前会话没有启用预设注入时，插件不介入请求——不改投、不翻译、不改写请求体，原样放行；工作台会显示这一点。
+
+无论选择哪一项，插件都会把开头连续的多条 system 消息按原顺序合并成一条：宿主 Messages 序列化只保留最后一条 system 快照（`serialize.ts:83-95` 后一条覆盖前一条），合并后无论宿主最终走哪种协议都不会丢掉预设文本。代价是原生 chat/completions 连接上的消息形态会从多条 system 变为一条（文本与顺序不变），因此这属于保内容、不属丢失，不额外显示为警告。
+
+Messages 线格式仍无法等价表达的部分不会被静默忽略，而是逐条列在工作台里；未实现的能力以文字标注，不计为已生效。
+
+### 本地双协议测试端点
+
+仓库自带一个可独立运行的测试端点，用来观察两种协议的真实行为：
+
+```powershell
+node tests/fixtures/protocol-server.mjs --demo     # 自检两种协议并打印完整帧序列
+node tests/fixtures/protocol-server.mjs            # 监听随机端口，打印 URL 与 curl 示例
+```
+
+它同时提供 `POST /chat/completions`（OpenAI 风格 SSE）与 `POST /messages`（Anthropic 风格 SSE），记录每个收到的请求（路径、请求头、原始 body），并支持按测试脚本定制回复与分包写入。
 
 ### 启动失败与运行时启停
 

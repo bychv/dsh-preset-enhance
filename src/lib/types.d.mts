@@ -198,10 +198,15 @@ export interface SessionCompilation {
   at: string;
   presetId: string;
   result: CompiledPreset;
+  /** Messages-mode adaptation notes for this compilation; absent for chat-completions. */
+  protocolNotes?: string[];
   [key: string]: unknown;
 }
 
 /* ------------------------------------------------------------- state file */
+
+/** Wire protocol the plugin adapts the preset injection to. */
+export type PresetProtocol = 'chat-completions' | 'messages';
 
 export interface PresetState {
   version: number;
@@ -214,6 +219,11 @@ export interface PresetState {
   postToolPrefixMode: 'inherit' | 'custom';
   postToolPrefixText: string;
   prefixNonOfficialRemoveTools: boolean;
+  /**
+   * Which protocol the preset injection is compiled for. Defaults to
+   * chat-completions, where the full compatibility path applies.
+   */
+  protocolMode: PresetProtocol;
   autoEnableModes: string[];
   autoEnableSince: Record<string, number>;
   toolCatalogs: ToolCatalogMap;

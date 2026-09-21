@@ -62,6 +62,13 @@ export interface ProtocolObservation {
   skipped: boolean;
   /** Empty unless `skipped`; the exact reason. */
   skippedReason: string;
+  /**
+   * Set by the fetch bridge when it rerouted this request: the protocol the
+   * caller originally asked for, before the request was switched (chat mode
+   * switches an official Messages request to chat/completions). Absent when the
+   * request went out on the protocol it was built for.
+   */
+  switchedFrom?: LlmProtocol;
 }
 
 /**

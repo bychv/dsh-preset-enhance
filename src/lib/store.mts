@@ -15,6 +15,7 @@ const initialState = (): PresetState => ({
   postToolPrefixMode: 'inherit',
   postToolPrefixText: '',
   prefixNonOfficialRemoveTools: true,
+  protocolMode: 'chat-completions',
   autoEnableModes: ['st-preset'],
   autoEnableSince: { 'st-preset': 0 },
   toolCatalogs: {},
@@ -44,6 +45,9 @@ function normalize(state: PresetState): PresetState {
   state.prefixNonOfficialRemoveTools = state.prefixNonOfficialRemoveTools !== false;
   state.postToolPrefixMode = state.postToolPrefixMode === 'custom' ? 'custom' : 'inherit';
   state.postToolPrefixText = typeof state.postToolPrefixText === 'string' ? state.postToolPrefixText : '';
+  // Absent on every state written before the protocol switch existed: default to the
+  // fully compatible chat-completions path rather than silently choosing Messages.
+  state.protocolMode = state.protocolMode === 'messages' ? 'messages' : 'chat-completions';
   delete state.prefixRelayUrl;
   state.selectedPresetId ??= state.defaultPresetId ?? state.presets[0]?.id ?? null;
   if (!state.presets.some(preset => preset?.id === state.selectedPresetId)) {

@@ -20,6 +20,8 @@ let autoModesDirty = false;
 let autoModesVersion = 0;
 let bindingDirty = false;
 let bindingVersion = 0;
+// 协议开关是全局设置，但不参与任何自动保存：只有点击“保存协议设置”才写入。
+let protocolModeDirty = false;
 
 function blank() {
   return {
@@ -36,6 +38,7 @@ function status(text, error = false) {
   if (prefillSettingsDirty) pending.push('接口设置尚未保存');
   if (autoModesDirty) pending.push('自动启用模式尚未保存');
   if (bindingDirty) pending.push('会话设置尚未应用');
+  if (protocolModeDirty) pending.push('协议设置尚未保存');
   const suffix = !error && pending.length && !text.includes('尚未保存') ? ` · ${pending.join('；')}` : '';
   $('status').textContent = `${text}${suffix}`;
   $('status').className = error ? 'error' : '';
@@ -168,6 +171,8 @@ async function reload(id) {
   $('output-extraction-template').value = state.outputExtractionTemplate ?? '';
   $('post-tool-prefix-mode').value = state.postToolPrefixMode ?? 'inherit';
   $('post-tool-prefix-text').value = state.postToolPrefixText ?? '';
+  // 未保存的协议选择继续保留在控件里，不被刷新静默改回服务端值。
+  if (!protocolModeDirty) $('protocol-mode').value = state.protocolMode === 'messages' ? 'messages' : 'chat-completions';
   syncPrefixToolControls();
   renderAutoModes();
   syncDraftsWithState();
@@ -208,45 +213,118 @@ async function refreshPrefillWarning() {
 }
 
 /**
- * 协议观测来自 GET /preset-enhance/api 的 protocol 字段：没有会话或尚未观测到请求时为 null，
- * 此时不做任何猜测（既不显示成功也不显示失败）。capability.supported === false 且 reason 非空
- * 表示预填充/工具调用兼容路径不会生效；skipped === true 表示这一次会话请求没有走兼容路径，
- * 两者都要显式提示，避免用户以为预设已按当前协议正常工作。
+ * 协议信息全部来自 GET /preset-enhance/api，并复用同一个 #protocol-notice 区域，按严重程度排列：
+ * 1. 当前会话没有编译并应用预设（binding.enabled !== true）时插件完全不介入请求，
+ *    不改投、不翻译、不改写请求体，此时只说明这一点，不暗示协议开关正在生效；
+ * 2. protocolMismatch 非空表示插件在 chat-completions 模式下无法把该连接改投到对话补全接口
+ *    （非官方地址 / 协议未知），兼容路径会静默失效，是唯一需要红色告警的情况；
+ * 3. protocolSwitched === true 是正常的信息：官方 Messages 请求已被切到对话补全接口；
+ * 4. protocolNotes 是 Messages 模式下明确无法保留的能力，按警告列出；
+ * 5. protocol 是最近一次请求的观测结果，没有会话或尚未观测到时为 null，此时不做任何猜测。
  */
+function protocolModeLabel(mode) {
+  return mode === 'messages' ? 'Messages 接口（尽量兼容）' : '对话补全接口（chat/completions）';
+}
+function protocolNoteList(notes) {
+  return Array.isArray(notes) ? notes.filter(note => typeof note === 'string' && note.trim() !== '') : [];
+}
 function renderProtocolNotice() {
   const box = $('protocol-notice');
+  const binding = state.binding ?? {};
+  if (sessionId && binding.enabled !== true) {
+    box.className = 'notice idle';
+    const head = document.createElement('strong');
+    const body = document.createElement('p');
+    head.textContent = '当前会话未启用预设注入：插件不介入请求';
+    body.textContent = '没有编译并应用预设，协议不会改投，请求体与响应也不会被翻译或改写，全部原样放行；' +
+      `${protocolModeLabel(state.protocolMode)}的选择暂不生效。`;
+    box.hidden = false;
+    box.replaceChildren(head, body);
+    return;
+  }
   const observation = state.protocol ?? null;
   const capability = observation?.capability ?? null;
-  if (!observation || !capability) {
+  const mismatch = typeof state.protocolMismatch === 'string' ? state.protocolMismatch.trim() : '';
+  const notes = protocolNoteList(state.protocolNotes);
+  const switched = state.protocolSwitched === true;
+  const parts = [];
+  let severity = '';
+  if (mismatch) {
+    severity = ' unsupported';
+    const head = document.createElement('strong');
+    const body = document.createElement('p');
+    head.textContent = '协议未改投：兼容路径不会生效';
+    body.textContent = `${mismatch}当前选择的是${protocolModeLabel(state.protocolMode)}：只有官方 api.deepseek.com 端点会自动改投，` +
+      '其他连接保持原样放行，预填充续写与工具调用转换不会介入。';
+    parts.push(head, body);
+  }
+  if (switched) {
+    const head = document.createElement('strong');
+    const body = document.createElement('p');
+    head.textContent = '已把官方 Messages 请求切到对话补全接口';
+    body.textContent = '本会话的官方连接收到 Messages 请求时，插件会改投 chat/completions 并翻译请求与响应，' +
+      '预填充续写与工具调用转换按对话补全接口生效。';
+    parts.push(head, body);
+  }
+  if (notes.length) {
+    if (!severity) severity = ' warning';
+    const head = document.createElement('strong');
+    const intro = document.createElement('p');
+    head.textContent = 'Messages 模式无法保留的能力';
+    intro.textContent = 'Messages 接口不改投，仅按尽力而为注入预设；以下内容不会被转换或恢复：';
+    const list = document.createElement('ul');
+    for (const note of notes) {
+      const item = document.createElement('li');
+      item.textContent = note;
+      list.append(item);
+    }
+    parts.push(head, intro, list);
+  } else if (state.protocolMode === 'messages') {
+    // protocolNotes 来自本会话最近一次编译：刚切到 Messages 时它还是上一次的结果，
+    // 这里说明下一次请求才会重新编译，避免把“暂无提示”误读成“没有损失”。
+    if (!severity) severity = ' warning';
+    const head = document.createElement('strong');
+    const body = document.createElement('p');
+    head.textContent = 'Messages 接口：仅尽力注入预设，不改投协议';
+    body.textContent = '下一次请求会按 Messages 接口重新编译并列出无法保留的能力；' +
+      '预填充续写、工具调用转换与正文提取不会应用。';
+    parts.push(head, body);
+  }
+  // 已改投成功时，原始 Messages 观测的“不支持”结论不再代表最终行为，避免自相矛盾。
+  const observationUnsupported = observation?.skipped === true || (capability !== null && capability.supported !== true);
+  if (observation && capability && !(switched && observationUnsupported)) {
+    const label = observation.protocol === 'messages' ? 'Messages' :
+      observation.protocol === 'chat-completions' ? 'Chat Completions' : '未知';
+    const target = label === '未知' ? '当前连接协议' : `${label} 协议`;
+    const where = observation.pathname ? `（${observation.pathname}）` : '';
+    const head = document.createElement('strong');
+    const body = document.createElement('p');
+    if (observation.skipped === true) {
+      // 本次请求已明确没有使用兼容路径：原因来自观测结果，与激活时机无关。
+      severity = ' unsupported';
+      head.textContent = `${target}：本次请求未使用预设兼容路径`;
+      body.textContent = `${observation.skippedReason || '未能确认本次请求可使用兼容处理'}。` +
+        '预填充续写与工具调用转换未应用；如需该能力，请在连接配置中显式选择 chat-completions 协议。';
+    } else if (capability.supported === true) {
+      head.textContent = `${target}：预设兼容路径可用`;
+      body.textContent = `本会话按 ${target} 处理${where}，预填充续写与工具调用转换正常生效。`;
+    } else {
+      severity = ' unsupported';
+      head.textContent = `${target}不支持预设兼容路径`;
+      body.textContent = `${capability.reason || '未能确认该连接支持兼容处理'}。预设注入仍会生效，` +
+        '但预填充续写与工具调用转换不会应用；如需该能力，请在连接配置中显式选择 chat-completions 协议。';
+    }
+    parts.push(head, body);
+  }
+  if (!parts.length) {
     box.hidden = true;
     box.className = 'notice';
     box.replaceChildren();
     return;
   }
-  const label = observation.protocol === 'messages' ? 'Messages' :
-    observation.protocol === 'chat-completions' ? 'Chat Completions' : '未知';
-  const target = label === '未知' ? '当前连接协议' : `${label} 协议`;
-  const where = observation.pathname ? `（${observation.pathname}）` : '';
-  const head = document.createElement('strong');
-  const body = document.createElement('p');
-  if (observation.skipped === true) {
-    // 本次请求已明确没有使用兼容路径：原因来自观测结果，与激活时机无关。
-    box.className = 'notice unsupported';
-    head.textContent = `${target}：本次请求未使用预设兼容路径`;
-    body.textContent = `${observation.skippedReason || '未能确认本次请求可使用兼容处理'}。` +
-      '预填充续写与工具调用转换未应用；如需该能力，请在连接配置中显式选择 chat-completions 协议。';
-  } else if (capability.supported === true) {
-    box.className = 'notice';
-    head.textContent = `${target}：预设兼容路径可用`;
-    body.textContent = `本会话按 ${target} 处理${where}，预填充续写与工具调用转换正常生效。`;
-  } else {
-    box.className = 'notice unsupported';
-    head.textContent = `${target}不支持预设兼容路径`;
-    body.textContent = `${capability.reason || '未能确认该连接支持兼容处理'}。预设注入仍会生效，` +
-      '但预填充续写与工具调用转换不会应用；如需该能力，请在连接配置中显式选择 chat-completions 协议。';
-  }
+  box.className = `notice${severity}`;
   box.hidden = false;
-  box.replaceChildren(head, body);
+  box.replaceChildren(...parts);
 }
 
 function renderAutoModes() {
@@ -520,6 +598,14 @@ function markPrefillSettingsDirty() {
   prefillSettingsVersion++;
   status('预填充接口设置尚未保存');
   scheduleGlobalConfigAutoSave();
+}
+/**
+ * 协议开关会改变线上行为（改投官方 Messages 请求），因此刻意不挂 scheduleGlobalConfigAutoSave：
+ * 未保存的选择只提示，必须显式点击“保存协议设置”才写入。
+ */
+function markProtocolModeDirty() {
+  protocolModeDirty = true;
+  status('协议设置尚未保存');
 }
 function markAutoModesDirty() {
   autoModesDirty = true;
@@ -1547,6 +1633,17 @@ $('post-tool-prefix-mode').onchange = () => {
 };
 $('post-tool-prefix-text').oninput = markPrefillSettingsDirty;
 $('deepseek-beta-prefix').onchange = markPrefillSettingsDirty;
+// 协议开关只改选择状态：不写服务端、不触发任何自动保存，也不会丢弃未保存的工具开关/分组草稿。
+$('protocol-mode').onchange = markProtocolModeDirty;
+$('save-protocol-mode').onclick = guard(async () => {
+  if (!(await presetDraftReady())) return;
+  const mode = $('protocol-mode').value === 'messages' ? 'messages' : 'chat-completions';
+  const result = await configWrite({ action: 'save-protocol-mode', mode });
+  acceptRevision(result);
+  protocolModeDirty = false;
+  await reload(selectedId);
+  status(`协议设置已保存：${protocolModeLabel(mode)}，下一次请求生效`);
+});
 $('prefix-tool-calls').onchange = () => {
   syncPrefixToolControls();
   markPrefillSettingsDirty();

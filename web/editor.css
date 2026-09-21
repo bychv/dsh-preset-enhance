@@ -33,3 +33,5 @@
 @media(max-width:760px){.group-actions{margin-left:0}}
 .tool-auto-save{margin:8px 0}
 .tool-auto-save-hint{display:block;letter-spacing:0;color:#8da2ae;font-size:11px;line-height:1.5;margin-top:2px}
+.protocol-setting{margin-top:12px;gap:10px;align-items:flex-end}.protocol-setting select{max-width:440px}.protocol-setting #protocol-mode-hint{flex:1 1 320px;max-width:660px;margin:0}
+#protocol-notice.idle{border-color:#2a3942;background:#131d24;color:#8da2ae}#protocol-notice.idle strong{color:#b9d9d2}#protocol-notice.warning{border-color:#665535;background:#251f16}#protocol-notice ul{margin:5px 0;padding-left:20px}#protocol-notice li{margin:2px 0}

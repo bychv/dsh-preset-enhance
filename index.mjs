@@ -7,6 +7,7 @@ import { compilePreset, validatePreset, getOrder, dshSystemPromptEnabled } from 
 import { decodePresetDocument, encodePresetPackage, attachPrefillSettings, applyPackagePrefill } from './lib/preset-package.mjs';
 import { installDeepSeekBetaBridge } from './lib/deepseek-beta.mjs';
 import { createProtocolObserver } from './lib/protocol.mjs';
+import { adaptPresetForMessages } from './lib/messages.mjs';
 import { clearPresetEnhanceUnavailableReason, markPresetEnhanceActive, setPresetEnhanceUnavailableReason, } from './lib/availability.mjs';
 import { OUTPUT_EXTRACTION_PROMPT_TEMPLATE } from './lib/output-extractor.mjs';
 import { normalizeToolGroups, normalizeToolPreset, normalizeToolSelection, assertPresetGroupIds, toolPolicySnapshot, effectiveToolEnabled, effectiveToolPolicy, remapToolPackage, presetReferenceCounts, unresolvedToolRefs, resetPresetSelections, exportToolsSection, TOOL_PRESET_LIMIT, } from './lib/tool-presets.mjs';
@@ -245,17 +246,36 @@ export async function apply(ctx, config = {}) {
                     ? presetModeHistory(history) : history;
                 const postToolPrefix = current.deepseekBetaPrefix && current.postToolPrefixMode === 'custom'
                     ? current.postToolPrefixText : undefined;
-                const key = digest({ compiler: PRESET_COMPILER_VERSION, messages: presetHistory, preset: record, binding, postToolPrefix });
+                const key = digest({ compiler: PRESET_COMPILER_VERSION, messages: presetHistory, preset: record, binding, postToolPrefix, protocol: current.protocolMode });
                 const prior = ownGet(current.sessions, sessionId);
                 if (prior?.key === key)
                     return prior.result;
-                const result = compilePreset(record.preset, presetHistory, {
+                const compiledResult = compilePreset(record.preset, presetHistory, {
                     ...binding, seed: key, local: prior?.result.local, global: current.global, postToolPrefix,
                 });
                 options.signal?.throwIfAborted();
+                // The host serializes the request with whichever protocol its connection uses, and
+                // its Messages serializer keeps only the LAST leading system snapshot
+                // (protocols/messages/serialize.ts:83-95: \`historySystem = text\` overwrites). Leading
+                // preset system prompts are therefore merged into one ordered message in BOTH modes:
+                // it is a no-op for a chat connection and for a preset with fewer than two leading
+                // system prompts, and it is the only thing that keeps every preset prompt alive when
+                // the chat path is reached by rerouting an official Messages request, because that
+                // collapse already happened before the fetch bridge could reroute anything.
+                const adapted = adaptPresetForMessages(compiledResult.messages);
+                const messagesMode = current.protocolMode === 'messages';
+                const result = messagesMode ? {
+                    ...compiledResult,
+                    messages: adapted.messages,
+                    // No prefix flag exists on the Messages wire format: never claim one.
+                    assistantPrefix: { active: false },
+                } : { ...compiledResult, messages: adapted.messages };
                 current.global = result.global;
                 assign(current.sessions, sessionId, {
                     key, at: new Date().toISOString(), presetId: record.id, result,
+                    // Notes describe what the Messages wire format cannot express; they are only
+                    // meaningful for the mode that targets it.
+                    ...(messagesMode ? { protocolNotes: adapted.notes } : {}),
                 });
                 return result;
             }));
@@ -270,8 +290,18 @@ export async function apply(ctx, config = {}) {
             return;
         }
         const request = routedRequest(options, messages, filteredTools);
-        const betaPrefix = initial.deepseekBetaPrefix === true && compiled?.assistantPrefix?.active === true;
-        const releaseBeta = betaPrefix ? deepSeekBeta.activate(sessionId, messageText(messages.at(-1)), {
+        // The compatibility bridge is chat-completions only: under the Messages mode it
+        // must never arm, so an unadapted prefix is never sent.
+        const betaPrefix = initial.protocolMode !== 'messages' &&
+            initial.deepseekBetaPrefix === true && compiled?.assistantPrefix?.active === true;
+        // Arm the fetch bridge only when this request actually carries an injected preset:
+        // with no preset the plugin must not intervene at all (no reroute, no translation).
+        // The content key arms the assistant-prefix path, so it is only the plugin's own
+        // trailing prefill; an empty key can never match a real assistant message and keeps
+        // the bridge to the reroute/translation role for ordinary injected requests.
+        const prefixKey = betaPrefix ? messageText(messages.at(-1)) : '';
+        const releaseBeta = compiled !== null ? deepSeekBeta.activate(sessionId, prefixKey, {
+            mode: initial.protocolMode === 'messages' ? 'messages' : 'chat-completions',
             toolCalls: initial.prefixToolCalls === true,
             removeNonOfficialTools: initial.prefixNonOfficialRemoveTools !== false,
             extractOutput: initial.prefixOutputExtraction === true,
@@ -369,6 +399,10 @@ export async function apply(ctx, config = {}) {
                         // session id the panel has nothing to report and must not fall back to another
                         // session's (or a session-less) observation.
                         protocol: sessionId ? protocolObserver.last(sessionId) ?? null : null,
+                        protocolMode: state.protocolMode,
+                        protocolNotes: ownGet(state.sessions, sessionId)?.protocolNotes ?? [],
+                        protocolSwitched: Boolean(sessionId && protocolObserver.last(sessionId)?.switchedFrom),
+                        protocolMismatch: presetProtocolMismatch(state, sessionId, session, protocolObserver),
                     });
                 }
                 if (req.method !== 'POST')
@@ -678,6 +712,14 @@ export async function apply(ctx, config = {}) {
                             removeNonOfficialTools: state.prefixNonOfficialRemoveTools !== false,
                         };
                     }
+                    if (body.action === 'save-protocol-mode') {
+                        const mode = body.mode;
+                        if (mode !== 'chat-completions' && mode !== 'messages')
+                            throw new Error('协议模式无效');
+                        state.protocolMode = mode;
+                        state.revision++;
+                        return { mode };
+                    }
                     if (body.action === 'save-auto-modes') {
                         if (!Array.isArray(body.modes) || body.modes.some(id => typeof id !== 'string' || !knownModes.has(id))) {
                             throw new Error('自动启用模式列表包含未知模式');
@@ -785,6 +827,32 @@ function presetCommand(store) {
             });
         },
     };
+}
+/**
+ * Explain the one case where the selected protocol mode cannot be honoured.
+ *
+ * Chat mode asks the fetch bridge to switch an official Messages request to
+ * chat/completions. If that cannot happen (the endpoint is not the official one,
+ * or nothing has been observed yet) the compatibility path silently does not
+ * apply, which the user has to see. A request the plugin never armed for — no
+ * preset injected — is reported as null: the plugin intervenes not at all.
+ */
+function presetProtocolMismatch(state, sessionId, session, observer) {
+    if (state.protocolMode === 'messages')
+        return null;
+    const binding = ownGet(state.bindings, sessionId);
+    const enabled = binding?.enabled ??
+        (session ? shouldAutoEnable(state, session) && !!defaultRecord(state) : false);
+    if (!enabled)
+        return null;
+    const observed = observer.last(sessionId);
+    if (!observed)
+        return null;
+    if (observed.protocol === 'messages' && !observed.switchedFrom) {
+        return '当前连接走 Messages 协议，插件未能把它切到对话补全接口（仅官方 api.deepseek.com 端点会自动切换）：'
+            + '预填充、工具调用转换与正文提取不会生效。';
+    }
+    return null;
 }
 function defaultRecord(state) {
     return state.presets.find(p => p.id === state.selectedPresetId) ??

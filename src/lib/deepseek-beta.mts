@@ -1,7 +1,8 @@
 import { emulateToolCallRequest, transformToolCallResponse } from './toolcall-prefill.mjs';
 import type { JsonObject, ResponseTransformMetadata } from './toolcall-prefill.mjs';
-import { classifyProtocolPath, detectProtocol, observeProtocolRequest } from './protocol.mjs';
+import { classifyProtocolPath, detectProtocol, observeProtocolRequest, protocolCapability } from './protocol.mjs';
 import type { LlmProtocol, ProtocolObservation, ProtocolObserver } from './protocol.mjs';
+import { messagesRequestHeadersToChat, messagesRequestToChat, translateChatResponse } from './messages-translate.mjs';
 import type { PluginContext } from '../host-types.mjs';
 
 export const DEEPSEEK_OFFICIAL_PROVIDER = 'deepseek-official';
@@ -15,12 +16,17 @@ type RequestInitLike = NonNullable<FetchInit>;
 type FetchResponse = Awaited<ReturnType<typeof fetch>>;
 type FetchLike = (input: FetchInput, init?: FetchInit) => Promise<FetchResponse>;
 
+/** Wire protocol a preset injection was compiled for. */
+export type BridgeProtocolMode = 'chat-completions' | 'messages';
+
 /** Activation bookkeeping for one session/text pair. */
 interface ActivationEntry {
   count: number;
   toolCalls: boolean;
   removeNonOfficialTools: boolean;
   extractOutput: boolean;
+  /** Protocol this activation was armed for; 'messages' never switches endpoints. */
+  mode: BridgeProtocolMode;
 }
 
 /** Legacy registries store a plain count; newer ones store an activation object. */
@@ -46,9 +52,43 @@ function officialBetaUrl(url: URL | null): string | null {
   return beta.toString();
 }
 
+/** Official chat/completions endpoint of the same host as the Messages root. */
+export const DEEPSEEK_OFFICIAL_CHAT_URL = 'https://api.deepseek.com/chat/completions';
+
+/**
+ * True only for the official DeepSeek Messages endpoint. Adapter and gateway
+ * endpoints are never switched, however the request was compiled.
+ */
+function officialMessagesUrl(url: URL | null): boolean {
+  if (!url || url.protocol !== 'https:' || url.hostname !== 'api.deepseek.com' || url.port) return false;
+  return classifyProtocolPath(url.pathname) === 'messages';
+}
+
 function entryCount(entry: BridgeRegistryEntry | null | undefined): number {
   if (typeof entry === 'number') return entry;
   return entry && typeof entry === 'object' && typeof entry.count === 'number' ? entry.count : 0;
+}
+
+/**
+ * Legacy registries (plain counts and objects without a mode) predate the
+ * protocol switch and always mean 'messages': only an activation explicitly
+ * armed for chat mode may reroute an official Messages request.
+ */
+function entryMode(entry: BridgeRegistryEntry | null | undefined): BridgeProtocolMode {
+  return typeof entry === 'object' && entry !== null && entry.mode === 'chat-completions'
+    ? 'chat-completions' : 'messages';
+}
+
+/** True when this session has at least one activation explicitly armed for chat mode. */
+function sessionArmedForChat(registries: readonly SessionRegistry[], sessionId: string): boolean {
+  for (const registry of registries) {
+    const texts = registry.get(sessionId);
+    if (!texts) continue;
+    for (const entry of texts.values()) {
+      if (entryCount(entry) > 0 && entryMode(entry) === 'chat-completions') return true;
+    }
+  }
+  return false;
 }
 
 function sessionActive(registries: readonly SessionRegistry[], sessionId: string | null): boolean {
@@ -120,12 +160,18 @@ export interface DeepSeekPrefixRewrite {
   input: FetchInput;
   init: RequestInitLike;
   changed: boolean;
-  mode: 'none' | 'official' | 'adapter';
-  /** Protocol actually used by this request (URL path, with a header fallback). */
+  mode: 'none' | 'official' | 'adapter' | 'switch';
+  /** Protocol this rewrite made the request use on the wire. */
   protocol: LlmProtocol;
   /** Set when a session request cannot use the chat-completions compatibility path. */
   skipped?: DeepSeekSkippedReason;
   responseTransform?: ResponseTransformMetadata;
+  /** Original protocol when the request was switched; absent otherwise. */
+  switchedFrom?: LlmProtocol;
+  /** Response body must be translated back to this protocol. */
+  translateResponseTo?: 'messages';
+  /** Model of the translated upstream request, for the translated message_start. */
+  upstreamModel?: string;
 }
 
 /**
@@ -134,8 +180,10 @@ export interface DeepSeekPrefixRewrite {
  * handling is enabled, both destinations emulate tools and convert the response back to
  * standard tool calls.
  *
- * DSH 0.1.6 defaults the official connection to the Messages protocol; such a request is
- * never rewritten and is reported through `protocol`/`skipped` instead of silently
+ * DSH 0.1.6 defaults the official connection to the Messages protocol. In chat mode the
+ * official Messages endpoint is switched to the official chat/completions endpoint and
+ * translated both directions; a session with no chat-mode activation, a non-official
+ * host, or messages mode is reported through `protocol`/`skipped` instead of silently
  * pretending the compatibility path applied.
  */
 export function rewriteDeepSeekPrefixFetch(
@@ -146,11 +194,20 @@ export function rewriteDeepSeekPrefixFetch(
     input, init, changed: false, mode: 'none', protocol: detected.protocol,
   };
   const url = parsedUrl(input);
-  if (!url || classifyProtocolPath(url.pathname) !== 'chat-completions') {
-    // Chat Completions is the only protocol this path supports. Report every classified
-    // non-chat-completions LLM request that carries a session, plus an unknown endpoint
-    // that still holds an armed activation, so the workbench sees an explicit unsupported
-    // state instead of silence (the panel must never have to guess from activation timing).
+  const pathProtocol = url ? classifyProtocolPath(url.pathname) : 'unknown';
+  if (pathProtocol === 'messages' && url) {
+    // Chat mode switches the OFFICIAL Messages endpoint to the official
+    // chat/completions endpoint and translates both directions. Everything
+    // else (non-official host, no armed chat-mode activation, unparseable
+    // body) stays untouched and is reported exactly like before.
+    const switched = switchOfficialMessagesRequest(input, init, url, detected, registries);
+    if (switched) return switched;
+  }
+  if (pathProtocol !== 'chat-completions') {
+    // Report every classified non-chat-completions LLM request that carries a
+    // session, plus an unknown endpoint that still holds an armed activation,
+    // so the workbench sees an explicit unsupported state instead of silence
+    // (the panel must never have to guess from activation timing).
     const reportable = detected.sessionId !== null &&
       (detected.protocol !== 'unknown' || sessionActive(registries, detected.sessionId));
     return reportable
@@ -207,6 +264,88 @@ function bodyText(body: unknown): string | null {
   return null;
 }
 
+function jsonBody(init: RequestInitLike): JsonObject | null {
+  const raw = bodyText(init.body);
+  if (raw == null) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as JsonObject : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Switch one official Messages request to the official chat/completions
+ * endpoint. Fires only when the session has an activation explicitly armed for
+ * chat mode, so a session whose preset was never injected is never touched.
+ *
+ * The activation content key keeps its prefill meaning: an exact match on the
+ * translated trailing assistant message turns on 'prefix' (and sends the
+ * request to the beta endpoint that supports it). Without a match the request
+ * is still switched and translated, using the session's aggregated activation
+ * options.
+ */
+function switchOfficialMessagesRequest(
+  input: FetchInput, init: RequestInitLike, url: URL, detected: ProtocolObservation,
+  registries: readonly SessionRegistry[],
+): DeepSeekPrefixRewrite | null {
+  const sessionId = detected.sessionId;
+  if (!sessionId || !officialMessagesUrl(url)) return null;
+  if (!sessionArmedForChat(registries, sessionId)) return null;
+  const body = jsonBody(init);
+  if (!body || !Array.isArray(body.messages)) return null;
+  const translated = messagesRequestToChat(body);
+  const chat = translated.body;
+  const messages = Array.isArray(chat.messages) ? [...chat.messages] : [];
+  const last = messages.at(-1);
+  const key = typeof last?.content === 'string' ? last.content : '';
+  const matched = key.length > 0 ? activeEntry(registries, sessionId, key) : null;
+  // Native prefix continuation, DSML tool emulation and body extraction apply
+  // only to the plugin's own trailing assistant prefill, exactly as on the
+  // chat/completions path. An ordinary injected request whose preset has no
+  // prefill is rerouted and translated only, so native tools keep working.
+  const entry = matched && entryMode(matched) === 'chat-completions' && last?.role === 'assistant' ? matched : null;
+  let finalBody: JsonObject = { ...chat, messages };
+  let responseTransform: ResponseTransformMetadata | undefined;
+  if (entry) {
+    messages[messages.length - 1] = { ...last, prefix: true };
+    const prefixed: JsonObject = { ...chat, messages };
+    const emulation = entryHandlesToolCalls(entry) && Array.isArray(prefixed.tools) && prefixed.tools.length > 0
+      ? emulateToolCallRequest(prefixed) : null;
+    const extractOutput = entryExtractsOutput(entry);
+    // The official destination always drops native tool fields, mirroring the
+    // existing official chat/completions rewrite.
+    const { tools: _tools, tool_choice: _toolChoice, parallel_tool_calls: _parallelToolCalls, ...rest } = emulation?.body ?? prefixed;
+    finalBody = rest;
+    if (emulation || extractOutput) {
+      responseTransform = {
+        contentPrefix: emulation?.contentPrefix ?? '',
+        reasoningPrefix: emulation?.reasoningPrefix ?? '',
+        ...(extractOutput ? { extractOutput: true } : {}),
+      };
+    }
+  }
+  // Prefix completion and DSML emulation need the beta endpoint, exactly like
+  // the pre-existing official chat rewrite; a plain protocol switch uses the
+  // general chat/completions endpoint.
+  const target = entry ? new URL(DEEPSEEK_BETA_BASE_URL + '/chat/completions')
+    : new URL(DEEPSEEK_OFFICIAL_CHAT_URL);
+  target.search = url.search;
+  const upstreamModel = typeof finalBody.model === 'string' ? finalBody.model : undefined;
+  return {
+    input: target.toString(),
+    init: { ...init, headers: messagesRequestHeadersToChat(init.headers), body: JSON.stringify(finalBody) },
+    changed: true,
+    mode: 'switch',
+    protocol: 'chat-completions',
+    switchedFrom: 'messages',
+    translateResponseTo: 'messages',
+    ...upstreamModel === undefined ? {} : { upstreamModel },
+    ...responseTransform === undefined ? {} : { responseTransform },
+  };
+}
+
 /* ------------------------------------------------------- global fetch bridge */
 
 interface BridgeHost {
@@ -247,10 +386,31 @@ function createWrapper(host: BridgeHost): FetchLike {
       for (const { observer, observation } of seen) {
         observer.record({ ...observation, skipped: true, skippedReason: rewritten.skipped.reason });
       }
+    } else {
+      const switchedFrom = rewritten.switchedFrom;
+      if (switchedFrom) {
+        // The workbench reports what really went on the wire: the effective
+        // protocol plus the one the caller originally asked for.
+        for (const { observer, observation } of seen) {
+          const routed: ProtocolObservation & { switchedFrom: LlmProtocol } = {
+            ...observation,
+            protocol: 'chat-completions',
+            capability: protocolCapability('chat-completions'),
+            switchedFrom,
+          };
+          observer.record(routed);
+        }
+      }
     }
     const response = await Reflect.apply(host.original, this, [rewritten.input, rewritten.init]) as FetchResponse;
-    return rewritten.responseTransform ?
+    let out = rewritten.responseTransform ?
       await transformToolCallResponse(response, rewritten.responseTransform) : response;
+    if (rewritten.translateResponseTo === 'messages') {
+      // Only a response this bridge actually rewrote is translated back.
+      out = await translateChatResponse(out,
+        rewritten.upstreamModel === undefined ? {} : { model: rewritten.upstreamModel });
+    }
+    return out;
   };
 }
 
@@ -296,6 +456,12 @@ export interface DeepSeekBetaActivationOptions {
   toolCalls?: boolean;
   removeNonOfficialTools?: boolean;
   extractOutput?: boolean;
+  /**
+   * Protocol the injected preset was compiled for. Defaults to 'messages', so
+   * an activation that does not state a mode never switches an official
+   * Messages request to chat/completions.
+   */
+  mode?: BridgeProtocolMode;
 }
 
 export interface DeepSeekBetaBridgeOptions {
@@ -381,6 +547,7 @@ export function installDeepSeekBetaBridge(
       toolCalls: entry.toolCalls === true,
       removeNonOfficialTools: entry.removeNonOfficialTools !== false,
       extractOutput: entry.extractOutput === true,
+      mode: entryMode(entry),
     });
     if (texts.size === 0) registry.delete(sessionId);
     if (disposed && activations === 0) {
@@ -401,6 +568,7 @@ export function installDeepSeekBetaBridge(
         toolCalls: activationOptions.toolCalls === true,
         removeNonOfficialTools: activationOptions.removeNonOfficialTools !== false,
         extractOutput: activationOptions.extractOutput === true,
+        mode: activationOptions.mode === 'chat-completions' ? 'chat-completions' : 'messages',
       });
       activations += 1;
       let active = true;
