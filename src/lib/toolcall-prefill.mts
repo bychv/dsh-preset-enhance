@@ -48,19 +48,48 @@ export const DSML_CALLS_CLOSE = '</' + D + ' calls>';
 export const TOOL_CALLS_OPEN = '<tool_calls>';
 export const TOOL_CALLS_CLOSE = '</tool_calls>';
 
-// DeepSeek emits several DSML dialects in practice. Keep this deliberately
-// narrower than generic XML: every recovered invoke/parameter must carry a
-// DSML prefix, while wrapper spelling, whitespace and pipe width may drift.
-const DSML_PREFIX_SOURCE = '(?:[｜|]\\s*)+DSML\\s*(?:[｜|]\\s*)+';
-const DSML_WRAPPER_SOURCE = '(?:calls|tool(?:\\s*_?\\s*calls?)?|function\\s*_?\\s*calls?)';
-const DSML_BEGIN_RE = new RegExp('\\\\?<\\s*' + DSML_PREFIX_SOURCE + DSML_WRAPPER_SOURCE + '\\s*>', 'iu');
-const TOOL_CALLS_BEGIN_RE = /\\?<\s*tool\s*_?\s*calls?\s*>/iu;
-const DSML_INVOKE_OPEN_RE = new RegExp('<\\s*' + DSML_PREFIX_SOURCE + 'invoke\\s*([^>]*)>', 'giu');
-const DSML_INVOKE_CLOSE_RE = new RegExp('<\\/\\s*' + DSML_PREFIX_SOURCE + 'invoke\\s*>', 'iu');
-const DSML_WRAPPER_CLOSE_RE = new RegExp('<\\/\\s*' + DSML_PREFIX_SOURCE + DSML_WRAPPER_SOURCE + '\\s*>', 'iu');
-const TOOL_CALLS_CLOSE_RE = /<\/\s*tool\s*_?\s*calls?\s*>/iu;
-const DSML_PARAM_OPEN_RE = new RegExp('<\\s*' + DSML_PREFIX_SOURCE + 'parameter\\s*([^>]*)>', 'giu');
-const DSML_PARAM_CLOSE_RE = new RegExp('<\\/\\s*' + DSML_PREFIX_SOURCE + 'parameter\\s*>', 'iu');
+// DeepSeek emits several DSML dialects in practice. Keep this deliberately narrower than
+// generic XML: a recovered invoke/parameter must look like a marker - either the DSML
+// literal between pipes, or a pipe-prefixed tag inside the official template envelope.
+// Wrapper spelling, padding and pipe width may drift, including the U+2581 separator and
+// the zero-width characters models sometimes insert. Every character class below is built
+// from char codes so no escape sequence can be lost when this block is edited by tooling.
+const PAD_CHARS = String.fromCharCode(32, 9, 13, 10, 12, 11, 0x200B, 0x200C, 0x200D, 0xFEFF, 0x2581);
+const SEP_CHARS = PAD_CHARS + String.fromCharCode(0x5F);
+const PAD_SOURCE = '[' + PAD_CHARS + ']*';
+const SEP_SOURCE = '[' + SEP_CHARS + ']+';
+const PIPE_SOURCE = '(?:[｜|]' + PAD_SOURCE + ')+';
+const DSML_PREFIX_SOURCE = PIPE_SOURCE + 'DSML' + PAD_SOURCE + PIPE_SOURCE;
+const DSML_WRAPPER_SOURCE = '(?:calls|tool(?:' + PAD_SOURCE + '_?' + PAD_SOURCE + 'calls?)?|function' + PAD_SOURCE + '_?' + PAD_SOURCE + 'calls?)';
+const OPTIONAL_BACKSLASH = String.fromCharCode(92, 92) + '?';
+const OPTIONAL_SLASH = String.fromCharCode(47) + '?';
+const DSML_BEGIN_RE = new RegExp(OPTIONAL_BACKSLASH + '<' + PAD_SOURCE + DSML_PREFIX_SOURCE + DSML_WRAPPER_SOURCE + PAD_SOURCE + '>', 'iu');
+const TOOL_CALLS_BEGIN_RE = new RegExp(OPTIONAL_BACKSLASH + '<' + PAD_SOURCE + 'tool' + PAD_SOURCE + '_?' + PAD_SOURCE + 'calls?' + PAD_SOURCE + '>', 'iu');
+const DSML_INVOKE_OPEN_RE = new RegExp('<' + PAD_SOURCE + DSML_PREFIX_SOURCE + 'invoke' + PAD_SOURCE + '([^>]*)>', 'giu');
+const DSML_INVOKE_CLOSE_RE = new RegExp('</' + PAD_SOURCE + DSML_PREFIX_SOURCE + 'invoke' + PAD_SOURCE + '>', 'iu');
+const DSML_WRAPPER_CLOSE_RE = new RegExp('</' + PAD_SOURCE + DSML_PREFIX_SOURCE + DSML_WRAPPER_SOURCE + PAD_SOURCE + '>', 'iu');
+const TOOL_CALLS_CLOSE_RE = new RegExp('</' + PAD_SOURCE + 'tool' + PAD_SOURCE + '_?' + PAD_SOURCE + 'calls?' + PAD_SOURCE + '>', 'iu');
+const DSML_PARAM_OPEN_RE = new RegExp('<' + PAD_SOURCE + DSML_PREFIX_SOURCE + 'parameter' + PAD_SOURCE + '([^>]*)>', 'giu');
+const DSML_PARAM_CLOSE_RE = new RegExp('</' + PAD_SOURCE + DSML_PREFIX_SOURCE + 'parameter' + PAD_SOURCE + '>', 'iu');
+const ZERO_WIDTH_RE = new RegExp('[' + String.fromCharCode(0x200B, 0x200C, 0x200D, 0xFEFF) + ']', 'gu');
+// A leading backslash before a marker is an escaping artefact some models emit.
+const ESCAPED_MARKER_RE = new RegExp(
+  String.fromCharCode(92, 92) + "(?=<" + PAD_SOURCE + OPTIONAL_SLASH + PAD_SOURCE +
+  "(?:tool" + PAD_SOURCE + "_?" + PAD_SOURCE + "calls?|(?:invoke|parameter)|" + PIPE_SOURCE + "(?:DSML|invoke|parameter)" + PAD_SOURCE + "))",
+  "giu",
+);
+
+// Official DeepSeek chat-template envelope: a tool-calls begin marker, pipe-prefixed
+// invoke/parameter tags (no DSML literal), then the matching end marker. Support is gated
+// on that explicit begin marker, so a bare pipe-prefixed invoke elsewhere in the text still
+// never becomes a tool call.
+const officialMarker = (word: string): string => PIPE_SOURCE + 'tool' + SEP_SOURCE + 'calls' + SEP_SOURCE + word + PAD_SOURCE + PIPE_SOURCE;
+const OFFICIAL_BEGIN_RE = new RegExp('<' + PAD_SOURCE + officialMarker('begin') + PAD_SOURCE + '>', 'iu');
+const OFFICIAL_END_RE = new RegExp('<' + PAD_SOURCE + OPTIONAL_SLASH + officialMarker('end') + PAD_SOURCE + '>', 'iu');
+const OFFICIAL_INVOKE_OPEN_RE = new RegExp('<' + PAD_SOURCE + '(?:' + DSML_PREFIX_SOURCE + '|' + PIPE_SOURCE + ')invoke' + PAD_SOURCE + '([^>]*)>', 'giu');
+const OFFICIAL_INVOKE_CLOSE_RE = new RegExp('<' + PAD_SOURCE + '(?:' + PIPE_SOURCE + ')?' + PAD_SOURCE + '/' + PAD_SOURCE + '(?:' + DSML_PREFIX_SOURCE + '|' + PIPE_SOURCE + ')?invoke' + PAD_SOURCE + '(?:' + PIPE_SOURCE + ')?' + PAD_SOURCE + '>', 'iu');
+const OFFICIAL_PARAM_OPEN_RE = new RegExp('<' + PAD_SOURCE + '(?:' + DSML_PREFIX_SOURCE + '|' + PIPE_SOURCE + ')parameter' + PAD_SOURCE + '([^>]*)>', 'giu');
+const OFFICIAL_PARAM_CLOSE_RE = new RegExp('<' + PAD_SOURCE + '(?:' + PIPE_SOURCE + ')?' + PAD_SOURCE + '/' + PAD_SOURCE + '(?:' + DSML_PREFIX_SOURCE + '|' + PIPE_SOURCE + ')?parameter' + PAD_SOURCE + '(?:' + PIPE_SOURCE + ')?' + PAD_SOURCE + '>', 'iu');
 const DATA_URI_RE = /data:(image\/[\w.+-]+);base64,[A-Za-z0-9+/=]{100,}/gu;
 const B64_BODY_RE = /^[A-Za-z0-9+/=\s]{200,}$/u;
 const B64_MAGIC = new Map([
@@ -278,55 +307,80 @@ export function emulateToolCallRequest(body: JsonObject): { body: JsonObject; co
   return { body: request, contentPrefix, reasoningPrefix };
 }
 
-export function parseDsmlCalls(segment: string): ParsedToolCall[] {
-  segment = normalizeDsmlText(segment);
+/** One family of invoke/parameter markers: the DSML dialect or the official envelope. */
+interface InvokePatterns {
+  invokeOpen: RegExp;
+  invokeClose: RegExp;
+  wrapperCloses: readonly RegExp[];
+  paramOpen: RegExp;
+  paramClose: RegExp;
+}
+
+const DSML_PATTERNS: InvokePatterns = {
+  invokeOpen: DSML_INVOKE_OPEN_RE,
+  invokeClose: DSML_INVOKE_CLOSE_RE,
+  wrapperCloses: [DSML_WRAPPER_CLOSE_RE, TOOL_CALLS_CLOSE_RE],
+  paramOpen: DSML_PARAM_OPEN_RE,
+  paramClose: DSML_PARAM_CLOSE_RE,
+};
+
+const OFFICIAL_PATTERNS: InvokePatterns = {
+  invokeOpen: OFFICIAL_INVOKE_OPEN_RE,
+  invokeClose: OFFICIAL_INVOKE_CLOSE_RE,
+  wrapperCloses: [OFFICIAL_END_RE],
+  paramOpen: OFFICIAL_PARAM_OPEN_RE,
+  paramClose: OFFICIAL_PARAM_CLOSE_RE,
+};
+
+/**
+ * Shared invoke/parameter walker. Both families must prove the call is complete before it is
+ * recovered: a closing invoke, a following invoke or a closing wrapper has to terminate the
+ * body, otherwise the orphan (a truncated stream) is dropped instead of executed.
+ */
+function parseInvokeCalls(segment: string, patterns: InvokePatterns): ParsedToolCall[] {
   const calls: ParsedToolCall[] = [];
-  DSML_INVOKE_OPEN_RE.lastIndex = 0;
-  const invokes = [...segment.matchAll(DSML_INVOKE_OPEN_RE)];
+  patterns.invokeOpen.lastIndex = 0;
+  const invokes = [...segment.matchAll(patterns.invokeOpen)];
   for (let index = 0; index < invokes.length; index += 1) {
     const match = invokes[index];
     const bodyStart = match.index + match[0].length;
     const nextInvoke = invokes[index + 1]?.index ?? Number.POSITIVE_INFINITY;
-    const invokeClose = matchAfter(DSML_INVOKE_CLOSE_RE, segment, bodyStart);
-    const dsmlClose = matchAfter(DSML_WRAPPER_CLOSE_RE, segment, bodyStart);
-    const toolClose = matchAfter(TOOL_CALLS_CLOSE_RE, segment, bodyStart);
-    const bodyEnd = Math.min(
-      nextInvoke,
-      invokeClose?.index ?? Number.POSITIVE_INFINITY,
-      dsmlClose?.index ?? Number.POSITIVE_INFINITY,
-      toolClose?.index ?? Number.POSITIVE_INFINITY,
-    );
-    // Never execute a truncated orphan invoke. A closing invoke, a following invoke,
-    // or a closing wrapper is required to prove that the model completed the call.
+    const invokeClose = matchAfter(patterns.invokeClose, segment, bodyStart);
+    const bodyEnd = patterns.wrapperCloses.reduce((end, pattern) => {
+      const close = matchAfter(pattern, segment, bodyStart);
+      return close && close.index < end ? close.index : end;
+    }, Math.min(nextInvoke, invokeClose?.index ?? Number.POSITIVE_INFINITY));
     if (!Number.isFinite(bodyEnd)) continue;
-    const name = attributeValue(match[1], 'name')?.trim();
+    const name = attributeValue(match[1], "name")?.trim();
     if (!name) continue;
     const args: Record<string, any> = {};
     const body = segment.slice(bodyStart, bodyEnd);
-    DSML_PARAM_OPEN_RE.lastIndex = 0;
-    const parameters = [...body.matchAll(DSML_PARAM_OPEN_RE)];
+    patterns.paramOpen.lastIndex = 0;
+    const parameters = [...body.matchAll(patterns.paramOpen)];
     for (let parameterIndex = 0; parameterIndex < parameters.length; parameterIndex += 1) {
       const parameter = parameters[parameterIndex];
       const rawStart = parameter.index + parameter[0].length;
       const nextParameter = parameters[parameterIndex + 1]?.index ?? Number.POSITIVE_INFINITY;
-      const parameterClose = matchAfter(DSML_PARAM_CLOSE_RE, body, rawStart);
+      const parameterClose = matchAfter(patterns.paramClose, body, rawStart);
       const rawEnd = Math.min(nextParameter, parameterClose?.index ?? body.length, body.length);
-      const parameterName = attributeValue(parameter[1], 'name')?.trim();
+      const parameterName = attributeValue(parameter[1], "name")?.trim();
       if (!parameterName) continue;
-      const stringFlag = attributeValue(parameter[1], 'string')?.trim().toLowerCase();
+      const stringFlag = attributeValue(parameter[1], "string")?.trim().toLowerCase();
       const raw = body.slice(rawStart, rawEnd);
-      if (stringFlag === 'true') args[parameterName] = raw;
+      // With a closing tag the value is exact; without one the value ends at the invoke or
+      // wrapper bound, where the surrounding padding is formatting rather than content.
+      if (stringFlag === "true") args[parameterName] = parameterClose ? raw : raw.trimEnd();
       else {
         try { args[parameterName] = JSON.parse(raw.trim()); }
         catch { args[parameterName] = raw.trim(); }
       }
     }
-    const separator = name.indexOf('::');
-    const namespace = separator > 0 && separator === name.lastIndexOf('::') ? name.slice(0, separator) : null;
+    const separator = name.indexOf("::");
+    const namespace = separator > 0 && separator === name.lastIndexOf("::") ? name.slice(0, separator) : null;
     const functionName = namespace ? name.slice(separator + 2) : name;
     const call: ParsedToolCall = {
-      id: 'call_' + randomUUID().replaceAll('-', '').slice(0, 24),
-      type: 'function',
+      id: "call_" + randomUUID().replaceAll("-", "").slice(0, 24),
+      type: "function",
       function: { name: functionName, arguments: JSON.stringify(args) },
     };
     if (namespace) call.namespace = namespace;
@@ -335,11 +389,21 @@ export function parseDsmlCalls(segment: string): ParsedToolCall[] {
   return calls;
 }
 
+export function parseDsmlCalls(segment: string): ParsedToolCall[] {
+  return parseInvokeCalls(normalizeDsmlText(segment), DSML_PATTERNS);
+}
+
+/** Official template envelope: DSML-prefixed or bare-pipe invoke/parameter tags. */
+function parseOfficialCalls(segment: string): ParsedToolCall[] {
+  return parseInvokeCalls(normalizeDsmlText(segment), OFFICIAL_PATTERNS);
+}
+
 function normalizeDsmlText(value: unknown): string {
-  return String(value ?? '')
-    .replace(/[“”＂]/gu, '"')
-    .replace(/[‘’]/gu, "'")
-    .replace(/\\(?=<\s*\/?\s*(?:tool\s*_?\s*calls?|(?:[｜|]\s*)+DSML\b))/giu, '');
+  return String(value ?? "")
+    .replace(new RegExp("[" + String.fromCharCode(0x201C, 0x201D, 0xFF02) + "]", "gu"), String.fromCharCode(34))
+    .replace(new RegExp("[" + String.fromCharCode(0x2018, 0x2019) + "]", "gu"), String.fromCharCode(39))
+    .replace(ZERO_WIDTH_RE, "")
+    .replace(ESCAPED_MARKER_RE, "");
 }
 
 function attributeValue(attributes: unknown, name: string): string | null {
@@ -362,22 +426,35 @@ function firstMatch(pattern: RegExp, text: string): RegexMatch | null {
 function findToolCallsBegin(text: string): { kind: string; index: number; text: string } | null {
   const candidates: Array<{ kind: string; match: RegexMatch }> = [];
   const begin = firstMatch(DSML_BEGIN_RE, text);
-  if (begin) candidates.push({ kind: 'wrapper', match: begin });
+  if (begin) candidates.push({ kind: "wrapper", match: begin });
   const plain = firstMatch(TOOL_CALLS_BEGIN_RE, text);
-  if (plain) candidates.push({ kind: 'wrapper', match: plain });
+  if (plain) candidates.push({ kind: "wrapper", match: plain });
+  // The official chat-template envelope is a distinct, gated kind: only text inside it may
+  // use bare pipe-prefixed invoke/parameter markers without the DSML literal.
+  const official = firstMatch(OFFICIAL_BEGIN_RE, text);
+  if (official) candidates.push({ kind: "official", match: official });
   const invoke = firstMatch(DSML_INVOKE_OPEN_RE, text);
-  if (invoke) candidates.push({ kind: 'invoke', match: invoke });
+  if (invoke) candidates.push({ kind: "invoke", match: invoke });
   if (candidates.length === 0) return null;
   const best = candidates.reduce((current, item) => item.match.index < current.match.index ? item : current);
-  const index = best.match.index > 0 && text[best.match.index - 1] === '\\' ? best.match.index - 1 : best.match.index;
+  const index = best.match.index > 0 && text[best.match.index - 1] === String.fromCharCode(92) ? best.match.index - 1 : best.match.index;
   return { kind: best.kind, index, text: best.match[0] };
 }
 
 export function parseToolCallsFromText(text: unknown): { content: any; toolCalls: ParsedToolCall[] | null } {
-  const source = String(text ?? '');
+  const source = String(text ?? "");
   const match = findToolCallsBegin(source);
   if (!match) return { content: text, toolCalls: null };
-  const segmentStart = match.kind === 'invoke' ? match.index : match.index + match.text.length;
+  if (match.kind === "official") {
+    const segmentStart = match.index + match.text.length;
+    const end = matchAfter(OFFICIAL_END_RE, source, segmentStart);
+    // Bound the relaxed region to the matching end marker so nothing after it is parsed.
+    const segment = end ? source.slice(segmentStart, end.index + end[0].length) : source.slice(segmentStart);
+    const officialCalls = parseOfficialCalls(segment);
+    return officialCalls.length > 0 ? { content: source.slice(0, match.index), toolCalls: officialCalls } :
+      { content: text, toolCalls: null };
+  }
+  const segmentStart = match.kind === "invoke" ? match.index : match.index + match.text.length;
   const toolCalls = parseDsmlCalls(source.slice(segmentStart));
   return toolCalls.length > 0 ? { content: source.slice(0, match.index), toolCalls } :
     { content: text, toolCalls: null };
@@ -399,13 +476,19 @@ function mergeToolCalls(...groups: ReadonlyArray<readonly ParsedToolCall[] | nul
 }
 
 function isPartialToolMarker(value: unknown): boolean {
-  let normalized = String(value ?? '').replace(/^\\/u, '').replaceAll('｜', '|')
-    .replace(/\s+/gu, '').toLowerCase();
-  normalized = normalized.replace(/^<\|+/u, '<|').replace(/^<\|dsml\|+/u, '<|dsml|');
-  if (!normalized.startsWith('<') || normalized.includes('>')) return false;
+  let normalized = String(value ?? "").replace(new RegExp("^" + String.fromCharCode(92, 92), "u"), "").replaceAll("｜", "|")
+    .replace(ZERO_WIDTH_RE, "").replaceAll(String.fromCharCode(0x2581), "_")
+    .replace(new RegExp("[ " + String.fromCharCode(9, 10, 13, 12, 11) + "]+", "gu"), "").toLowerCase();
+  normalized = normalized.replace(new RegExp("^<[|_]+", "u"), "<|").replace(new RegExp("^<[|_]dsml[|_]+", "u"), "<|dsml|");
+  if (!normalized.startsWith("<") || normalized.includes(">")) return false;
+  const block = String.fromCharCode(0x2581);
   const starts = [
-    '<tool_calls', '<tool_call', '<|dsml|calls', '<|dsml|tool_calls', '<|dsml|toolcalls',
-    '<|dsml|tool_call', '<|dsml|function_calls', '<|dsml|functioncalls', '<|dsml|invoke',
+    "<tool_calls", "<tool_call", "<tool" + block + "calls",
+    "<|dsml|calls", "<|dsml|tool_calls", "<|dsml|toolcalls",
+    "<|dsml|tool_call", "<|dsml|function_calls", "<|dsml|functioncalls", "<|dsml|invoke",
+    "<|dsml|parameter", "<|invoke", "<|parameter",
+    "<|tool" + block + "calls" + block + "begin", "<|tool" + block + "calls" + block + "end",
+    "<|tool_calls_begin", "<|tool_calls_end", "<|toolcallsbegin",
   ];
   return starts.some(start => start.startsWith(normalized) || normalized.startsWith(start));
 }

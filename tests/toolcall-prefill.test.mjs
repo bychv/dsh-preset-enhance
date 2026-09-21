@@ -260,3 +260,99 @@ test('stream response captures compact whitespace-drift DSML across single-chara
   assert.deepEqual(JSON.parse(toolChoice.delta.tool_calls[0].function.arguments), { city: 'Shanghai' });
   assert.equal(payloads.at(-1), '[DONE]');
 });
+/** Marker characters shared by the tolerance tests below. */
+const BAR = String.fromCharCode(0xFF5C);
+const BLK = String.fromCharCode(0x2581);
+const ZW = String.fromCharCode(0x200B);
+
+test('official chat-template envelope recovers pipe-prefixed invokes without the DSML literal', () => {
+  const begin = '<' + BAR + 'tool' + BLK + 'calls' + BLK + 'begin' + BAR + '>';
+  const end = '<' + BAR + 'tool' + BLK + 'calls' + BLK + 'end' + BAR + '>';
+  const text = 'prefix text' + '\n'
+    + begin + '\n'
+    + '<' + BAR + 'invoke name="lookup_weather"' + BAR + '>' + '\n'
+    + '<' + BAR + 'parameter name="city" string="true">Shanghai</' + BAR + 'parameter' + BAR + '>' + '\n'
+    + '<' + BAR + '/invoke' + BAR + '>' + '\n'
+    + end;
+  const parsed = parseToolCallsFromText(text);
+  assert.equal(parsed.content, 'prefix text' + String.fromCharCode(10));
+  assert.deepEqual(parsed.toolCalls.map(call => call.function.name), ['lookup_weather']);
+  assert.deepEqual(JSON.parse(parsed.toolCalls[0].function.arguments), { city: 'Shanghai' });
+
+  // The DSML-prefixed dialect keeps working inside the same envelope.
+  const dsmlInside = begin + '\n' + invoke('lookup_weather', [['city', 'true', 'Shanghai']]) + '\n' + end;
+  const nested = parseToolCallsFromText(dsmlInside);
+  assert.deepEqual(nested.toolCalls.map(call => call.function.name), ['lookup_weather']);
+});
+
+test('bare pipe-prefixed markers outside the official envelope are never tool calls', () => {
+  const bare = '<' + BAR + 'invoke name="lookup_weather"' + BAR + '>' + '\n'
+    + '<' + BAR + 'parameter name="city" string="true">Shanghai</' + BAR + 'parameter' + BAR + '>' + '\n'
+    + '<' + BAR + '/invoke' + BAR + '>';
+  assert.deepEqual(parseToolCallsFromText(bare), { content: bare, toolCalls: null });
+
+  // An end marker without a begin marker, and a begin marker without an invoke, stay inert.
+  const endOnly = '<' + BAR + 'tool' + BLK + 'calls' + BLK + 'end' + BAR + '>' + '\n' + bare;
+  assert.deepEqual(parseToolCallsFromText(endOnly), { content: endOnly, toolCalls: null });
+  const emptyEnvelope = '<' + BAR + 'tool' + BLK + 'calls' + BLK + 'begin' + BAR + '>just prose<' + BAR + 'tool' + BLK + 'calls' + BLK + 'end' + BAR + '>';
+  assert.deepEqual(parseToolCallsFromText(emptyEnvelope), { content: emptyEnvelope, toolCalls: null });
+
+  // The relaxed region ends at the matching end marker: markers after it stay unparsed.
+  const trailing = '<' + BAR + 'tool' + BLK + 'calls' + BLK + 'begin' + BAR + '>' + '\n'
+    + '<' + BAR + 'invoke name="lookup_weather"' + BAR + '>' + '\n'
+    + '<' + BAR + 'parameter name="city" string="true">Shanghai</' + BAR + 'parameter' + BAR + '>' + '\n'
+    + '<' + BAR + '/invoke' + BAR + '>' + '\n'
+    + '<' + BAR + 'tool' + BLK + 'calls' + BLK + 'end' + BAR + '>' + '\n' + bare;
+  const bounded = parseToolCallsFromText(trailing);
+  assert.equal(bounded.toolCalls.length, 1);
+});
+
+test('zero-width characters and U+2581 padding inside a marker still count as one marker', () => {
+  const zwPrefixed = '<' + BAR + ZW + BAR + 'DSML' + ZW + BAR + BAR + ' invoke name="lookup_weather">' + '\n'
+    + '<' + BAR + BAR + 'DSML' + ZW + BAR + BAR + ' parameter name="city" string="true">Shanghai</' + BAR + BAR + 'DSML' + BAR + BAR + ' parameter>' + '\n'
+    + '</' + BAR + BAR + 'DSML' + BAR + BAR + ' invoke>';
+  const padded = parseToolCallsFromText(zwPrefixed);
+  assert.deepEqual(padded.toolCalls.map(call => call.function.name), ['lookup_weather']);
+  assert.deepEqual(JSON.parse(padded.toolCalls[0].function.arguments), { city: 'Shanghai' });
+
+  const blockSeparated = '<' + BAR + BLK + BAR + BLK + 'DSML' + BLK + BAR + BLK + BAR + ' invoke name="lookup_weather">' + '\n'
+    + '<' + BAR + BLK + BAR + BLK + 'DSML' + BLK + BAR + BLK + BAR + ' parameter name="city" string="true">Shanghai</' + BAR + BLK + BAR + BLK + 'DSML' + BLK + BAR + BLK + BAR + ' parameter>' + '\n'
+    + '</' + BAR + BLK + BAR + BLK + 'DSML' + BLK + BAR + BLK + BAR + ' invoke>';
+  const blocks = parseToolCallsFromText(blockSeparated);
+  assert.deepEqual(blocks.toolCalls.map(call => call.function.name), ['lookup_weather']);
+
+  // Padding inside prose still invents nothing.
+  const prose = 'the word invoke' + ZW + ' appears here, and so does parameter' + ZW + ' naming.';
+  assert.deepEqual(parseToolCallsFromText(prose), { content: prose, toolCalls: null });
+});
+
+test('missing parameter closes drop formatting padding while closed values stay exact', () => {
+  const noClose = '<' + BAR + BAR + 'DSML' + BAR + BAR + ' invoke name="lookup_weather">' + '\n'
+    + '<' + BAR + BAR + 'DSML' + BAR + BAR + ' parameter name="city" string="true">Shanghai' + '\n'
+    + '</' + BAR + BAR + 'DSML' + BAR + BAR + ' invoke>';
+  const parsed = parseToolCallsFromText(noClose);
+  assert.deepEqual(JSON.parse(parsed.toolCalls[0].function.arguments), { city: 'Shanghai' });
+
+  // A self-closing parameter carries no value, so the argument is the empty string.
+  const selfClosing = '<' + BAR + BAR + 'DSML' + BAR + BAR + ' invoke name="lookup_weather">' + '\n'
+    + '<' + BAR + BAR + 'DSML' + BAR + BAR + ' parameter name="city" string="true"/>' + '\n'
+    + '</' + BAR + BAR + 'DSML' + BAR + BAR + ' invoke>';
+  const empty = parseToolCallsFromText(selfClosing);
+  assert.deepEqual(JSON.parse(empty.toolCalls[0].function.arguments), { city: '' });
+
+  // A closed value keeps every character, including intentional trailing whitespace.
+  const closed = '<' + BAR + BAR + 'DSML' + BAR + BAR + ' invoke name="lookup_weather">' + '\n'
+    + '<' + BAR + BAR + 'DSML' + BAR + BAR + ' parameter name="city" string="true">Shanghai </' + BAR + BAR + 'DSML' + BAR + BAR + ' parameter>' + '\n'
+    + '</' + BAR + BAR + 'DSML' + BAR + BAR + ' invoke>';
+  const exact = parseToolCallsFromText(closed);
+  assert.deepEqual(JSON.parse(exact.toolCalls[0].function.arguments), { city: 'Shanghai ' });
+});
+
+test('a Markdown code fence around a DSML block neither hides nor invents a call', () => {
+  const fence = String.fromCharCode(96).repeat(3);
+  const fenced = fence + 'xml' + '\n' + invoke('lookup_weather', [['city', 'true', 'Shanghai']]) + '\n' + fence;
+  const parsed = parseToolCallsFromText(fenced);
+  assert.deepEqual(parsed.toolCalls.map(call => call.function.name), ['lookup_weather']);
+  const plainXml = fence + 'xml' + '\n' + '<tool_calls><invoke name="lookup_weather"><parameter name="city">Shanghai</parameter></invoke></tool_calls>' + '\n' + fence;
+  assert.deepEqual(parseToolCallsFromText(plainXml), { content: plainXml, toolCalls: null });
+});
