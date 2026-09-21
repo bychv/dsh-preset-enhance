@@ -7,7 +7,7 @@
 从 npm 安装当前 RC 版本：
 
 ~~~powershell
-dsh plugin --profile web add dsh-preset-enhance@0.3.2-rc.1
+dsh plugin --profile web add dsh-preset-enhance@0.3.2-rc.2
 ~~~
 
 也可以直接安装 GitHub `main` 分支：
@@ -16,7 +16,7 @@ dsh plugin --profile web add dsh-preset-enhance@0.3.2-rc.1
 dsh plugin --profile web add github:bychv/dsh-preset-enhance#main
 ~~~
 
-继续使用 DSH 0.1.5 时请固定安装 `0.3.2-rc.1`。
+继续使用 DSH 0.1.5 时请固定安装 `0.3.2-rc.2`。
 
 重新启动 `dsh web` 后，左侧栏会出现“预设工作台”，新建对话的模式列表中会出现“预设模式”。
 
@@ -25,6 +25,12 @@ dsh plugin --profile web add github:bychv/dsh-preset-enhance#main
 当前版本面向 DSH `>=0.1.5-rc.2 <0.1.6` 与 `0.1.6-alpha.2`。后续 0.1.6 版本发布后会重新验证再放宽范围，不提前声明兼容整个 0.1.6 系列。
 
 ### 在 DSH 0.1.6 上使用
+
+当前适配代码位于 GitHub `0.1.6` 分支，尚未发布对应 npm 包：
+
+```powershell
+dsh plugin --profile web add github:bychv/dsh-preset-enhance#0.1.6
+```
 
 DSH 0.1.6 的官方连接默认改用 Messages 协议，网页界面没有切换入口。**推荐在 profile 的 `cordis.patch.yml` 里指定使用对话补全接口，然后重启：**
 
@@ -35,7 +41,7 @@ DSH 0.1.6 的官方连接默认改用 Messages 协议，网页界面没有切换
 ```
 
 - **对话补全接口**：预填充续写、工具调用转换与正文提取都正常工作。
-- **Messages 接口**：预设注入照常生效，但预填充续写、工具调用转换与正文提取不会应用。插件会把预设开头的多条 system 提示合并后发送，避免其中内容被丢弃；工作台会说明该连接下哪些能力不可用。
+- **Messages 接口**：仅提供有限的预设注入兼容，预填充续写、工具调用转换与正文提取不会应用。历史中段或末尾的 system 提示可能被重排或覆盖；需要准确保持预设顺序时请使用对话补全接口。插件会把预设开头的多条 system 提示合并后发送，避免其中内容被丢弃；工作台会说明该连接下哪些能力不可用。
 
 ### 本地双协议测试端点
 

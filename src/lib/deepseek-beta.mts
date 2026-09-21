@@ -474,6 +474,8 @@ export interface DeepSeekBetaActivationOptions {
 }
 
 export interface DeepSeekBetaBridgeOptions {
+  /** The caller owns teardown and drains streams before disposing this controller. */
+  managedLifecycle?: boolean;
   /** Receives one observation per outbound request that looks like an LLM call. */
   observer?: ProtocolObserver;
   /**
@@ -623,6 +625,6 @@ export function installDeepSeekBetaBridge(
       };
     },
   };
-  ctx.effect(() => () => controller.dispose(), 'preset-enhance: prefix completion bridge');
+  if (!options.managedLifecycle) ctx.effect(() => () => controller.dispose(), 'preset-enhance: prefix completion bridge');
   return controller;
 }

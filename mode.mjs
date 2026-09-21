@@ -12,7 +12,13 @@ export const name = 'preset-enhance-mode';
  * instead of silent, and the reported reason distinguishes a plain disable from a
  * startup failure the user has to fix.
  */
-export function apply() {
+export function apply(ctx) {
     if (!isPresetEnhanceActive())
         throw new Error(presetEnhanceUnavailableReason());
+    // Standing mode mounts outlive the host plugin. Check every request too.
+    ctx.on('llm/stream', async function* (_options, next) {
+        if (!isPresetEnhanceActive())
+            throw new Error(presetEnhanceUnavailableReason());
+        yield* next();
+    });
 }

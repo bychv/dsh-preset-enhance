@@ -158,13 +158,21 @@ export async function apply(ctx: PluginContext, config: PluginConfig = {}) {
   // The in-app official-request switch is parked behind an explicit opt-in; the shipped
   // default leaves the host's own protocol behaviour untouched.
   const deepSeekBeta = installDeepSeekBetaBridge(ctx, {
-    observer: protocolObserver, reroute: config.reroute === true,
+    observer: protocolObserver, reroute: config.reroute === true, managedLifecycle: true,
   });
 
+  // Cordis runs disposers concurrently. This callback alone owns bridge teardown,
+  // keeping it available until every tracked stream and queued write has settled.
+  ctx.effect(() => async () => {
+    await lifecycle.dispose(async () => {
+      await store.close();
+      deepSeekBeta.dispose();
+    });
+  }, 'preset-enhance: ordered teardown');
+
   // Startup is staged and names the failing stage together with its path. It must
-  // NOT throw: this plugin is a required root bundle entry, so a throw is fatal to
-  // the whole host and would take away the very web UI the user needs to fix the
-  // problem. A failed stage therefore degrades the plugin — the workbench still
+  // Keep the recovery UI available even when initialization fails. A failed
+  // stage degrades the plugin — the workbench still
   // mounts and reports the reason, request injection stays off, and user data is
   // never cleared as a recovery step.
   let startupError: string | null = null;
@@ -217,7 +225,7 @@ export async function apply(ctx: PluginContext, config: PluginConfig = {}) {
     ctx.effect(() => register(presetCommand(store)), 'preset-enhance: /preset');
   }
 
-  ctx.on('llm/stream', async function* (options: StreamOptions, next: () => AsyncIterable<unknown>) {
+  async function* injectStream(options: StreamOptions, next: () => AsyncIterable<unknown>) {
     // A degraded startup never injects a partial preset: requests pass through untouched.
     if (startupError) { yield* next(); return; }
     const sessionId = options.sessionId;
@@ -319,6 +327,13 @@ export async function apply(ctx: PluginContext, config: PluginConfig = {}) {
     }) : () => {};
     routed.add(request);
     try { yield* ctx.llm.stream(request); } finally { releaseBeta(); routed.delete(request); }
+  }
+
+  ctx.on('llm/stream', async function* (options: StreamOptions, next: () => AsyncIterable<unknown>) {
+    if (lifecycle.closing) throw new Error('插件正在停用，请稍后重试');
+    let finish!: () => void;
+    lifecycle.track(new Promise<void>(resolve => { finish = resolve; }));
+    try { yield* injectStream(options, next); } finally { finish(); }
   });
 
   const assets = new Map<string, [string, string]>([
@@ -729,16 +744,7 @@ export async function apply(ctx: PluginContext, config: PluginConfig = {}) {
     },
   }), 'preset-enhance: API');
 
-  // Registered last so it is disposed first: refuse new work, drain what is in
-  // flight, and only then release the process-global fetch bridge. The disposer
-  // is async on purpose so the host waits for the drain before the activation is
-  // considered unloaded.
-  ctx.effect(() => async () => {
-    await lifecycle.dispose(async () => {
-      deepSeekBeta.dispose();
-      await store.close();
-    });
-  }, 'preset-enhance: ordered teardown');
+
 }
 
 function messageText(message: HostMessage | undefined): string {
