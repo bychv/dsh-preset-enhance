@@ -3,7 +3,7 @@
  * Independent adversarial verification driver for tool presets/groups (task-5).
  *
  * This script is deliberately separate from the implementation's own tests: it
- * asserts the SPEC from TOOL_GROUPS_IMPLEMENTATION.md, not the code, and it
+ * asserts the SPEC from docs/TOOL_GROUPS_IMPLEMENTATION.md, not the code, and it
  * reports per acceptance item whether the claim was verified, falsified, or not
  * observed.
  *

@@ -1,7 +1,7 @@
 /**
  * Independent spec tests for lib/tool-presets.mjs.
  *
- * These assert TOOL_GROUPS_IMPLEMENTATION.md (数据模型 / 有效策略 / 分组批量操作 /
+ * These assert docs/TOOL_GROUPS_IMPLEMENTATION.md (数据模型 / 有效策略 / 分组批量操作 /
  * API / 验收清单) rather than mirroring the implementation. Literal limits are
  * used on purpose so a mutated exported constant is caught too.
  */
