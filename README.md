@@ -29,6 +29,17 @@ dsh plugin --profile web add github:bychv/dsh-preset-enhance#main
 - **对话补全接口（默认）**：完整兼容。官方 `api.deepseek.com` 的 Messages 请求会被改投到官方 `chat/completions` 端点并做请求/响应翻译（`x-api-key` 转 `Authorization: Bearer`、Anthropic 请求体转 Chat 请求体、Chat SSE 转 Anthropic SSE），与“预填充自动兼容”改投官方 `beta` 地址是同一套机制。**只有官方端点会被改投**，非官方连接保持原样，工作台会明确提示。
 - **Messages 接口（尽量兼容）**：不改投。插件只做尽力预设兼容：前导的多条 system 消息按原顺序合并成一条（宿主 Messages 序列化只保留最后一条 system 快照，不合并就会直接丢掉前面的预设文本），不发送 assistant 预填充标记，并在工作台列出 Messages 线格式无法表达的能力（中途 system 注入、assistant 预填充等）。
 
+宿主**并没有删掉** chat-completions：0.1.6-alpha.2 只是把官方连接的默认协议从 `chat-completions` 改成 `messages`（宿主 `packages/llm/llm-deepseek/src/config.ts:81` 仍是 `z.union(['chat-completions','messages']).default('messages')`），`protocol` 依旧可配置，`protocols/chat-completions/*` 整套实现（serialize/sse/translate/adapter）都还在。区别只是 DSH Web 界面没有协议选择器，只能在 Cordis YAML 里改。
+
+所以如果你愿意改宿主配置，最干净的做法是直接给官方连接指定协议，不必依赖本插件的请求改投：
+
+```yaml
+- id: llm-deepseek
+  config:
+    protocol: chat-completions
+```
+
+此时官方根地址为 `https://api.deepseek.com`，请求发往 `POST https://api.deepseek.com/chat/completions`（宿主 `config.ts:292-293` 选择根地址，`protocols/chat-completions/adapter.ts:330` 发送），与 chat 模式的改投目标完全一致。
 **不开启预设则不介入**：当前会话没有启用预设注入时，插件不介入请求——不改投、不翻译、不改写请求体，原样放行；工作台会显示这一点。
 
 无论选择哪一项，插件都会把开头连续的多条 system 消息按原顺序合并成一条：宿主 Messages 序列化只保留最后一条 system 快照（`serialize.ts:83-95` 后一条覆盖前一条），合并后无论宿主最终走哪种协议都不会丢掉预设文本。代价是原生 chat/completions 连接上的消息形态会从多条 system 变为一条（文本与顺序不变），因此这属于保内容、不属丢失，不额外显示为警告。
