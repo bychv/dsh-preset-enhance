@@ -16,19 +16,17 @@ dsh plugin --profile web add dsh-preset-enhance@0.3.2-rc.1
 dsh plugin --profile web add github:bychv/dsh-preset-enhance#main
 ~~~
 
+继续使用 DSH 0.1.5 时请固定安装 `0.3.2-rc.1`。
+
+重新启动 `dsh web` 后，左侧栏会出现“预设工作台”，新建对话的模式列表中会出现“预设模式”。
+
 ## DSH 版本支持
 
-`engines.dsh` 声明为 `>=0.1.5-rc.2 <0.1.6 || =0.1.6-alpha.2`：DSH 0.1.5 系列，加上已在 0.1.6-alpha.2 沙盒中逐项验证过的 `0.1.6-alpha.2`。后续 0.1.6 版本发布后会重新验证再放宽范围，不提前声明兼容整个 0.1.6 系列。
+当前版本面向 DSH `>=0.1.5-rc.2 <0.1.6` 与 `0.1.6-alpha.2`。后续 0.1.6 版本发布后会重新验证再放宽范围，不提前声明兼容整个 0.1.6 系列。
 
-该字段是**声明性的**：DSH 0.1.6-alpha.2 的安装器不读取、也不校验 `engines.dsh`（宿主 `packages/util/package-manifest` 只声明该字段的类型，源码树中没有消费方，其 README 也写明“兼容性是声明性的”）。范围既不会阻止安装，也不会阻止加载，它只描述本插件验证过哪些宿主版本。
+### 在 DSH 0.1.6 上使用
 
-### Messages 连接的兼容说明
-
-DSH 0.1.6 把官方连接的默认协议从 `chat-completions` 改成了 `messages`：宿主只是改了默认值（`packages/llm/llm-deepseek/src/config.ts:81` 仍同时接受两者），`protocols/chat-completions/` 整套实现（serialize/sse/translate/adapter）都保留。DSH Web 没有协议选择器，只能在 Cordis YAML 里改。
-
-本插件**不改写用户的请求**：协议怎么走由宿主决定，插件只在连接是 messages 时对预设注入做尽力兼容。
-
-- **推荐：让宿主原生使用对话补全接口。** 在 profile 的 `cordis.patch.yml` 里加一条 id 定向覆盖并重启：
+DSH 0.1.6 的官方连接默认改用 Messages 协议，网页界面没有切换入口。**推荐在 profile 的 `cordis.patch.yml` 里指定使用对话补全接口，然后重启：**
 
 ```yaml
 - id: llm-deepseek
@@ -36,18 +34,8 @@ DSH 0.1.6 把官方连接的默认协议从 `chat-completions` 改成了 `messag
     protocol: chat-completions
 ```
 
-  此后官方根地址为 `https://api.deepseek.com`，请求发往 `POST https://api.deepseek.com/chat/completions`（宿主 `config.ts:292-293` 选择根地址，`protocols/chat-completions/adapter.ts:330` 发送）。预填充续写、DSML 工具调用转换与正文提取都在宿主原生路径上生效。
-
-- **连接仍是 messages 时**：预设注入照常执行，但宿主 Messages 序列化只保留最后一条前导 system 快照（`serialize.ts:83-95` 后一条覆盖前一条），所以插件会把开头连续的多条 system 消息按原顺序合并成一条，避免预设文本被丢弃；assistant 预填充标记无法通过 Messages 线格式表达。这些无法保留的能力会逐条列在工作台里，工作台也会说明该协议下兼容路径不适用，并指向上面的宿主侧做法。
-
-#### 关于“改投并翻译”方案（当前隐藏）
-
-计划中设计过由插件把官方 Messages 请求改投到 `chat/completions` 并双向翻译的实现。代码完整保留在 `src/lib/messages-translate.mts` 与 `src/lib/deepseek-beta.mts`，单元测试与端到端测试都在（含“默认关闭”的专门用例），但**当前版本默认不启用，界面上也不提供**。重新启用需要两步：
-
-1. 打开 `src/index.mts` 传给 `installDeepSeekBetaBridge` 的开关（`reroute: config.reroute === true` 改为 `reroute: true`，或通过插件配置项 `reroute` 打开）；
-2. 恢复 `web/index.html` 中被注释掉的协议开关区块；`web/editor.js` 的接线仍在，元素恢复后自动生效。
-
-**不开启预设则不介入**：当前会话没有启用预设注入时，插件完全不介入请求，请求原样放行。
+- **对话补全接口**：预填充续写、工具调用转换与正文提取都正常工作。
+- **Messages 接口**：预设注入照常生效，但预填充续写、工具调用转换与正文提取不会应用。插件会把预设开头的多条 system 提示合并后发送，避免其中内容被丢弃；工作台会说明该连接下哪些能力不可用。
 
 ### 本地双协议测试端点
 
@@ -58,22 +46,14 @@ node tests/fixtures/protocol-server.mjs --demo     # 自检两种协议并打印
 node tests/fixtures/protocol-server.mjs            # 监听随机端口，打印 URL 与 curl 示例
 ```
 
-它同时提供 `POST /chat/completions`（OpenAI 风格 SSE）与 `POST /messages`（Anthropic 风格 SSE），记录每个收到的请求（路径、请求头、原始 body），并支持按测试脚本定制回复与分包写入。
+它同时提供对话补全接口与 Messages 接口的流式响应，并记录每个收到的请求，便于对照两种协议的行为。
 
 ### 启动失败与运行时启停
 
-- 初始化失败（状态文件损坏、缺少 `standard` 模式组成、预设模式目录不可写）不再抛出异常：插件降级为“已加载但不注入”，预设工作台仍可打开并显示失败阶段、路径与原因，写入请求被拒绝，用户数据不会被清空；修复后重新启用即可。
-- 停用插件会先停止接受新操作，等待在途写入与流式请求收尾，再释放全局 `fetch` 桥接；反复启停不会累积路由、命令、监听器或 `fetch` 包装。
-- 插件关闭或启动失败后，`st-preset` 模式不会静默退化为普通请求：该模式会以明确的不可用原因拒绝挂载，并区分“插件未启用”与“启动失败”。
-- 生成的预设模式文件只在内容变化时原子替换，重复启用不会改变未变文件的时间戳。
-
-### 从源码构建
-
-宿主侧源码位于 `src/**/*.mts`。`npm run build` 编译到 `dist/` 再把 `index.mjs`、`mode.mjs`、`lib/*.mjs` 复制回包根目录，因此发布结构与安装方式保持不变；仓库同时提交这些产物，`npm pack --ignore-scripts` 也能直接打包。常用命令：`npm run typecheck`（类型检查）、`npm run build`、`npm test`、`npm run verify`（三者串联）。
-
-`0.3.2-rc.1` 面向 DSH `>=0.1.5-rc.2 <0.1.6`；继续使用 DSH 0.1.5 时请固定安装 `0.3.2-rc.1`。
-
-重新启动 `dsh web` 后，左侧栏会出现“预设工作台”，新建对话的模式列表中会出现“预设模式”。
+- 初始化失败（状态文件损坏、缺少 `standard` 模式组成、预设模式目录不可写）不会让 DSH 无法启动：插件降级为“已加载但不注入”，预设工作台仍可打开并显示原因，写入被拒绝，用户数据不会被清空；修复后重新启用即可。
+- 停用插件会先停止接受新操作，等待在途写入与流式请求收尾，再释放全局 `fetch` 桥接；反复启停不会累积路由、命令或监听器。
+- 插件关闭或启动失败后，预设模式不会静默退化为普通对话：该模式会以明确原因拒绝挂载。
+- 预设模式文件只在内容变化时重写，重复启用不会改动未变的文件。
 
 ## 预设注入
 
