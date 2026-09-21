@@ -33,7 +33,13 @@
 @media(max-width:760px){.group-actions{margin-left:0}}
 .tool-auto-save{margin:8px 0}
 .tool-auto-save-hint{display:block;letter-spacing:0;color:#8da2ae;font-size:11px;line-height:1.5;margin-top:2px}
-.connection-protocol-row{margin:2px 0 4px}.connection-protocol-row select{max-width:280px}#connection-note{margin:0 0 10px}
+.connection-protocol{border:1px solid #2a3942;border-radius:9px;background:#131d24;padding:10px 14px;margin:0 0 18px}
+.connection-protocol-title{display:flex;align-items:baseline;gap:10px;margin:0 0 4px;color:#b9d9d2;font-size:13px;font-weight:650}
+.connection-protocol-control{display:flex;align-items:center;gap:10px;margin:2px 0}
+.connection-side{font-size:12px;color:#718893;white-space:nowrap}
+.connection-side.active{color:#a9dfcc;font-weight:650}
+.connection-protocol .switch input:disabled+.slider{opacity:.45;cursor:not-allowed}
+#connection-note{margin:4px 0 0}
 .protocol-help{position:relative;display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border:1px solid #48907e;border-radius:50%;background:#16212a;color:#9edfc7;font-size:12px;line-height:1;cursor:help;user-select:none}
 .protocol-help-body{position:absolute;top:calc(100% + 10px);left:0;z-index:30;display:none;width:min(560px,80vw);padding:10px 12px;border:1px solid #2a3942;border-radius:9px;background:#131d24;color:#dce6eb;font-size:12px;line-height:1.6;font-weight:400;text-align:left;white-space:normal;box-shadow:0 10px 28px rgba(0,0,0,.45)}
 .protocol-help:hover .protocol-help-body,.protocol-help:focus-visible .protocol-help-body,.protocol-help:focus-within .protocol-help-body{display:block}

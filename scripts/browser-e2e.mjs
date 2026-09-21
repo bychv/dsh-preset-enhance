@@ -203,48 +203,67 @@ try {
   check('workbench page loads', await waitReady());
   await settle(2000);
 
-  // T14-1. the connection-protocol switch now lives inside the prefill card; the old global block is gone
+  // T16-1. the connection protocol slider now sits at the top of the workbench
   const protocolUi = await evaluate(`(() => {
-    const removed = ['protocol-mode', 'save-protocol-mode', 'protocol-mode-hint'];
+    const removed = ['protocol-mode', 'save-protocol-mode', 'protocol-mode-hint', 'save-connection-protocol'];
     const words = ['改投', '翻译', '协议设置'];
     const shown = document.body.innerText ?? '';
     const markup = document.documentElement.outerHTML ?? '';
-    const select = document.getElementById('connection-protocol');
-    const save = document.getElementById('save-connection-protocol');
+    const bar = document.getElementById('connection-protocol-bar');
+    const input = document.getElementById('connection-protocol');
+    const label = input ? input.closest('label') : null;
+    const nav = document.querySelector('nav');
+    const chatSide = document.getElementById('connection-side-chat');
+    const messagesSide = document.getElementById('connection-side-messages');
     const note = document.getElementById('connection-note');
-    const card = select ? select.closest('details.config-card') : null;
+    const name = document.getElementById('connection-name');
     const notice = document.getElementById('protocol-notice');
     return {
       removedPresent: removed.filter(id => document.getElementById(id)),
       shownWords: words.filter(word => shown.indexOf(word) >= 0),
       markupWords: words.filter(word => markup.indexOf(word) >= 0),
-      selectExists: !!select,
-      saveExists: !!save,
-      noteExists: !!note,
-      inPrefillCard: !!(card && (card.querySelector('summary')?.textContent ?? '').indexOf('Assistant 预填充接口') >= 0),
-      selectValue: select ? select.value : null,
-      selectDisabled: select ? select.disabled : null,
-      buttonDisabled: save ? save.disabled : null,
-      options: select ? [...select.options].map(option => option.value) : [],
+      barExists: !!bar,
+      prevTag: bar && bar.previousElementSibling ? bar.previousElementSibling.tagName : null,
+      nextTag: bar && bar.nextElementSibling ? bar.nextElementSibling.tagName : null,
+      aboveNav: !!(bar && nav && bar.getBoundingClientRect().bottom <= nav.getBoundingClientRect().top + 1),
+      inputExists: !!input,
+      inputType: input ? input.type : null,
+      role: input ? input.getAttribute('role') : null,
+      ariaLabel: input ? input.getAttribute('aria-label') : null,
+      inSwitchLabel: !!(label && label.classList.contains('switch')),
+      hasSlider: !!(label && label.querySelector('.slider')),
+      disabled: input ? input.disabled : null,
+      checked: input ? input.checked : null,
+      chatSideText: chatSide ? chatSide.innerText.trim() : null,
+      messagesSideText: messagesSide ? messagesSide.innerText.trim() : null,
+      chatActive: chatSide ? chatSide.classList.contains('active') : null,
+      messagesActive: messagesSide ? messagesSide.classList.contains('active') : null,
+      connectionName: name ? name.textContent.trim() : null,
       noteText: note ? note.innerText.trim() : null,
       noticeExists: !!notice,
       noticeHidden: notice ? notice.hidden === true : null,
       noticeDisplay: notice ? getComputedStyle(notice).display : null,
     };
   })()`);
-  const connection = await evaluate(`fetch('/preset-enhance/api').then(r => r.json()).then(s => s.connection)`);
-  check('old protocol-switch ids are gone and the connection switch lives inside the prefill card',
-    protocolUi.removedPresent.length === 0 && protocolUi.selectExists && protocolUi.saveExists && protocolUi.noteExists &&
-      protocolUi.inPrefillCard && protocolUi.selectDisabled === false && protocolUi.buttonDisabled === false,
-    JSON.stringify({ removedPresent: protocolUi.removedPresent, inPrefillCard: protocolUi.inPrefillCard, selectDisabled: protocolUi.selectDisabled, buttonDisabled: protocolUi.buttonDisabled }));
-  check('the rendered connection protocol equals GET connection.protocol',
-    !!connection && protocolUi.selectValue === connection.protocol && protocolUi.options.includes(connection.protocol),
-    JSON.stringify({ rendered: protocolUi.selectValue, api: connection && connection.protocol, options: protocolUi.options }));
-  check('#connection-note names the detected connection and its current protocol',
-    !!connection && typeof protocolUi.noteText === 'string' &&
-      protocolUi.noteText.indexOf('检测到的连接：' + connection.displayName) >= 0 &&
-      protocolUi.noteText.indexOf('立即生效') >= 0,
-    JSON.stringify({ note: protocolUi.noteText, displayName: connection && connection.displayName }));
+  const connectionBefore = await evaluate(`fetch('/preset-enhance/api').then(r => r.json()).then(s => s.connection)`);
+  check('old protocol ids are gone and the slider bar is the first block after the header',
+    protocolUi.removedPresent.length === 0 && protocolUi.barExists &&
+      protocolUi.prevTag === 'HEADER' && protocolUi.nextTag === 'NAV' && protocolUi.aboveNav === true,
+    JSON.stringify({ removedPresent: protocolUi.removedPresent, prevTag: protocolUi.prevTag, nextTag: protocolUi.nextTag, aboveNav: protocolUi.aboveNav }));
+  check('the switch is a role=switch checkbox reusing the .switch/.slider structure',
+    protocolUi.inputExists && protocolUi.inputType === 'checkbox' && protocolUi.role === 'switch' &&
+      protocolUi.inSwitchLabel && protocolUi.hasSlider && protocolUi.disabled === false &&
+      typeof protocolUi.ariaLabel === 'string' && protocolUi.ariaLabel.indexOf('连接协议') >= 0,
+    JSON.stringify({ type: protocolUi.inputType, role: protocolUi.role, inSwitchLabel: protocolUi.inSwitchLabel, hasSlider: protocolUi.hasSlider, disabled: protocolUi.disabled, ariaLabel: protocolUi.ariaLabel }));
+  check('both end labels exist and the effective side carries .active for the detected protocol',
+    protocolUi.chatSideText === '对话补全接口' && protocolUi.messagesSideText === 'Messages 接口' &&
+      !!connectionBefore &&
+      protocolUi.chatActive === (connectionBefore.protocol === 'chat-completions') &&
+      protocolUi.messagesActive === (connectionBefore.protocol === 'messages') &&
+      protocolUi.checked === (connectionBefore.protocol === 'messages') &&
+      typeof protocolUi.connectionName === 'string' &&
+      protocolUi.connectionName.indexOf('检测到的连接：' + connectionBefore.displayName) >= 0,
+    JSON.stringify({ protocol: connectionBefore && connectionBefore.protocol, checked: protocolUi.checked, chatActive: protocolUi.chatActive, messagesActive: protocolUi.messagesActive, connectionName: protocolUi.connectionName, noteText: protocolUi.noteText }));
   check('no 改投/翻译/协议设置 wording is shown on the workbench',
     protocolUi.shownWords.length === 0,
     `shown=${JSON.stringify(protocolUi.shownWords)} markup=${JSON.stringify(protocolUi.markupWords)}`);
@@ -252,8 +271,7 @@ try {
     protocolUi.noticeExists && protocolUi.noticeHidden === true && protocolUi.noticeDisplay === 'none',
     JSON.stringify({ noticeExists: protocolUi.noticeExists, noticeHidden: protocolUi.noticeHidden, noticeDisplay: protocolUi.noticeDisplay }));
 
-  // T14-2. real save round trip through the UI; alpha must end on chat-completions
-  const stateRevisionBefore = await evaluate(`fetch('/preset-enhance/api').then(r => r.json()).then(s => s.revision)`);
+  // T16-2. the slider saves on toggle; real round trip, restored immediately
   await evaluate(`(() => {
     window.__connOrigFetch = window.fetch;
     window.__connPosts = [];
@@ -268,30 +286,36 @@ try {
       return window.__connOrigFetch.call(window, input, init);
     };
   })()`);
-  await evaluate(`(() => { const select = document.getElementById('connection-protocol'); select.value = 'messages'; select.dispatchEvent(new Event('change')); })()`);
-  await evaluate(`document.getElementById('save-connection-protocol').click()`);
-  await settle(2400);
+  await evaluate(`document.getElementById('connection-protocol').click()`);
+  await settle(2600);
   const connPosts = await evaluate(`window.__connPosts.slice()`);
-  const connAfterSave = await evaluate(`fetch('/preset-enhance/api').then(r => r.json()).then(s => ({ protocol: s.connection && s.connection.protocol, revision: s.revision, connectionRevision: s.connection && s.connection.revision, selected: document.getElementById('connection-protocol').value, status: document.getElementById('status').textContent }))`);
+  const connAfterSave = await evaluate(`fetch('/preset-enhance/api').then(r => r.json()).then(s => ({ protocol: s.connection && s.connection.protocol, connectionRevision: s.connection && s.connection.revision, checked: document.getElementById('connection-protocol').checked, disabled: document.getElementById('connection-protocol').disabled, chatActive: document.getElementById('connection-side-chat').classList.contains('active'), messagesActive: document.getElementById('connection-side-messages').classList.contains('active'), note: document.getElementById('connection-note').innerText.trim(), status: document.getElementById('status').textContent }))`);
   const connSaves = connPosts.filter(entry => entry && entry.action === 'save-connection-protocol');
-  check('switching to messages posts exactly one save-connection-protocol with protocol=messages',
+  check('toggling the slider saves exactly once with protocol=messages',
     connSaves.length === 1 && connSaves[0].protocol === 'messages',
     JSON.stringify({ saves: connSaves, allPosts: connPosts }));
-  // The write targets the HOST connection settings, so the connection's own revision advances
-  // while the plugin state revision is untouched by design.
-  check('GET reports messages after the save and the connection revision advanced',
-    connAfterSave.protocol === 'messages' && connAfterSave.selected === 'messages' &&
+  check('the status line confirms the switch to Messages',
+    /连接协议已保存：DeepSeek → Messages 接口/.test(connAfterSave.status), connAfterSave.status);
+  check('GET reports messages, the connection revision advanced and the slider moved to the messages side',
+    connAfterSave.protocol === 'messages' &&
       Number.isFinite(connAfterSave.connectionRevision) &&
-      connAfterSave.connectionRevision > ((connection && connection.revision) ?? -1) &&
-      /已保存/.test(connAfterSave.status),
-    JSON.stringify({ connectionBefore: connection && connection.revision, stateRevisionBefore, connAfterSave }));
-  await evaluate(`(() => { const select = document.getElementById('connection-protocol'); select.value = 'chat-completions'; select.dispatchEvent(new Event('change')); })()`);
-  await evaluate(`document.getElementById('save-connection-protocol').click()`);
-  await settle(2400);
-  const connRestored = await evaluate(`fetch('/preset-enhance/api').then(r => r.json()).then(s => ({ protocol: s.connection && s.connection.protocol, selected: document.getElementById('connection-protocol').value, status: document.getElementById('status').textContent }))`);
+      connAfterSave.connectionRevision > ((connectionBefore && connectionBefore.revision) ?? -1) &&
+      connAfterSave.checked === true && connAfterSave.messagesActive === true && connAfterSave.chatActive === false &&
+      connAfterSave.disabled === false,
+    JSON.stringify({ before: connectionBefore && connectionBefore.revision, connAfterSave }));
+  for (let i = 0; i < 25; i++) {
+    const busy = await evaluate(`document.getElementById('connection-protocol').disabled`);
+    if (!busy) break;
+    await settle(200);
+  }
+  await evaluate(`document.getElementById('connection-protocol').click()`);
+  await settle(2600);
+  const connRestored = await evaluate(`fetch('/preset-enhance/api').then(r => r.json()).then(s => ({ protocol: s.connection && s.connection.protocol, checked: document.getElementById('connection-protocol').checked, chatActive: document.getElementById('connection-side-chat').classList.contains('active'), messagesActive: document.getElementById('connection-side-messages').classList.contains('active'), status: document.getElementById('status').textContent }))`);
   await evaluate(`(() => { if (window.__connOrigFetch) { window.fetch = window.__connOrigFetch; window.__connOrigFetch = null; } })()`);
-  check('switching back restores chat-completions through the UI (alpha left on chat-completions)',
-    connRestored.protocol === 'chat-completions' && connRestored.selected === 'chat-completions' && /已保存/.test(connRestored.status),
+  check('toggling back restores chat-completions through the slider (alpha left on chat-completions)',
+    connRestored.protocol === 'chat-completions' && connRestored.checked === false &&
+      connRestored.chatActive === true && connRestored.messagesActive === false &&
+      /连接协议已保存：DeepSeek → 对话补全接口/.test(connRestored.status),
     JSON.stringify(connRestored));
 
   const chatHistoryHint = await evaluate(`(() => {
