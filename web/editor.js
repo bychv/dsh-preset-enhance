@@ -154,6 +154,7 @@ async function reload(id) {
   }
   const previousToolMode = $('tool-mode').value;
   state = await api();
+  renderProtocolNotice();
   renderPresetLibrary();
   const binding = state.binding ?? {};
   $('enabled').checked = binding.enabled === true;
@@ -206,6 +207,48 @@ async function refreshPrefillWarning() {
   }
 }
 
+/**
+ * 协议观测来自 GET /preset-enhance/api 的 protocol 字段：没有会话或尚未观测到请求时为 null，
+ * 此时不做任何猜测（既不显示成功也不显示失败）。capability.supported === false 且 reason 非空
+ * 表示预填充/工具调用兼容路径不会生效；skipped === true 表示这一次会话请求没有走兼容路径，
+ * 两者都要显式提示，避免用户以为预设已按当前协议正常工作。
+ */
+function renderProtocolNotice() {
+  const box = $('protocol-notice');
+  const observation = state.protocol ?? null;
+  const capability = observation?.capability ?? null;
+  if (!observation || !capability) {
+    box.hidden = true;
+    box.className = 'notice';
+    box.replaceChildren();
+    return;
+  }
+  const label = observation.protocol === 'messages' ? 'Messages' :
+    observation.protocol === 'chat-completions' ? 'Chat Completions' : '未知';
+  const target = label === '未知' ? '当前连接协议' : `${label} 协议`;
+  const where = observation.pathname ? `（${observation.pathname}）` : '';
+  const head = document.createElement('strong');
+  const body = document.createElement('p');
+  if (observation.skipped === true) {
+    // 本次请求已明确没有使用兼容路径：原因来自观测结果，与激活时机无关。
+    box.className = 'notice unsupported';
+    head.textContent = `${target}：本次请求未使用预设兼容路径`;
+    body.textContent = `${observation.skippedReason || '未能确认本次请求可使用兼容处理'}。` +
+      '预填充续写与工具调用转换未应用；如需该能力，请在连接配置中显式选择 chat-completions 协议。';
+  } else if (capability.supported === true) {
+    box.className = 'notice';
+    head.textContent = `${target}：预设兼容路径可用`;
+    body.textContent = `本会话按 ${target} 处理${where}，预填充续写与工具调用转换正常生效。`;
+  } else {
+    box.className = 'notice unsupported';
+    head.textContent = `${target}不支持预设兼容路径`;
+    body.textContent = `${capability.reason || '未能确认该连接支持兼容处理'}。预设注入仍会生效，` +
+      '但预填充续写与工具调用转换不会应用；如需该能力，请在连接配置中显式选择 chat-completions 协议。';
+  }
+  box.hidden = false;
+  box.replaceChildren(head, body);
+}
+
 function renderAutoModes() {
   $('auto-mode-list').replaceChildren();
   for (const mode of state.agentModes ?? []) {
@@ -234,6 +277,16 @@ const TOOL_AUTO_SAVE_KEY = 'dsh-preset-enhance.tool-auto-save';
 const TOOL_AUTO_SAVE_DELAY = 400;
 const TOOL_PRESET_PREFIX = 'preset:';
 const toolActiveGroupKey = modeId => `dsh-preset-enhance.tool-active-group:${modeId}`;
+// PTC 程序调用入口：DSH 保留 run_code 作为传输层名称，任何工具策略都不能关闭它，
+// 也不能把它从模型工具说明中移除（见 src/lib/tool-presets.mts 的 TOOL_ENTRY_NAME）。
+// 面板只展示入口行，不参与开关、批量操作和预设规则生成。
+const TOOL_ENTRY_NAME = 'run_code';
+const TOOL_ENTRY_NOTE = '程序调用入口（PTC）：始终启用，不受工具策略影响';
+const isToolEntry = name => name === TOOL_ENTRY_NAME;
+const setToolEnabled = (policy, name, enabled) => {
+  if (isToolEntry(name)) return;
+  policy[name] = enabled;
+};
 const compactToolTabs = window.matchMedia?.('(max-width:760px)') ?? { matches: false, addEventListener() {} };
 
 let toolDraft = { key: '', policy: {}, dirty: false };
@@ -276,14 +329,14 @@ function toolSelectionKind(scope, modeId) {
 }
 function normalizeToolPolicy(raw, modeId) {
   const policy = {};
-  for (const tool of toolCatalog(modeId)) policy[tool.name] = raw?.[tool.name] !== false;
+  for (const tool of toolCatalog(modeId)) policy[tool.name] = isToolEntry(tool.name) ? true : raw?.[tool.name] !== false;
   return policy;
 }
 function expandToolPreset(preset, modeId) {
   const policy = {};
-  for (const tool of toolCatalog(modeId)) policy[tool.name] = preset.defaultEnabled !== false;
+  for (const tool of toolCatalog(modeId)) policy[tool.name] = isToolEntry(tool.name) ? true : preset.defaultEnabled !== false;
   for (const rule of preset.rules ?? []) {
-    if (rule.modeId === modeId) policy[rule.toolName] = rule.enabled !== false;
+    if (rule.modeId === modeId && !isToolEntry(rule.toolName)) policy[rule.toolName] = rule.enabled !== false;
   }
   return policy;
 }
@@ -756,7 +809,7 @@ function toolPanelElementId(tabId) {
   return `tool-panel-${toolSlug(tabId)}`;
 }
 function toolGroupEnabledCount(tab) {
-  return tab.tools.filter(name => toolDraft.policy[name] !== false).length;
+  return tab.tools.filter(name => isToolEntry(name) || toolDraft.policy[name] !== false).length;
 }
 function toolTabLabel(tab, full = false) {
   return `${full ? tab.fullName ?? tab.name : tab.name} · ${toolGroupEnabledCount(tab)}/${tab.tools.length}`;
@@ -994,7 +1047,7 @@ function renderToolGroupPanel(panel) {
   toggle.className = 'group-switch';
   toggle.setAttribute('aria-label', `全开或全关 ${tab.name}`);
   toggle.onchange = () => {
-    for (const name of tab.tools) toolDraft.policy[name] = toggle.checked;
+    for (const name of tab.tools) setToolEnabled(toolDraft.policy, name, toggle.checked);
     markToolDirty();
     rerenderToolGroup();
   };
@@ -1022,13 +1075,16 @@ function renderToolGroupPanel(panel) {
   list.className = 'check-list tools';
   list.id = 'tool-list';
   for (const name of tab.tools) {
+    const entry = isToolEntry(name);
     const label = document.createElement('label');
-    label.className = 'check-entry';
+    label.className = entry ? 'check-entry locked' : 'check-entry';
     const input = document.createElement('input');
     input.type = 'checkbox';
     input.dataset.tool = name;
-    input.checked = toolDraft.policy[name] !== false;
+    input.checked = entry ? true : toolDraft.policy[name] !== false;
+    input.disabled = entry;
     input.onchange = () => {
+      if (entry) return;
       toolDraft.policy[name] = input.checked;
       markToolDirty();
       updateToolGroupSummary(panel);
@@ -1037,7 +1093,7 @@ function renderToolGroupPanel(panel) {
     const text = document.createElement('span');
     text.textContent = name;
     const small = document.createElement('small');
-    small.textContent = descriptions.get(name) ?? '无描述';
+    small.textContent = entry ? TOOL_ENTRY_NOTE : descriptions.get(name) ?? '无描述';
     text.append(small);
     label.append(input, text);
     list.append(label);
@@ -1101,16 +1157,16 @@ function restoreToolReference() {
 function applyToolBatch(op, tab) {
   const modeId = toolView.modeId;
   if (op === 'all-on') {
-    for (const name of tab.tools) toolDraft.policy[name] = true;
+    for (const name of tab.tools) setToolEnabled(toolDraft.policy, name, true);
   } else if (op === 'all-off') {
-    for (const name of tab.tools) toolDraft.policy[name] = false;
+    for (const name of tab.tools) setToolEnabled(toolDraft.policy, name, false);
   } else if (op === 'only') {
-    for (const tool of toolCatalog(modeId)) toolDraft.policy[tool.name] = false;
-    for (const name of tab.tools) toolDraft.policy[name] = true;
+    for (const tool of toolCatalog(modeId)) setToolEnabled(toolDraft.policy, tool.name, false);
+    for (const name of tab.tools) setToolEnabled(toolDraft.policy, name, true);
   } else if (op === 'restore') {
     const reference = restoreToolReference();
     if (!reference) return;
-    for (const name of tab.tools) toolDraft.policy[name] = reference[name] !== false;
+    for (const name of tab.tools) setToolEnabled(toolDraft.policy, name, reference[name] !== false);
   } else return;
   markToolDirty();
   rerenderToolGroup();
@@ -1733,7 +1789,7 @@ $('tool-preset-new').onclick = guard(async () => {
   if (input === null) return;
   const policy = effectiveToolPolicy(modeId, sessionScope);
   const rules = catalog
-    .filter(tool => policy[tool.name] === false)
+    .filter(tool => !isToolEntry(tool.name) && policy[tool.name] === false)
     .map(tool => ({ modeId, toolName: tool.name, enabled: false }));
   const name = input.trim() || suggested;
   const created = await api({
@@ -1809,7 +1865,7 @@ $('tool-preset-delete').onclick = guard(async () => {
 });
 for (const [id, checked] of [['select-all-tools', true], ['clear-all-tools', false]]) {
   $(id).onclick = () => {
-    for (const tool of toolCatalog(toolView.modeId)) toolDraft.policy[tool.name] = checked;
+    for (const tool of toolCatalog(toolView.modeId)) setToolEnabled(toolDraft.policy, tool.name, checked);
     markToolDirty();
     rerenderToolGroup();
   };

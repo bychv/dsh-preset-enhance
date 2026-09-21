@@ -25,6 +25,7 @@ import net from 'node:net';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -44,7 +45,8 @@ const HOST_DSH_PKG = 'C:\\Users\\Administrator.DESKTOP-UFD7LVF\\AppData\\Roaming
 const HOST_DSH_HOME = 'C:\\Users\\Administrator.DESKTOP-UFD7LVF\\.dsh';
 const TEMP_ROOT = path.join(process.env.TEMP || os.tmpdir(), 'dsv');
 const REPORT_DIR = path.join(TEMP_ROOT, 'reports');
-const MIRROR = path.join(TEMP_ROOT, 'alpha-mirror');
+// Slot-scoped scratch: a candidate run and an alpha run must never share a state.json.
+const MIRROR = path.join(TEMP_ROOT, `${SLOT_NAME}-mirror`);
 const BUILTIN_MODE_IDS = ['standard', 'minimal', 'ptc', 'cordis'];
 
 // ---------------------------------------------------------------------------
@@ -138,6 +140,28 @@ function slotVersion() {
   try { return JSON.parse(fs.readFileSync(path.join(APP_NM, '@deepseek-ai', 'dsh', 'package.json'), 'utf8')).version; }
   catch { return 'unknown'; }
 }
+/** The repo's declared engines.dsh range, i.e. the range the package actually ships. */
+function declaredEngineRange() {
+  try { return JSON.parse(fs.readFileSync(path.join(REPO, 'package.json'), 'utf8')).engines?.dsh ?? null; }
+  catch { return null; }
+}
+/**
+ * Evaluate a declared engines.dsh range against the slot with node-semver (the
+ * library family npm/pnpm use, so prerelease rules match what an installer
+ * would apply). Returns null when the range or an implementation is missing:
+ * this driver must never guess a range the package.json does not declare.
+ */
+function engineRangeSatisfied(version, range) {
+  if (!version || version === 'unknown' || !range) return null;
+  const resolvers = [
+    () => createRequire(path.join(SLOT, 'app', 'package.json'))('semver'),
+    () => createRequire(path.join(SANDBOX, '.runtime', 'node_modules', 'npm', 'bin', 'npm-cli.js'))('semver'),
+  ];
+  for (const resolve of resolvers) {
+    try { return resolve().satisfies(version, range); } catch {}
+  }
+  return null;
+}
 /** The live slot must run exactly the frozen repo revision, not a stale tarball. */
 function revisionChecks() {
   const repo = {};
@@ -157,13 +181,16 @@ function revisionChecks() {
   const version = slotVersion();
   record('revision', 'info', `slot ${SLOT_NAME} runs dsh ${version}`,
     `pluginDir=${installedDir} packageVersion=${(() => { try { return JSON.parse(fs.readFileSync(path.join(installedDir, 'package.json'), 'utf8')).version; } catch { return '?'; } })()}`);
-  const supported = /^0\.1\.5/.test(version);
-  const outOfRange = version.startsWith('0.1.6');
+  const declaredRange = declaredEngineRange();
+  const satisfied = engineRangeSatisfied(version, declaredRange);
   record('revision', mismatches.length === 0 ? 'verified' : 'falsified',
     'installed plugin in the live slot is byte-identical to the frozen repo revision',
     `mismatches=[${mismatches.join(',')}] hashes=${JSON.stringify(hashes)}`);
-  record('revision', supported ? 'verified' : 'not-verified', `plugin engine range vs slot dsh ${version}`,
-    supported ? `${SLOT_NAME} dsh ${version} is inside engines >=0.1.5-rc.2 <0.1.6` : (outOfRange ? `${SLOT_NAME} dsh ${version} is OUTSIDE the declared engines range (bonus datapoint only)` : `unrecognised dsh version ${version}`));
+  record('revision', satisfied === true ? 'verified' : satisfied === false ? 'falsified' : 'not-verified',
+    `declared engines.dsh vs slot dsh ${version}`,
+    satisfied === null
+      ? `could not evaluate (engines.dsh=${JSON.stringify(declaredRange ?? null)}, semver unavailable)`
+      : `engines.dsh=${declaredRange} => ${satisfied ? 'SATISFIED' : 'NOT SATISFIED'} by ${version} (node-semver, prerelease rules included)`);
   try {
     const smoke = JSON.parse(fs.readFileSync(SLOT_SMOKE, 'utf8'));
     record('smoke', smoke.passed === true ? 'verified' : 'falsified', `sandbox smoke report ${SLOT_NAME}`,

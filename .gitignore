@@ -2,6 +2,10 @@ node_modules/
 *.tgz
 sample/
 
+# TypeScript 编译暂存目录（产物复制回包根，保持发布结构不变）
+dist/
+.build.lock
+
 # 预设稳定性测试的运行产物：报告 / 流水 / 沙箱临时目录
 # （CLI 默认 --out 就是 .test-data/preset-stability/<时间戳>/）
 .test-data/
