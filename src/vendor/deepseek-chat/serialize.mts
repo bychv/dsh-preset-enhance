@@ -216,6 +216,31 @@ function serializeAssistant(message: Message): WireMessage {
   };
 }
 
+/**
+ * The call id of one tool message. The host writes camelCase `toolCallId` on the message
+ * itself (its tool results are top-level blocks, not nested tool-result blocks); the wire
+ * form and older shapes use snake_case `tool_call_id`. Read both.
+ */
+function toolCallIdOf(message: Message): string | undefined {
+  const host = (message as { toolCallId?: unknown }).toolCallId;
+  if (typeof host === 'string' && host.length > 0) return host;
+  const wire = (message as { tool_call_id?: unknown }).tool_call_id;
+  return typeof wire === 'string' && wire.length > 0 ? wire : undefined;
+}
+
+/**
+ * A tool message without its call id cannot be paired with its tool_calls message. Failing
+ * here is honest: emitting it as a user message instead made the provider reject the NEXT
+ * request with "insufficient tool messages following tool_calls message".
+ */
+function requiredToolCallId(message: Message): string {
+  const id = toolCallIdOf(message);
+  if (id === undefined) {
+    throw new LlmError('DeepSeek chat: a ' + message.role + ' message carries no tool call id, so its result cannot be paired.', 'INVALID_REQUEST');
+  }
+  return id;
+}
+
 /** Serialize the conversation; tool results become standalone role:tool messages. */
 export function serializeMessages(messages: readonly Message[]): WireMessage[] {
   const wire: WireMessage[] = [];
@@ -225,6 +250,10 @@ export function serializeMessages(messages: readonly Message[]): WireMessage[] {
     if (message.role === 'assistant') { wire.push(serializeAssistant(message)); continue; }
     const toolResults = message.content.filter(block => block.type === 'tool-result');
     const text = flattenText(message.content);
+    if (message.role === 'tool' && toolResults.length === 0) {
+      wire.push({ role: 'tool', tool_call_id: requiredToolCallId(message), content: text || '(no output)' });
+      continue;
+    }
     if (text.length > 0 || toolResults.length === 0) wire.push({ role: 'user', content: text });
     for (const result of toolResults) {
       wire.push({
@@ -406,11 +435,10 @@ export function serializeMessagesWithImages(
     // A tool message carrying its own content (an image a tool returned at top level) stays a
     // tool message: the provider accepts images there, so the result keeps its tool_call_id
     // instead of being relocated into a synthetic user turn.
-    const toolCallId = (message as { tool_call_id?: unknown }).tool_call_id;
-    if (message.role === 'tool' && toolResults.length === 0 && regular.length > 0 && typeof toolCallId === 'string') {
+    if (message.role === 'tool' && toolResults.length === 0) {
       flushToolImages();
       const parts = contentParts(regular, images, messageIndex + 1, nextImage, fileIds);
-      wire.push({ role: 'tool', tool_call_id: toolCallId, content: parts.length === 0 ? '(no output)' : parts });
+      wire.push({ role: 'tool', tool_call_id: requiredToolCallId(message), content: parts.length === 0 ? '(no output)' : parts });
       continue;
     }
     const content = userContent(contentParts(regular, images, messageIndex + 1, nextImage, fileIds));

@@ -427,7 +427,7 @@ test('an image a tool returned is sent on that tool message, keeping its call id
     messages: [
       { role: 'user', content: [{ type: 'text', text: 'read it' }] },
       { role: 'assistant', content: [{ type: 'tool-call', id: 't1', name: 'read_image', arguments: '{}' }] },
-      { role: 'tool', tool_call_id: 't1', content: [{ type: 'image', attachment: { attachmentId: 'a1', mediaType: 'image/png', width: 2, height: 2 } }] },
+      { role: 'tool', toolCallId: 't1', content: [{ type: 'image', attachment: { attachmentId: 'a1', mediaType: 'image/png', width: 2, height: 2 } }] },
     ],
   }));
   const wire = requests[0].body.messages;
@@ -437,6 +437,44 @@ test('an image a tool returned is sent on that tool message, keeping its call id
   assert.equal(Array.isArray(toolMessage.content), true, 'the image travels on the tool message itself');
   assert.equal(toolMessage.content.some(part => part.type === 'image_url'), true);
   assert.equal(JSON.stringify(wire).includes('Attached image(s) from tool result:'), false, 'no synthetic user turn is needed');
+});
+
+test('a text tool result the host writes with camelCase toolCallId stays a tool message', async () => {
+  const requests = [];
+  const connection = resolveChatConnection({ streamIdleTimeoutMs: 50 });
+  const adapter = createDeepSeekChatAdapter({
+    connection: () => connection,
+    resolveApiKey: async () => 'k',
+    fetch: async (url, init) => { requests.push({ body: JSON.parse(init.body) }); return sseResponse(['[DONE]']); },
+  });
+  await collect(adapter.stream({
+    provider: DEEPSEEK_CHAT_PROVIDER_ID, model: 'deepseek-flash',
+    messages: [
+      { role: 'user', content: [{ type: 'text', text: 'read it' }] },
+      { role: 'assistant', content: [{ type: 'tool-call', id: 't1', name: 'read_file', arguments: '{}' }] },
+      { role: 'tool', toolCallId: 't1', content: [{ type: 'text', text: 'file contents' }] },
+    ],
+  }));
+  const wire = requests[0].body.messages;
+  const assistantIndex = wire.findIndex(message => message.role === 'assistant' && message.tool_calls);
+  const toolMessage = wire[assistantIndex + 1];
+  assert.equal(toolMessage?.role, 'tool', 'the result immediately follows its tool_calls message');
+  assert.equal(toolMessage.tool_call_id, 't1');
+  assert.equal(wire.some(message => message.role === 'user' && String(message.content).includes('file contents')), false,
+    'the result is never re-emitted as a user message');
+});
+
+test('a tool message without any call id fails loudly instead of mis-pairing', async () => {
+  const connection = resolveChatConnection({ streamIdleTimeoutMs: 50 });
+  const adapter = createDeepSeekChatAdapter({
+    connection: () => connection,
+    resolveApiKey: async () => 'k',
+    fetch: async () => sseResponse(['[DONE]']),
+  });
+  await assert.rejects(collect(adapter.stream({
+    provider: DEEPSEEK_CHAT_PROVIDER_ID, model: 'deepseek-flash',
+    messages: [{ role: 'tool', content: [{ type: 'text', text: 'orphan' }] }],
+  })), (error) => error.code === 'INVALID_REQUEST' && String(error.message).includes('tool call id'));
 });
 
 /* ------------------------------------------------------------------ Files API */
