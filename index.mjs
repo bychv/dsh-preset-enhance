@@ -10,6 +10,7 @@ import { createProtocolObserver } from './lib/protocol.mjs';
 import { sessionConnection, writeConnectionProtocol } from './lib/connection.mjs';
 import { installToolRestrictions } from './lib/tool-restrictions.mjs';
 import { createPresetModeController, modeCapability, readModeToolCatalog } from './lib/modes.mjs';
+import { createDeepSeekChatAdapter, DEEPSEEK_CHAT_PROVIDER_ID, resolveChatConnection } from './vendor/deepseek-chat/index.mjs';
 import { adaptPresetForMessages } from './lib/messages.mjs';
 import { clearPresetEnhanceUnavailableReason, markPresetEnhanceActive, setPresetEnhanceUnavailableReason, } from './lib/availability.mjs';
 import { OUTPUT_EXTRACTION_PROMPT_TEMPLATE } from './lib/output-extractor.mjs';
@@ -139,6 +140,15 @@ export async function apply(ctx, config = {}) {
     // assistant-prefix/toolcall compatibility bridge cannot apply. Observations are
     // recorded per session so the workbench can say so instead of pretending.
     const protocolObserver = createProtocolObserver();
+    // 0.1.7 removed the official Chat Completions protocol and routes plain requests through
+    // pi-ai, which rewrites system prompts; the plugin ships its own adapter so preset
+    // ordering, the prefill bridge, DSML conversion and extraction keep a Chat wire format.
+    const chatAdapter = createDeepSeekChatAdapter({
+        connection: () => resolveChatConnection({}),
+        resolveApiKey: async () => resolveChatApiKey(ctx, config.chatApiKeyEnv ?? DEFAULT_CHAT_API_KEY_ENV),
+        resolveUserId: () => 'preset-enhance',
+    });
+    const disposeChatAdapter = ctx.llm?.registerAdapter?.([DEEPSEEK_CHAT_PROVIDER_ID], chatAdapter);
     // The in-app official-request switch is parked behind an explicit opt-in; the shipped
     // default leaves the host's own protocol behaviour untouched.
     const deepSeekBeta = installDeepSeekBetaBridge(ctx, {
@@ -149,6 +159,7 @@ export async function apply(ctx, config = {}) {
     ctx.effect(() => async () => {
         await lifecycle.dispose(async () => {
             await store.close();
+            disposeChatAdapter?.();
             deepSeekBeta.dispose();
         });
     }, 'preset-enhance: ordered teardown');
@@ -922,6 +933,21 @@ function connectionProtocolFor(state, connection) {
         return connection.protocol;
     }
     return state.protocolMode === 'messages' ? 'messages' : 'chat-completions';
+}
+const DEFAULT_CHAT_API_KEY_ENV = 'DEEPSEEK_API_KEY';
+/**
+ * Resolve the bundled Chat provider's key for one request: the host credentials
+ * service first (by reference), then the launching environment. Never cached, and
+ * never written into the preset store or an exported package.
+ */
+async function resolveChatApiKey(ctx, ref) {
+    const service = ctx.get?.('credentials');
+    const hit = await service?.resolve?.(ref).catch(() => undefined);
+    const fromStore = hit && typeof hit.value === 'string' ? hit.value : '';
+    const key = fromStore.trim() || String(process.env[ref] ?? '').trim();
+    if (!key)
+        throw new Error(`预设增强：连接缺少 API Key（引用 ${ref}）`);
+    return key;
 }
 function defaultRecord(state) {
     return state.presets.find(p => p.id === state.selectedPresetId) ??

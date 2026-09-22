@@ -12,6 +12,8 @@ export interface PluginConfig {
   dataFile?: string;
   agentPresetRoot?: string;
   standardComposition?: string;
+  /** Credential reference the bundled Chat provider resolves per request. */
+  chatApiKeyEnv?: string;
   /**
    * Opt into switching an official Messages request to the official chat/completions
    * endpoint. PARKED and off by default: the supported fix is the host's own
@@ -231,6 +233,8 @@ export interface PluginContext {
   on(event: string, handler: (...args: any[]) => any): void;
   llm: {
     stream(options: StreamOptions): AsyncIterable<unknown>;
+    /** 0.1.7: register an adapter for the given provider routes and get its disposer back. */
+    registerAdapter?(providers: string[], adapter: unknown): (() => void) | undefined;
     /** Routes the host can activate through configuration; absent on older hosts. */
     listConfigurableProviders?(): ConfigurableProviderInfo[];
   };
