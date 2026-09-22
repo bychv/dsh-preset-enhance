@@ -305,8 +305,12 @@ test('inline image serialization and its request budget', () => {
   assert.equal(textOnly.messages[0].content.includes('omitted to fit request image limits'), true);
   assert.throws(() => serializeRequestWithImages(options, { ...images, maxRequestImageBytes: 2 }, {}),
     (error) => error instanceof LlmError && error.code === IMAGE_OFFLOAD_REQUIRED_CODE && error.offloadImages === 1);
+  // The provider rejects images in assistant and system messages, so those degrade to the
+  // placeholder text rather than failing an otherwise valid turn.
   const assistantImage = { ...options, messages: [{ role: 'assistant', content: [{ type: 'image', attachment: image }] }] };
-  assert.throws(() => serializeRequestWithImages(assistantImage, images, {}), (error) => error.code === 'UNSUPPORTED_CONTENT');
+  const degraded = JSON.stringify(serializeRequestWithImages(assistantImage, images, {}).messages);
+  assert.equal(degraded.includes('image_url'), false, 'no image part is sent in an assistant message');
+  assert.equal(degraded.includes('att-1'), true, 'the occurrence is still named, not silently dropped');
 });
 
 test('adapter metadata answers the host catalog questions', async () => {
@@ -407,6 +411,32 @@ test('image requests use the injected attachment bridge as inline base64', async
   assert.equal(Array.isArray(content), true);
   assert.equal(content[0].text.includes('/world/img.png'), true);
   assert.equal(content[1].image_url.url.startsWith('data:image/png;base64,'), true);
+});
+
+test('an image a tool returned is sent on that tool message, keeping its call id', async () => {
+  const requests = [];
+  const connection = resolveChatConnection({ streamIdleTimeoutMs: 50 });
+  const adapter = createDeepSeekChatAdapter({
+    connection: () => connection,
+    resolveApiKey: async () => 'k',
+    resolveRequestImages: async () => new Map([['a1', { mediaType: 'image/png', data: new Uint8Array([1, 2, 3]), bytes: 3, width: 2, height: 2 }]]),
+    fetch: async (url, init) => { requests.push({ body: JSON.parse(init.body) }); return sseResponse(['[DONE]']); },
+  });
+  await collect(adapter.stream({
+    provider: DEEPSEEK_CHAT_PROVIDER_ID, model: 'deepseek-flash',
+    messages: [
+      { role: 'user', content: [{ type: 'text', text: 'read it' }] },
+      { role: 'assistant', content: [{ type: 'tool-call', id: 't1', name: 'read_image', arguments: '{}' }] },
+      { role: 'tool', tool_call_id: 't1', content: [{ type: 'image', attachment: { attachmentId: 'a1', mediaType: 'image/png', width: 2, height: 2 } }] },
+    ],
+  }));
+  const wire = requests[0].body.messages;
+  const toolMessage = wire.find(message => message.role === 'tool');
+  assert.ok(toolMessage, 'the tool result stays a tool message');
+  assert.equal(toolMessage.tool_call_id, 't1');
+  assert.equal(Array.isArray(toolMessage.content), true, 'the image travels on the tool message itself');
+  assert.equal(toolMessage.content.some(part => part.type === 'image_url'), true);
+  assert.equal(JSON.stringify(wire).includes('Attached image(s) from tool result:'), false, 'no synthetic user turn is needed');
 });
 
 /* ------------------------------------------------------------------ Files API */

@@ -36,6 +36,14 @@ export function offloadedImageText(ref, access) {
     }
     return '[' + identity + normalizedAccessText(ref, access) + ']';
 }
+/** Placeholder text for an image the provider refuses in this message role. */
+export function unsupportedRoleImageText(ref, access) {
+    const identity = 'image omitted: the chat-completions provider accepts images only in user and tool messages; ' + imageIdentity(ref) + '.';
+    if (access === undefined) {
+        return '[' + identity + ' No local normalized image path is available; ask the user to attach it again if needed.]';
+    }
+    return '[' + identity + normalizedAccessText(ref, access) + ']';
+}
 /** Replace offloaded image occurrences with placeholder text. */
 export function projectOffloadedImages(messages, placeholder) {
     return messages.map(message => {
@@ -316,6 +324,16 @@ export function serializeMessagesWithImages(messages, images, fileIds = EMPTY_FI
         }
         const regular = message.content.filter(block => block.type !== 'tool-result');
         const toolResults = message.content.filter(block => block.type === 'tool-result');
+        // A tool message carrying its own content (an image a tool returned at top level) stays a
+        // tool message: the provider accepts images there, so the result keeps its tool_call_id
+        // instead of being relocated into a synthetic user turn.
+        const toolCallId = message.tool_call_id;
+        if (message.role === 'tool' && toolResults.length === 0 && regular.length > 0 && typeof toolCallId === 'string') {
+            flushToolImages();
+            const parts = contentParts(regular, images, messageIndex + 1, nextImage, fileIds);
+            wire.push({ role: 'tool', tool_call_id: toolCallId, content: parts.length === 0 ? '(no output)' : parts });
+            continue;
+        }
         const content = userContent(contentParts(regular, images, messageIndex + 1, nextImage, fileIds));
         if (content.length > 0 || toolResults.length === 0) {
             flushToolImages();
@@ -380,15 +398,51 @@ export function serializeRequestWithImages(options, images, defaults = {}) {
     }
     return resolveFileIds(requestMessages, images).then(fileIds => (imageRequest(options, requestMessages, images, fileIds, defaults)));
 }
-/** Refuse image content in roles the wire cannot carry, then project offloaded occurrences. */
-function projectedImageMessages(options, images) {
-    for (const message of options.messages) {
-        if (message.role !== 'user' && contentHasImage(message.content)) {
-            throw new LlmError('The DeepSeek chat adapter cannot represent image content in a ' + message.role + ' message.', 'UNSUPPORTED_CONTENT');
+/**
+ * The chat wire carries images only in user messages, but the host can legitimately put one
+ * in another role - a file-reading tool returns the image inside its tool result. Upstream
+ * refused the whole request there (0.1.6 serialize.ts:112); we substitute the same
+ * deterministic placeholder the offload path uses instead, so an otherwise valid
+ * conversation is not lost. Substituted occurrences are gone before the budget check, so
+ * they neither count against the inline budget nor ask the host to offload a real image.
+ */
+function projectForeignRoleImages(messages, placeholder) {
+    return messages.map(message => {
+        // Measured against the live provider: images are accepted in user and tool messages, and
+        // rejected in both assistant ('Image in assistant message is not supported') and system
+        // ('Image in system message is unsupported'). Only the rejected roles degrade here.
+        if (message.role === 'user' || message.role === 'tool')
+            return message;
+        let changed = false;
+        const content = [];
+        for (const block of message.content) {
+            if (block.type === 'image') {
+                changed = true;
+                content.push({ type: 'text', text: placeholder(block.attachment) });
+                continue;
+            }
+            const nested = block.content;
+            if (block.type === 'tool-result' && Array.isArray(nested) && nested.some(inner => inner.type === 'image')) {
+                changed = true;
+                content.push({
+                    ...block,
+                    content: nested.map(inner => inner.type === 'image'
+                        ? { type: 'text', text: placeholder(inner.attachment) }
+                        : inner),
+                });
+                continue;
+            }
+            content.push(block);
         }
-    }
-    assertRetainedImagesFit(options.messages, images);
-    return projectOffloadedImages(options.messages, ref => offloadedImageText(ref, images.resolveImageAccess?.(ref)));
+        return changed ? { ...message, content } : message;
+    });
+}
+/** Make every image wire-legal for its role, then project offloaded occurrences. */
+function projectedImageMessages(options, images) {
+    const access = (ref) => images.resolveImageAccess?.(ref);
+    const roleLegal = projectForeignRoleImages(options.messages, ref => unsupportedRoleImageText(ref, access(ref)));
+    assertRetainedImagesFit(roleLegal, images);
+    return projectOffloadedImages(roleLegal, ref => offloadedImageText(ref, access(ref)));
 }
 /** Assemble one image-capable request from an already projected history. */
 function imageRequest(options, requestMessages, images, fileIds, defaults) {

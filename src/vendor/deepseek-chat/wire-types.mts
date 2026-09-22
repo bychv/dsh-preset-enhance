@@ -34,7 +34,15 @@ export interface WireUserMessage {
 export interface WireToolMessage {
   role: 'tool';
   tool_call_id: string;
-  content: string;
+  /**
+   * Upstream typed this as a bare string. Measured against the live provider
+   * (api.deepseek.com/chat/completions, deepseek-flash): a tool message whose content is a
+   * content-part array carrying image_url is accepted (200), while the same part in an
+   * assistant or system message is rejected ("Image in assistant message is not supported",
+   * "Image in system message is unsupported"). Widen accordingly so a tool that returns an
+   * image can keep it on its own tool_call_id.
+   */
+  content: string | WireUserContentPart[];
 }
 export interface WireToolCall {
   id: string;
