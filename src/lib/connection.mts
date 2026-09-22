@@ -108,3 +108,71 @@ export function sessionConnection(ctx: PluginContext, sessionId: string, provide
   if (sessionId && !route) return null;
   return readConnectionProtocol(ctx, undefined, route);
 }
+/** Providers the workbench can route a session to, with the protocol each speaks. */
+export interface ConnectionChoice {
+  provider: string;
+  label: string;
+  protocol: ConnectionProtocol;
+  /** Model this provider is switched to when the caller names none. */
+  defaultModel: string;
+}
+
+export interface ConnectionSelection {
+  provider: string | null;
+  model: string | null;
+  reasoningEffort: string | null;
+  choices: ConnectionChoice[];
+  /** False when the host exposes no agentDefaultModel service, so nothing can be switched. */
+  canSwitch: boolean;
+}
+
+const CONNECTION_CHOICES: ConnectionChoice[] = [
+  { provider: 'preset-deepseek-chat', label: '插件 DeepSeek Chat（预设增强）', protocol: 'chat-completions', defaultModel: 'deepseek-flash' },
+  { provider: 'deepseek-official', label: 'DSH 官方连接（Messages）', protocol: 'messages', defaultModel: 'deepseek-v4-pro' },
+];
+
+interface DefaultModelService {
+  currentSelection?(): { provider?: string; model?: string; reasoningEffort?: string } | undefined;
+  saveSelection?(next: { provider: string; model: string; reasoningEffort?: string }): Promise<void>;
+}
+
+const defaultModelService = (ctx: PluginContext): DefaultModelService | undefined =>
+  ctx.get?.('agentDefaultModel') as DefaultModelService | undefined;
+
+/** The connection a new session is routed to, read from the host's default-model service. */
+export function connectionSelection(ctx: PluginContext): ConnectionSelection {
+  const service = defaultModelService(ctx);
+  const current = service?.currentSelection?.() ?? undefined;
+  return {
+    provider: typeof current?.provider === 'string' && current.provider ? current.provider : null,
+    model: typeof current?.model === 'string' && current.model ? current.model : null,
+    reasoningEffort: typeof current?.reasoningEffort === 'string' ? current.reasoningEffort : null,
+    choices: CONNECTION_CHOICES.map(choice => ({ ...choice })),
+    canSwitch: typeof service?.saveSelection === 'function',
+  };
+}
+
+/**
+ * Route sessions to one of the offered connections.
+ *
+ * The switch happens at the host's provider/model layer on purpose: request records,
+ * model capabilities and the adapter that actually runs then all describe the same
+ * route. Rewriting the wire later (at the fetch stage) is exactly what the 0.1.7 plan
+ * rules out, and nothing here writes a `protocol` field - 0.1.7 rejects it.
+ */
+export async function selectConnection(ctx: PluginContext, provider: string, model?: string): Promise<ConnectionSelection> {
+  const service = defaultModelService(ctx);
+  if (typeof service?.saveSelection !== 'function') {
+    throw new Error('当前 DSH 未提供 agentDefaultModel 服务，无法切换连接');
+  }
+  const choice = CONNECTION_CHOICES.find(item => item.provider === provider);
+  if (!choice) throw new Error('未知的连接');
+  const current = service.currentSelection?.();
+  const next = {
+    provider,
+    model: model && model.trim() ? model.trim() : choice.defaultModel,
+    ...(typeof current?.reasoningEffort === 'string' ? { reasoningEffort: current.reasoningEffort } : {}),
+  };
+  await service.saveSelection(next);
+  return connectionSelection(ctx);
+}

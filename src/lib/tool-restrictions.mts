@@ -2,6 +2,9 @@ import type { AgentHandle, PluginContext, SessionLike } from '../host-types.mjs'
 import { planToolRestriction } from './tool-presets.mjs';
 import type { ToolPolicySnapshot } from './tool-presets.mjs';
 
+/** The host's system-prompt assembly service (accessed without declaring an inject dependency). */
+interface SystemPromptService { assemble(context: unknown): Promise<unknown> }
+
 /** Refresh scoped restrictions before rebuilding both native schemas and the PTC SDK. */
 export function installToolRestrictions(
   ctx: PluginContext, snapshot: () => ToolPolicySnapshot,
@@ -9,7 +12,9 @@ export function installToolRestrictions(
 ): void {
   // Resolve through ctx.get(): a bare ctx.systemPrompt access throws in Cordis when the
   // service is not declared in inject, which is why the whole plugin failed to load.
-  const systemPrompt = ctx.get?.('systemPrompt') as { assemble(context: unknown): Promise<unknown> } | undefined;
+  const systemPrompt = typeof ctx.get === 'function'
+    ? (ctx.get('systemPrompt') as SystemPromptService | undefined)
+    : (ctx as { systemPrompt?: SystemPromptService }).systemPrompt;
   if (!systemPrompt || !ctx.tools?.get) return;
   const releases = new Map<AgentHandle, () => void>();
   const rebuilding = new WeakSet<object>();

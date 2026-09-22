@@ -7,7 +7,7 @@ import { compilePreset, validatePreset, getOrder, dshSystemPromptEnabled } from 
 import { decodePresetDocument, encodePresetPackage, attachPrefillSettings, applyPackagePrefill } from './lib/preset-package.mjs';
 import { installDeepSeekBetaBridge } from './lib/deepseek-beta.mjs';
 import { createProtocolObserver } from './lib/protocol.mjs';
-import { sessionConnection, writeConnectionProtocol } from './lib/connection.mjs';
+import { connectionSelection, selectConnection, sessionConnection, writeConnectionProtocol } from './lib/connection.mjs';
 import type { ConnectionProtocol, ConnectionProtocolInfo } from './lib/connection.mjs';
 import { installToolRestrictions } from './lib/tool-restrictions.mjs';
 import { createPresetModeController, modeCapability, readModeToolCatalog } from './lib/modes.mjs';
@@ -458,6 +458,8 @@ export async function apply(ctx: PluginContext, config: PluginConfig = {}) {
             protocol: sessionId ? protocolObserver.last(sessionId) ?? null : null,
             protocolMode: state.protocolMode,
             connection: connectionInfo,
+            // 0.1.7: which connection sessions are routed to, and the ones we can route to.
+            connectionChoice: connectionSelection(ctx),
             protocolNotes: ownGet(state.sessions, sessionId)?.protocolNotes ?? [],
             protocolSwitched: Boolean(sessionId && protocolObserver.last(sessionId)?.switchedFrom),
             protocolMismatch: presetProtocolMismatch(state, sessionId, session, protocolObserver, connectionInfo),
@@ -491,6 +493,14 @@ export async function apply(ctx: PluginContext, config: PluginConfig = {}) {
         const knownModes = new Set(modeRows.map(mode => mode.id));
         const discovered: DiscoveredCatalogs = CATALOG_ACTIONS.has(body.action) ?
           await discoverModeToolCatalogs(ctx, modeRows) : { catalogs: {}, errors: {} };
+
+        if (body.action === 'select-connection') {
+          const provider = body.provider;
+          if (typeof provider !== 'string' || !provider) throw new Error('缺少连接标识');
+          const model = typeof body.model === 'string' && body.model.trim() ? body.model.trim() : undefined;
+          const choice = await selectConnection(ctx, provider, model);
+          return respond(res, 200, { connectionChoice: choice });
+        }
 
         if (body.action === 'save-connection-protocol') {
           const protocol = body.protocol;
