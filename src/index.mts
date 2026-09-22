@@ -11,7 +11,10 @@ import { connectionSelection, selectConnection, sessionConnection, writeConnecti
 import type { ConnectionProtocol, ConnectionProtocolInfo } from './lib/connection.mjs';
 import { installToolRestrictions } from './lib/tool-restrictions.mjs';
 import { createPresetModeController, modeCapability, readModeToolCatalog } from './lib/modes.mjs';
-import { createDeepSeekChatAdapter, DEEPSEEK_CHAT_PROVIDER_ID, resolveChatConnection } from './vendor/deepseek-chat/index.mjs';
+import {
+  createDeepSeekChatAdapter, DEEPSEEK_CHAT_PROVIDER_ID, resolveChatConnection, resolveRequestImageTarget,
+} from './vendor/deepseek-chat/index.mjs';
+import type { RequestImageAttachment } from './vendor/deepseek-chat/index.mjs';
 import { adaptPresetForMessages } from './lib/messages.mjs';
 import {
   clearPresetEnhanceUnavailableReason, markPresetEnhanceActive, setPresetEnhanceUnavailableReason,
@@ -163,10 +166,15 @@ export async function apply(ctx: PluginContext, config: PluginConfig = {}) {
   // 0.1.7 removed the official Chat Completions protocol and routes plain requests through
   // pi-ai, which rewrites system prompts; the plugin ships its own adapter so preset
   // ordering, the prefill bridge, DSML conversion and extraction keep a Chat wire format.
+  const chatConnection = () => resolveChatConnection({});
   const chatAdapter = createDeepSeekChatAdapter({
-    connection: () => resolveChatConnection({}),
+    connection: chatConnection,
     resolveApiKey: async () => resolveChatApiKey(ctx, config.chatApiKeyEnv ?? DEFAULT_CHAT_API_KEY_ENV),
     resolveUserId: () => 'preset-enhance',
+    // Images keep going through the host's attachment service: we only turn the
+    // retained references into the bytes the provider request needs.
+    resolveRequestImages: async (options, signal) => buildRequestImages(ctx, chatConnection, options, signal),
+    resolveImageAccess: ref => imageAccessOf(ctx, ref),
   });
   const disposeChatAdapter = ctx.llm?.registerAdapter?.([DEEPSEEK_CHAT_PROVIDER_ID], chatAdapter as unknown as never);
 
@@ -921,6 +929,55 @@ function connectionProtocolFor(
 }
 
 const DEFAULT_CHAT_API_KEY_ENV = 'DEEPSEEK_API_KEY';
+
+/** The host's attachment service, as the official adapter consumes it. */
+interface HostAttachments {
+  readImageRequest?(ref: unknown, target: unknown, signal?: AbortSignal): Promise<unknown>;
+  imageHostPath?(ref: unknown): string | undefined;
+}
+
+/**
+ * Collect the retained image references of one request and resolve each through the
+ * host attachment service, at the size target this model route asks for. Offloaded
+ * occurrences stay placeholders and are neither read nor uploaded.
+ */
+async function buildRequestImages(
+  ctx: PluginContext,
+  connection: () => { models?: readonly { id?: string }[] },
+  options: { model?: string; messages?: readonly { content?: readonly unknown[] }[] },
+  signal?: AbortSignal,
+): Promise<Map<string, RequestImageAttachment>> {
+  const prepared = new Map<string, RequestImageAttachment>();
+  const attachments = ctx.get?.('attachments') as HostAttachments | undefined;
+  if (typeof attachments?.readImageRequest !== 'function') return prepared;
+  const routes = connection().models ?? [];
+  const route = routes.find(item => item.id === options.model) ?? routes[0];
+  if (route === undefined) return prepared;
+  const refs = new Map<string, { attachmentId?: string }>();
+  for (const message of options.messages ?? []) {
+    for (const block of (message.content ?? []) as { type?: string; offloaded?: boolean; attachment?: { attachmentId?: string } }[]) {
+      if (block?.type !== 'image' || block.offloaded === true) continue;
+      const ref = block.attachment;
+      if (typeof ref?.attachmentId === 'string' && ref.attachmentId) refs.set(ref.attachmentId, ref);
+    }
+  }
+  for (const ref of refs.values()) {
+    const target = resolveRequestImageTarget(route as never, ref as never);
+    prepared.set(ref.attachmentId as string,
+      await attachments.readImageRequest(ref, target, signal) as RequestImageAttachment);
+  }
+  return prepared;
+}
+
+/** Read-only handle text for one image reference, so the wire shows a real path when the host has one. */
+function imageAccessOf(ctx: PluginContext, ref: unknown): { readonlyPath: string } | undefined {
+  const attachments = ctx.get?.('attachments') as HostAttachments | undefined;
+  const hostPath = attachments?.imageHostPath?.(ref);
+  if (hostPath === undefined) return undefined;
+  const world = (ctx.get?.('fs') as { processPathFromHostPath?(path: string): string | undefined } | undefined)
+    ?.processPathFromHostPath?.(hostPath);
+  return world === undefined ? undefined : { readonlyPath: world };
+}
 
 /**
  * Resolve the bundled Chat provider's key for one request: the host credentials

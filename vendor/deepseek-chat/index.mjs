@@ -9,3 +9,4 @@ export { contentHasImage, offloadedImageText, projectOffloadedImages, requestIma
 export { DONE, createSseDecoder, parseSse } from './sse.mjs';
 export { mapFinishReason, mapUsage, translate } from './translate.mjs';
 export { CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, IMAGE_OFFLOAD_REQUIRED_CODE, LlmError, QUOTA_EXCEEDED_CODE, httpErrorCode } from './errors.mjs';
+export { DEFAULT_LOW_DETAIL_IMAGE_PIXEL_BUDGET, DEFAULT_MAX_IMAGES_PER_REQUEST, DEFAULT_MAX_REQUEST_FILES_BYTES, DEFAULT_REQUEST_IMAGE_MAX_BYTES, REQUEST_IMAGE_MAX_DIMENSION, deepSeekImageRequestPricing, deepSeekImageTokens, deepSeekRequestImageDimensions, longEdgeDimensions, requestImageDimensions, resolveRequestImageMaxBytes, resolveRequestImageTarget, textOnlyImageText, } from './pricing.mjs';

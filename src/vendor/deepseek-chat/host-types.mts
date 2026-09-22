@@ -1,6 +1,6 @@
 /**
  * Vendored from DeepSeek Harness, tag dsh-v0.1.6-alpha.2 (migration baseline),
- * packages/llm/llm/src/types.ts, content.ts, retry-policy.ts (structural replica)
+ * packages/llm/llm/src/types.ts, content.ts, retry-policy.ts (structural replica).
  * Upstream is MIT licensed; Copyright (c) DeepSeek. Adapted for DSH 0.1.7-alpha.1.
  */
 
@@ -16,9 +16,12 @@ export type ModelModality = 'text' | 'image';
 
 export interface TextBlock { type: 'text'; text: string }
 export interface ReasoningBlock { type: 'reasoning'; text: string }
+
 export interface ImageAttachmentRef {
   attachmentId: string;
   mediaType: string;
+  width?: number;
+  height?: number;
   name?: string;
   byteSize?: number;
   [key: string]: unknown;
@@ -43,8 +46,22 @@ export type ContentBlock =
 
 export interface Message { role: string; content: ContentBlock[] }
 
-export interface RequestImageAttachment { mediaType: string; data: Uint8Array; bytes: number }
-export interface ImageAttachmentAccess { path?: string; [key: string]: unknown }
+export interface RequestImageAttachment {
+  mediaType: string;
+  data: Uint8Array;
+  bytes: number;
+  width?: number;
+  height?: number;
+}
+
+/** Read-only description of one current image occurrence, for handle text. */
+export interface ImageAttachmentAccess {
+  /** Read-only execution-world path of the normalized copy. */
+  readonlyPath?: string;
+  /** Legacy alias accepted alongside readonlyPath. */
+  path?: string;
+  [key: string]: unknown;
+}
 
 export type FinishReason =
   | { kind: 'stop' }
@@ -126,3 +143,4 @@ export interface PreparedAdapterCall {
 }
 
 export type AttributionHeaders = () => Record<string, string>;
+

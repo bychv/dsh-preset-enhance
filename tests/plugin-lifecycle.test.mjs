@@ -139,3 +139,73 @@ test('activation registers the chat provider and the preset mode once and releas
     assert.equal(modeRegistrations.length, 2);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+test('an image turn resolves through the host attachment service', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'preset-image-'));
+  const file = join(dir, 'state.json');
+  const originalFetch = globalThis.fetch;
+  const disposers = [];
+  const readCalls = [];
+  let adapter;
+  let sent;
+  const attachments = {
+    async readImageRequest(ref, target) {
+      readCalls.push({ ref, target });
+      return { mediaType: 'image/png', data: Uint8Array.from([1, 2, 3]), bytes: 3, width: 100, height: 80 };
+    },
+    imageHostPath() { return 'C:/tmp/shot.png'; },
+  };
+  const { chatCompletionEvents, encodeChatSse } = await import('./fixtures/protocol-server.mjs');
+  // No credentials service in this stub, so the launching-environment fallback supplies the key.
+  const originalKey = process.env.DEEPSEEK_API_KEY;
+  process.env.DEEPSEEK_API_KEY = 'test-key';
+  const ctx = {
+    effect(setup) { const dispose = setup(); if (typeof dispose === 'function') disposers.push(dispose); },
+    on() {},
+    get(name) {
+      if (name === 'attachments') return attachments;
+      if (name === 'fs') return { processPathFromHostPath: () => '/world/shot.png' };
+      return undefined;
+    },
+    loader: { entries: () => [] },
+    llm: {
+      async *stream() {},
+      registerAdapter(_providers, registered) { adapter = registered; return () => {}; },
+    },
+    agentPresets: { async register() { return async () => {}; } },
+    sessions: { get() { return undefined; } },
+    webServer: { register() { return () => {}; } },
+  };
+  globalThis.fetch = async (url, init) => {
+    sent = { url: String(url), body: JSON.parse(init.body) };
+    return new Response(encodeChatSse(chatCompletionEvents({ content: 'ok' })), {
+      status: 200, headers: { 'content-type': 'text/event-stream' },
+    });
+  };
+  try {
+    await apply(ctx, { dataFile: file, agentPresetRoot: join(dir, 'modes') });
+    assert.ok(adapter, 'the chat adapter was registered');
+    const messages = [{ role: 'user', content: [
+      { type: 'text', text: '看图' },
+      { type: 'image', attachment: { attachmentId: 'a1', mediaType: 'image/png' } },
+    ] }];
+    for await (const _chunk of adapter.stream({
+      provider: 'preset-deepseek-chat', model: 'deepseek-flash', messages, sessionId: 's',
+    })) { /* drain */ }
+    assert.equal(readCalls.length, 1, 'the host attachment service was asked exactly once');
+    assert.equal(readCalls[0].ref.attachmentId, 'a1');
+    assert.ok(readCalls[0].target && typeof readCalls[0].target === 'object', 'the read carried a size target');
+    const parts = sent.body.messages.at(-1).content;
+    const image = Array.isArray(parts) ? parts.find(part => part.type === 'image_url') : undefined;
+    assert.ok(image, 'the outbound body carries an image part');
+    assert.match(String(image.image_url?.url ?? ''), /^data:image\/png;base64,/);
+    assert.equal(String(image.image_url.url).includes(Buffer.from([1, 2, 3]).toString('base64')), true);
+    assert.match(JSON.stringify(sent.body), /\/world\/shot\.png/, 'the handle text carries the resolved read-only path');
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalKey === undefined) delete process.env.DEEPSEEK_API_KEY;
+    else process.env.DEEPSEEK_API_KEY = originalKey;
+    for (const dispose of disposers.splice(0).reverse()) await dispose();
+    await rm(dir, { recursive: true, force: true });
+  }
+});

@@ -5,9 +5,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  ATTRIBUTION_PRODUCT, ATTRIBUTION_URL, DEEPSEEK_CHAT_BASE_URL, DEEPSEEK_CHAT_PROVIDER_ID,
-  DEEPSEEK_CHAT_PROVIDER_NAME, IMAGE_OFFLOAD_REQUIRED_CODE, LlmError, createDeepSeekChatAdapter,
-  mapUsage, resolveChatConnection, serializeRequest, serializeRequestWithImages,
+  ATTRIBUTION_PRODUCT, ATTRIBUTION_URL, DEFAULT_REQUEST_IMAGE_MAX_BYTES, DEEPSEEK_CHAT_BASE_URL,
+  DEEPSEEK_CHAT_PROVIDER_ID, DEEPSEEK_CHAT_PROVIDER_NAME, IMAGE_OFFLOAD_REQUIRED_CODE, LlmError,
+  createDeepSeekChatAdapter, deepSeekImageRequestPricing, deepSeekImageTokens, deepSeekRequestImageDimensions,
+  longEdgeDimensions, mapUsage, offloadedImageText, requestImageDimensions, resolveChatConnection,
+  resolveRequestImageMaxBytes, resolveRequestImageTarget, serializeRequest, serializeRequestWithImages, textOnlyImageText,
 } from '../vendor/deepseek-chat/index.mjs';
 
 const NL = String.fromCharCode(10);
@@ -304,4 +306,88 @@ test('adapter metadata answers the host catalog questions', async () => {
   const prepared = await parts.adapter.prepareCall(DEEPSEEK_CHAT_PROVIDER_ID, 'deepseek-flash');
   assert.equal(prepared.model.id, 'deepseek-flash');
   assert.equal(typeof prepared.stream, 'function');
+});
+
+test('request-image target maths never enlarges and converges under the caps', () => {
+  // Small images are never enlarged on any path.
+  assert.deepEqual(longEdgeDimensions(100, 80, 4096), { width: 100, height: 80 });
+  assert.deepEqual(requestImageDimensions(100, 80, 512 * 512), { width: 100, height: 80 });
+  assert.deepEqual(deepSeekRequestImageDimensions(100, 80), { width: 100, height: 80 });
+  // A huge source converges to the published token cap and the provider per-side cap.
+  const huge = resolveRequestImageTarget({ id: 'm', name: 'M', inputModalities: ['image'] }, { width: 8000, height: 6000 });
+  assert.equal(Math.max(huge.width, huge.height) <= 4096, true);
+  assert.equal(deepSeekImageTokens(huge.width, huge.height) <= 1024, true);
+  assert.equal(huge.width < 8000 && huge.height < 6000, true);
+  assert.equal(huge.maxBytes, DEFAULT_REQUEST_IMAGE_MAX_BYTES);
+  assert.deepEqual(deepSeekRequestImageDimensions(huge.width, huge.height), { width: huge.width, height: huge.height });
+  // A low-detail pixel budget is a total-pixel cap and still never enlarges.
+  const low = resolveRequestImageTarget({ id: 'm', name: 'M', inputModalities: ['image'], imagePixelBudget: 'low' }, { width: 4000, height: 4000 });
+  assert.equal(low.width * low.height <= 512 * 512, true);
+  const lowSmall = resolveRequestImageTarget({ id: 'm', name: 'M', imagePixelBudget: 'low' }, { width: 100, height: 80 });
+  assert.deepEqual({ width: lowSmall.width, height: lowSmall.height }, { width: 100, height: 80 });
+  // The per-route byte target is configurable.
+  assert.equal(resolveRequestImageMaxBytes({ id: 'm', name: 'M', imageMaxBytes: 1234 }), 1234);
+});
+
+test('pricing prices retained, offloaded and text-only occurrences', () => {
+  const connection = resolveChatConnection();
+  const ref = { attachmentId: 'sha256:abcdef1234567890', mediaType: 'image/png', width: 2000, height: 1000 };
+  const pricing = deepSeekImageRequestPricing(connection, 'deepseek-flash');
+  const target = resolveRequestImageTarget(connection.models[0], ref);
+  const [retained] = pricing.priceImages([{ type: 'image', attachment: ref }]);
+  assert.equal(retained.visualTokens, deepSeekImageTokens(target.width, target.height));
+  assert.equal(retained.visualTokens > 0, true);
+  assert.equal(retained.visualTokens <= 1024, true);
+  assert.equal(retained.text.includes('request preview'), true);
+  const [offloaded] = pricing.priceImages([{ type: 'image', attachment: ref, offloaded: true }]);
+  assert.deepEqual(offloaded, { visualTokens: 0, text: offloadedImageText(ref) });
+  // A text-only or uncatalogued route substitutes deterministic text and prices no vision tokens.
+  const substituted = deepSeekImageRequestPricing(connection, 'not-a-model').priceImages([{ type: 'image', attachment: ref }])[0];
+  assert.deepEqual(substituted, { visualTokens: 0, text: textOnlyImageText(ref) });
+  assert.equal(substituted.text.includes('sha256:abcdef'), true);
+  assert.equal(deepSeekImageRequestPricing(connection, 'deepseek-reasoner').priceImages([{ type: 'image', attachment: ref }])[0].visualTokens, 0);
+  // The access resolver feeds the same handle text the serializer sends.
+  const withPath = deepSeekImageRequestPricing(connection, 'deepseek-flash', () => ({ readonlyPath: '/world/img.png' }));
+  assert.equal(withPath.priceImages([{ type: 'image', attachment: ref }])[0].text.includes('/world/img.png'), true);
+});
+
+test('the adapter exposes real image pricing for image routes', () => {
+  const parts = makeAdapter(() => sseResponse(['[DONE]']));
+  const pricing = parts.adapter.imageRequestPricing(DEEPSEEK_CHAT_PROVIDER_ID, 'deepseek-flash');
+  assert.equal(typeof pricing.priceImages, 'function');
+  const ref = { attachmentId: 'sha256:qwertyuiop', mediaType: 'image/png', width: 640, height: 480 };
+  assert.equal(pricing.priceImages([{ type: 'image', attachment: ref }])[0].visualTokens > 0, true);
+  const textOnly = parts.adapter.imageRequestPricing(DEEPSEEK_CHAT_PROVIDER_ID, 'deepseek-reasoner');
+  assert.equal(textOnly.priceImages([{ type: 'image', attachment: ref }])[0].visualTokens, 0);
+});
+
+test('a retained image without prepared bytes fails before anything is sent', () => {
+  const image = { attachmentId: 'att-missing', mediaType: 'image/png', width: 10, height: 10 };
+  const options = { provider: 'p', model: 'deepseek-flash', messages: [{ role: 'user', content: [{ type: 'image', attachment: image }] }] };
+  assert.throws(() => serializeRequestWithImages(options, { representation: { kind: 'base64' }, requestImages: new Map(), maxRequestImageBytes: 1024 }, {}),
+    (error) => error instanceof LlmError && error.code === 'INVALID_REQUEST' && error.message.includes('att-missing'));
+});
+
+test('an image request without the attachment bridge is refused', async () => {
+  const parts = makeAdapter(() => sseResponse(['[DONE]']));
+  const messages = [{ role: 'user', content: [{ type: 'image', attachment: { attachmentId: 'a1', mediaType: 'image/png', width: 4, height: 4 } }] }];
+  await assert.rejects(collect(parts.adapter.stream({ ...baseOptions(), messages })),
+    (error) => error instanceof LlmError && error.code === 'UNSUPPORTED_CONTENT');
+});
+
+test('image requests use the injected attachment bridge as inline base64', async () => {
+  const requests = [];
+  const connection = resolveChatConnection({ streamIdleTimeoutMs: 50 });
+  const adapter = createDeepSeekChatAdapter({
+    connection: () => connection,
+    resolveApiKey: async () => 'k',
+    resolveRequestImages: async () => new Map([['a1', { mediaType: 'image/png', data: new Uint8Array([1, 2, 3]), bytes: 3, width: 2, height: 2 }]]),
+    resolveImageAccess: () => ({ readonlyPath: '/world/img.png' }),
+    fetch: async (url, init) => { requests.push({ body: JSON.parse(init.body) }); return sseResponse(['[DONE]']); },
+  });
+  await collect(adapter.stream({ provider: DEEPSEEK_CHAT_PROVIDER_ID, model: 'deepseek-flash', messages: [{ role: 'user', content: [{ type: 'image', attachment: { attachmentId: 'a1', mediaType: 'image/png', width: 2, height: 2 } }] }] }));
+  const content = requests[0].body.messages[0].content;
+  assert.equal(Array.isArray(content), true);
+  assert.equal(content[0].text.includes('/world/img.png'), true);
+  assert.equal(content[1].image_url.url.startsWith('data:image/png;base64,'), true);
 });

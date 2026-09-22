@@ -18,6 +18,10 @@ export interface ChatModelConfig {
   maxTokens?: number;
   reasoningEffort?: 'off' | 'low' | 'high' | 'max';
   inputModalities?: readonly ModelModality[];
+  /** Provider pixel budget for request images: published grid when absent, 'low' for low detail. */
+  imagePixelBudget?: 'low' | number;
+  /** Per-route encoded-byte target for every request image. */
+  imageMaxBytes?: number;
   systemPromptUpdate?: 'in-history';
 }
 

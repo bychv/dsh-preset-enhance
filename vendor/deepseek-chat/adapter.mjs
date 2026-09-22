@@ -8,6 +8,7 @@ import { attributionHeaders as defaultAttributionHeaders, catalogModelInfo, mode
 import { parseSse } from './sse.mjs';
 import { translate } from './translate.mjs';
 import { contentHasImage, serializeRequest, serializeRequestWithImages } from './serialize.mjs';
+import { deepSeekImageRequestPricing } from './pricing.mjs';
 /** Provider route id the plugin registers. */
 export const DEEPSEEK_CHAT_PROVIDER_ID = 'preset-deepseek-chat';
 /** Display name shown by the host selectors. */
@@ -58,9 +59,9 @@ export class DeepSeekChatAdapter {
     providerRetryPolicy(_provider) {
         return this.dependencies.connection().retryPolicy;
     }
-    /** Image token pricing is not migrated yet; the host falls back to its neutral estimate. */
-    imageRequestPricing(_provider, _model) {
-        return undefined;
+    /** DeepSeek vision-token pricing for one exact route (synchronous, no I/O). */
+    imageRequestPricing(_provider, model) {
+        return deepSeekImageRequestPricing(this.dependencies.connection(), model, this.dependencies.resolveImageAccess);
     }
     listModels(provider) {
         return Promise.resolve(this.dependencies.connection().models.map(model => catalogModelInfo(provider, model)));

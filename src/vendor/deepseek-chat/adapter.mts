@@ -9,11 +9,12 @@ import { attributionHeaders as defaultAttributionHeaders, catalogModelInfo, mode
 import { parseSse } from './sse.mjs';
 import { translate } from './translate.mjs';
 import { contentHasImage, serializeRequest, serializeRequestWithImages } from './serialize.mjs';
+import { deepSeekImageRequestPricing } from './pricing.mjs';
 import type { RequestDefaults } from './serialize.mjs';
 import type { ChatConnectionConfig } from './config.mjs';
 import type { WireError, WireRequest } from './wire-types.mjs';
 import type {
-  AttributionHeaders, GenerateOptions, LlmImageRequestPricing, LlmModelInfo, LlmProviderInfo,
+  AttributionHeaders, GenerateOptions, ImageAttachmentAccess, ImageAttachmentRef, LlmImageRequestPricing, LlmModelInfo, LlmProviderInfo,
   LlmResolvedModelInfo, PreparedAdapterCall, RequestImageAttachment, StreamChunk,
 } from './host-types.mjs';
 
@@ -39,7 +40,7 @@ export interface DeepSeekChatDependencies {
   /** Host attachment bridge: prepare request versions for the retained images. */
   resolveRequestImages?: (options: GenerateOptions, signal: AbortSignal) => Promise<Map<string, RequestImageAttachment>>;
   /** Current read-only access for one image reference (handle text). */
-  resolveImageAccess?: (ref: { attachmentId: string; mediaType: string }) => { path?: string } | undefined;
+  resolveImageAccess?: (ref: ImageAttachmentRef) => ImageAttachmentAccess | undefined;
 }
 
 /** Abort-driven per-read idle watchdog: pulses on transport activity. */
@@ -97,9 +98,9 @@ export class DeepSeekChatAdapter {
     return this.dependencies.connection().retryPolicy;
   }
 
-  /** Image token pricing is not migrated yet; the host falls back to its neutral estimate. */
-  imageRequestPricing(_provider: string, _model: string): LlmImageRequestPricing | undefined {
-    return undefined;
+  /** DeepSeek vision-token pricing for one exact route (synchronous, no I/O). */
+  imageRequestPricing(_provider: string, model: string): LlmImageRequestPricing | undefined {
+    return deepSeekImageRequestPricing(this.dependencies.connection(), model, this.dependencies.resolveImageAccess);
   }
 
   listModels(provider: string): Promise<readonly LlmModelInfo[]> {

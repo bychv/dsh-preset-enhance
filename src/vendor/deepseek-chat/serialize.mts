@@ -50,14 +50,14 @@ export function imageIdentity(ref: ImageAttachmentRef): string {
 
 /** Read-only recovery path text (replica of the host helper). */
 function normalizedAccessText(ref: ImageAttachmentRef, access: ImageAttachmentAccess): string {
-  const path = typeof access.readonlyPath === 'string' ? access.readonlyPath : '';
+  const path = typeof access.readonlyPath === 'string' ? access.readonlyPath : typeof access.path === 'string' ? access.path : '';
   return path.length === 0 ? '' : ' It is saved read-only at ' + path + '.';
 }
 
 /** Handle text sent beside a retained request image (replica of requestImageHandleText). */
 export function requestImageHandleText(
   ref: ImageAttachmentRef,
-  version: Pick<RequestImageAttachment, 'bytes'> & { width?: number; height?: number },
+  version: { width?: number; height?: number },
   access?: ImageAttachmentAccess,
 ): string {
   const width = version.width ?? 0;
