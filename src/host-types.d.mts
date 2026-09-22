@@ -81,7 +81,8 @@ export interface SessionLike {
 /** The agent-scoped tool surface. restrict() lives here, not on the plugin context. */
 export interface AgentToolScope {
   get?(name: string, scope?: unknown): unknown;
-  schemas(scope: unknown): ToolSchemaRow[];
+  /** 0.1.7 accepts an optional scope key; the plugin context has no scope of its own. */
+  schemas(scope?: unknown): ToolSchemaRow[];
   /**
    * Narrow what the model is offered in this scope. The host throws when the
    * context is not agent-scoped, when the filter is empty, when it names the
@@ -173,9 +174,46 @@ export interface SettingsServiceLike {
   update?(ns: string, patch: object, expectedRevision?: number): Promise<void>;
 }
 
+/** One loader entry, as the 0.1.7 EntryTree exposes it. Options are assigned before any sibling activates. */
+export interface LoaderEntryLike {
+  id: string;
+  options: { id: string; name?: string; config?: unknown; disabled?: unknown; inject?: unknown };
+}
+
+/**
+ * One declarative agent-preset definition (0.1.7). `plugins` is the preset's
+ * complete sub-plugin list, including `!!js` nodes; an empty list is invalid.
+ */
+export interface AgentPresetDefinitionLike {
+  id: string;
+  name?: string;
+  description?: string;
+  order?: number;
+  plugins: readonly unknown[];
+}
+
+/**
+ * The 0.1.7 preset registry (`ctx.agentPresets`). `register` resolves to the
+ * unregister disposer the declaring plugin owns; `acquireScope` returns a lease
+ * released through `Symbol.asyncDispose`. `readDocument`/`standingKeyFor` are
+ * the 0.1.6 members and are absent on 0.1.7.
+ */
+export interface AgentPresetRegistryLike {
+  register?(definition: AgentPresetDefinitionLike): Promise<() => Promise<void>>;
+  /** Lease over one preset's scope; release it through [Symbol.asyncDispose](). */
+  acquireScope?(id?: string): Promise<{ key: unknown; [Symbol.asyncDispose](): Promise<void> }>;
+  list?(): Promise<AgentModeRow[]>;
+  /** 0.1.6 only. */
+  readDocument?(id: string): Promise<{ content: string }>;
+  /** 0.1.6 only. */
+  standingKeyFor?(id: string): Promise<unknown>;
+}
+
 export interface PluginContext {
   /** Run a callback once the named services are available (host's own optional-dependency pattern). */
   inject?(names: string[], callback: (scoped: any) => void): unknown;
+  /** 0.1.7 loader entry tree: every row's full config, readable synchronously after options are assigned. */
+  loader?: { entries(): Iterable<LoaderEntryLike> };
   /**
    * Resolve any registered service by name without declaring a dependency.
    * Used for optional services (`settings`) so a profile without them still loads.
@@ -203,7 +241,7 @@ export interface PluginContext {
   tools?: {
     get?(name: string, scope?: unknown): unknown;
     guard?(handler: (exec: ToolExecution) => string | undefined): void;
-    schemas?(scope: unknown): ToolSchemaRow[];
+    schemas?(scope?: unknown): ToolSchemaRow[];
     /**
      * tools.restrict() requires an agent-scoped context and throws on the plugin
      * context. Declared so the shape is honest; reach it through
@@ -211,10 +249,6 @@ export interface PluginContext {
      */
     restrict?(filter: { allow?: string[]; deny?: string[] }): () => void;
   };
-  agentPresets?: {
-    readDocument(id: string): Promise<{ content: string }>;
-    list?(): Promise<AgentModeRow[]>;
-    standingKeyFor?(id: string): Promise<unknown>;
-  };
+  agentPresets?: AgentPresetRegistryLike;
   agents?: { get(id: string): AgentHandle | undefined };
 }

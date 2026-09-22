@@ -70,8 +70,14 @@ try {
       await emit(join(dist, 'lib', entry.name), join(root, 'lib', entry.name));
     }
   }
+  // Vendored upstream code keeps its own tree so the copied licence and
+  // provenance stay visible; it ships next to lib/ in the published package.
+  const vendorDist = join(dist, 'vendor');
+  if (await stat(vendorDist).then(() => true, () => false)) {
+    await cp(vendorDist, join(root, 'vendor'), { recursive: true, force: true });
+  }
 
-  console.log('build: emitted index.mjs, mode.mjs and lib/*.mjs from src/**/*.mts (clean typecheck)');
+  console.log('build: emitted index.mjs, mode.mjs, lib/*.mjs and vendor/** from src/**/*.mts (clean typecheck)');
 } finally {
   await unlink(lockPath).catch(() => {});
 }

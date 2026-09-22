@@ -10,6 +10,7 @@ import { createProtocolObserver } from './lib/protocol.mjs';
 import { sessionConnection, writeConnectionProtocol } from './lib/connection.mjs';
 import type { ConnectionProtocol, ConnectionProtocolInfo } from './lib/connection.mjs';
 import { installToolRestrictions } from './lib/tool-restrictions.mjs';
+import { createPresetModeController, modeCapability, readModeToolCatalog } from './lib/modes.mjs';
 import { adaptPresetForMessages } from './lib/messages.mjs';
 import {
   clearPresetEnhanceUnavailableReason, markPresetEnhanceActive, setPresetEnhanceUnavailableReason,
@@ -173,6 +174,13 @@ export async function apply(ctx: PluginContext, config: PluginConfig = {}) {
     });
   }, 'preset-enhance: ordered teardown');
 
+  // 0.1.7 declares agent presets through the registry; 0.1.6 materialised a mode file on
+  // disk. Probe once and take whichever shape this host actually offers.
+  const presetModeCapability = modeCapability(ctx);
+  const presetMode = createPresetModeController(ctx, {
+    description: '新对话从第一轮起自动启用预设工作台中设置的模式默认预设。',
+  });
+
   // Startup is staged and names the failing stage together with its path. It must
   // Keep the recovery UI available even when initialization fails. A failed
   // stage degrades the plugin — the workbench still
@@ -182,15 +190,27 @@ export async function apply(ctx: PluginContext, config: PluginConfig = {}) {
   let standard: string | undefined;
   try {
     standard = config.standardComposition ??
-      (ctx.agentPresets ? (await ctx.agentPresets.readDocument('standard')).content : undefined);
+      (ctx.agentPresets?.readDocument ? (await ctx.agentPresets.readDocument('standard')).content : undefined);
   } catch (error) {
     startupError = describeStartupFailure('无法读取 standard 模式组成', `服务 agentPresets，模式目录 ${presetRoot}`, error);
   }
   if (!startupError) {
-    try {
-      await ensurePresetAgentMode(presetRoot, standard);
-    } catch (error) {
-      startupError = describeStartupFailure('无法写入预设模式目录', join(presetRoot, AGENT_PRESET_ID), error);
+    if (presetModeCapability.declarative) {
+      // The registry owns the mode: no directory write, and the registration is released
+      // with the rest of the plugin.
+      try {
+        if (!presetMode.standard()) throw new Error(presetModeCapability.reason || 'ctx.loader 中找不到 standard 模式声明');
+        const registration = await presetMode.register();
+        ctx.effect(() => async () => { await registration.dispose(); }, 'preset-enhance: preset mode registration');
+      } catch (error) {
+        startupError = describeStartupFailure('无法注册预设模式', 'agentPresets.register（声明式注册）', error);
+      }
+    } else {
+      try {
+        await ensurePresetAgentMode(presetRoot, standard);
+      } catch (error) {
+        startupError = describeStartupFailure('无法写入预设模式目录', join(presetRoot, AGENT_PRESET_ID), error);
+      }
     }
   }
 
@@ -928,7 +948,12 @@ function requestToolCatalogs(ctx: PluginContext, state: PresetState, discovered:
   const session = sessionId ? ctx.sessions.get(sessionId) : undefined;
   const modeId = sessionModeId(session);
   const live = liveToolCatalog(ctx, sessionId);
-  if (live.length > 0 && modeId) assign(catalogs, modeId, editableToolCatalog([catalogs, { [modeId]: live }])[modeId]);
+  if (live.length > 0 && modeId) {
+    // The union keeps rows a restricted or dynamic catalog no longer reports (the editor must
+    // stay able to switch them back on), and the sort keeps the workbench ordering stable.
+    const merged = editableToolCatalog([catalogs, { [modeId]: live }])[modeId] ?? [];
+    assign(catalogs, modeId, [...merged].sort((a, b) => a.name.localeCompare(b.name)));
+  }
   return catalogs;
 }
 /** Group DSH MCP public tool names by their stable server namespace. */
@@ -1006,11 +1031,18 @@ export async function discoverModeToolCatalogs(ctx: PluginContext, modes: AgentM
       continue;
     }
     try {
-      if (!ctx.agentPresets?.standingKeyFor || !ctx.tools?.schemas) {
+      if (!ctx.tools?.schemas) throw new Error('当前 DSH 未提供模式工具枚举服务');
+      if (ctx.agentPresets?.acquireScope) {
+        // 0.1.7: lease the mode's scope, read it, release it again.
+        const leased = await readModeToolCatalog(ctx, mode.id);
+        assign(catalogs, mode.id, catalogFromTools(leased.tools));
+      } else if (ctx.agentPresets?.standingKeyFor) {
+        // 0.1.6: a standing key the host keeps alive for the process.
+        const scope = await ctx.agentPresets.standingKeyFor(mode.id);
+        assign(catalogs, mode.id, catalogFromTools(ctx.tools.schemas(scope)));
+      } else {
         throw new Error('当前 DSH 未提供模式工具枚举服务');
       }
-      const scope = await ctx.agentPresets.standingKeyFor(mode.id);
-      assign(catalogs, mode.id, catalogFromTools(ctx.tools.schemas(scope)));
     } catch (error) {
       assign(errors, mode.id, error instanceof Error ? error.message : String(error));
     }

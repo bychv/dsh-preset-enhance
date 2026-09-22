@@ -23,6 +23,7 @@
     "client.js",
     "agent-mode",
     "lib",
+    "vendor",
     "web",
     "cordis.patch.yml",
     "README.md",
