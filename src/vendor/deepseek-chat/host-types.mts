@@ -14,6 +14,9 @@
 
 export type ModelModality = 'text' | 'image';
 
+/** Encoded image media types the DeepSeek Files API accepts for a request image. */
+export type ImageMediaType = 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif';
+
 export interface TextBlock { type: 'text'; text: string }
 export interface ReasoningBlock { type: 'reasoning'; text: string }
 
@@ -52,6 +55,16 @@ export interface RequestImageAttachment {
   bytes: number;
   width?: number;
   height?: number;
+  /**
+   * Durable normalized attachment this request version was derived from.
+   * Optional because the inline base64 path never needs it; the Files upload
+   * path requires it (and fails the request cleanly when it is absent).
+   */
+  attachment?: ImageAttachmentRef;
+  /** Complete request-image transformation identity; required by the Files upload path. */
+  variantId?: string;
+  /** Whether the encoded request version retains an alpha channel (diagnostics only). */
+  hasAlpha?: boolean;
 }
 
 /** Read-only description of one current image occurrence, for handle text. */

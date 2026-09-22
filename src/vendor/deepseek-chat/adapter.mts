@@ -10,7 +10,9 @@ import { parseSse } from './sse.mjs';
 import { translate } from './translate.mjs';
 import { contentHasImage, serializeRequest, serializeRequestWithImages } from './serialize.mjs';
 import { deepSeekImageRequestPricing } from './pricing.mjs';
-import type { RequestDefaults } from './serialize.mjs';
+import { FileResolutionFailure, RequestFiles } from './request-files.mjs';
+import type { ImageSerializationOptions, RequestDefaults } from './serialize.mjs';
+import type { DeepSeekFileStore } from './file-store.mjs';
 import type { ChatConnectionConfig } from './config.mjs';
 import type { WireError, WireRequest } from './wire-types.mjs';
 import type {
@@ -41,6 +43,12 @@ export interface DeepSeekChatDependencies {
   resolveRequestImages?: (options: GenerateOptions, signal: AbortSignal) => Promise<Map<string, RequestImageAttachment>>;
   /** Current read-only access for one image reference (handle text). */
   resolveImageAccess?: (ref: ImageAttachmentRef) => ImageAttachmentAccess | undefined;
+  /**
+   * Process-wide Files upload reuse store, resolved per request. Absence keeps
+   * the inline base64 representation; when present the adapter first tries the
+   * provider Files path and downgrades to base64 once on FileResolutionFailure.
+   */
+  resolveFiles?: () => DeepSeekFileStore;
 }
 
 /** Abort-driven per-read idle watchdog: pulses on transport activity. */
@@ -192,15 +200,54 @@ export class DeepSeekChatAdapter {
         throw new LlmError('DeepSeek image input requires the host attachment bridge.', 'UNSUPPORTED_CONTENT');
       }
       const requestImages = await resolveImages(options, signal);
-      body = serializeRequestWithImages(options, {
+      const imageAccess: Pick<ImageSerializationOptions, 'resolveImageAccess'> =
+        this.dependencies.resolveImageAccess === undefined ? {} : { resolveImageAccess: this.dependencies.resolveImageAccess };
+      // Inline fallback knobs: the base64 payload bound after a Files downgrade.
+      const base64Images: ImageSerializationOptions & { representation: { kind: 'base64' } } = {
         representation: { kind: 'base64' },
         requestImages,
-        ...this.dependencies.resolveImageAccess === undefined ? {} : { resolveImageAccess: this.dependencies.resolveImageAccess },
+        ...imageAccess,
         maxRequestImageBytes: connection.maxInlineRequestImageBytes,
         ...connection.maxImagesPerRequest === undefined ? {} : { maxImagesPerRequest: connection.maxImagesPerRequest },
         ...connection.inlineImageOffloadByteQuantum === undefined ? {} : { byteQuantum: connection.inlineImageOffloadByteQuantum },
         ...connection.imageOffloadCountQuantum === undefined ? {} : { countQuantum: connection.imageOffloadCountQuantum },
-      }, defaults);
+      };
+      const files = this.dependencies.resolveFiles?.();
+      if (files === undefined) {
+        // No Files store is wired for this activation: inline base64 is the only representation.
+        body = serializeRequestWithImages(options, base64Images, defaults);
+      } else {
+        const fileConnection = { baseURL: connection.baseURL, apiKey, protocol: 'chat-completions' } as const;
+        const requestFiles = new RequestFiles(files, fileConnection, connection.filePolicy, connection.filesApiTimeoutMs, signal);
+        // Representation starts on the Files path; exactly one downgrade is allowed.
+        let representation: 'file' | 'base64' = 'file';
+        for (;;) {
+          requestFiles.beginAttempt();
+          if (representation === 'base64') {
+            body = serializeRequestWithImages(options, base64Images, defaults);
+            break;
+          }
+          try {
+            body = await serializeRequestWithImages(options, {
+              representation: {
+                kind: 'file',
+                resolveFileId: (version, _block, location) => requestFiles.resolve(version, location),
+              },
+              requestImages,
+              ...imageAccess,
+              maxRequestImageBytes: connection.maxRequestFilesBytes,
+              ...connection.maxImagesPerRequest === undefined ? {} : { maxImagesPerRequest: connection.maxImagesPerRequest },
+              ...connection.imageOffloadByteQuantum === undefined ? {} : { byteQuantum: connection.imageOffloadByteQuantum },
+              ...connection.imageOffloadCountQuantum === undefined ? {} : { countQuantum: connection.imageOffloadCountQuantum },
+            }, defaults);
+            break;
+          } catch (error: unknown) {
+            // Only a Files resolution failure may downgrade the whole request, and only once.
+            if (!(error instanceof FileResolutionFailure)) throw error;
+            representation = 'base64';
+          }
+        }
+      }
     }
 
     let response: Response;

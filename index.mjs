@@ -10,7 +10,7 @@ import { createProtocolObserver } from './lib/protocol.mjs';
 import { connectionSelection, selectConnection, sessionConnection, writeConnectionProtocol } from './lib/connection.mjs';
 import { installToolRestrictions } from './lib/tool-restrictions.mjs';
 import { createPresetModeController, modeCapability, readModeToolCatalog } from './lib/modes.mjs';
-import { createDeepSeekChatAdapter, DEEPSEEK_CHAT_PROVIDER_ID, resolveChatConnection, resolveRequestImageTarget, } from './vendor/deepseek-chat/index.mjs';
+import { createDeepSeekChatAdapter, DEEPSEEK_CHAT_PROVIDER_ID, DeepSeekFileStore, deepSeekFilesIndexPath, resolveChatConnection, resolveRequestImageTarget, } from './vendor/deepseek-chat/index.mjs';
 import { adaptPresetForMessages } from './lib/messages.mjs';
 import { clearPresetEnhanceUnavailableReason, markPresetEnhanceActive, setPresetEnhanceUnavailableReason, } from './lib/availability.mjs';
 import { OUTPUT_EXTRACTION_PROMPT_TEMPLATE } from './lib/output-extractor.mjs';
@@ -144,8 +144,12 @@ export async function apply(ctx, config = {}) {
     // pi-ai, which rewrites system prompts; the plugin ships its own adapter so preset
     // ordering, the prefill bridge, DSML conversion and extraction keep a Chat wire format.
     const chatConnection = () => resolveChatConnection({});
+    // The upload cache is owner-private and lives next to the plugin's own state file; the
+    // index is keyed by a hash of the endpoint and key, so no credential reaches disk.
+    const chatFiles = new DeepSeekFileStore({ indexPath: deepSeekFilesIndexPath(store.file) });
     const chatAdapter = createDeepSeekChatAdapter({
         connection: chatConnection,
+        resolveFiles: () => chatFiles,
         resolveApiKey: async () => resolveChatApiKey(ctx, config.chatApiKeyEnv ?? DEFAULT_CHAT_API_KEY_ENV),
         resolveUserId: () => 'preset-enhance',
         // Images keep going through the host's attachment service: we only turn the

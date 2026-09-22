@@ -2,15 +2,32 @@
  * Unit tests for the vendored DeepSeek Chat Completions adapter (DSH 0.1.7 wiring).
  * Imports the BUILT tree: run `node scripts/build.mjs` first.
  */
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   ATTRIBUTION_PRODUCT, ATTRIBUTION_URL, DEFAULT_REQUEST_IMAGE_MAX_BYTES, DEEPSEEK_CHAT_BASE_URL,
-  DEEPSEEK_CHAT_PROVIDER_ID, DEEPSEEK_CHAT_PROVIDER_NAME, IMAGE_OFFLOAD_REQUIRED_CODE, LlmError,
-  createDeepSeekChatAdapter, deepSeekImageRequestPricing, deepSeekImageTokens, deepSeekRequestImageDimensions,
-  longEdgeDimensions, mapUsage, offloadedImageText, requestImageDimensions, resolveChatConnection,
-  resolveRequestImageMaxBytes, resolveRequestImageTarget, serializeRequest, serializeRequestWithImages, textOnlyImageText,
+  DEEPSEEK_CHAT_PROVIDER_ID, DEEPSEEK_CHAT_PROVIDER_NAME, DeepSeekFileStore, DeepSeekUploadIndex, FileResolutionFailure,
+  IMAGE_OFFLOAD_REQUIRED_CODE, LlmError, RequestFiles,
+  createDeepSeekChatAdapter, deepSeekFileScope, deepSeekFilesIndexPath, deepSeekImageRequestPricing, deepSeekImageTokens,
+  deepSeekRequestImageDimensions, longEdgeDimensions, mapUsage, offloadedImageText, requestImageDimensions,
+  resolveChatConnection, resolveRequestImageMaxBytes, resolveRequestImageTarget, serializeRequest,
+  serializeRequestWithImages, textOnlyImageText,
 } from '../vendor/deepseek-chat/index.mjs';
+
+/** Temp directories created by the Files-path tests; removed after the run. */
+const filesDirs = [];
+after(async () => {
+  for (const dir of filesDirs) await rm(dir, { recursive: true, force: true });
+});
+
+async function filesDir() {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-chat-files-'));
+  filesDirs.push(dir);
+  return dir;
+}
 
 const NL = String.fromCharCode(10);
 const KEY = 'test-key-never-printed';
@@ -390,4 +407,253 @@ test('image requests use the injected attachment bridge as inline base64', async
   assert.equal(Array.isArray(content), true);
   assert.equal(content[0].text.includes('/world/img.png'), true);
   assert.equal(content[1].image_url.url.startsWith('data:image/png;base64,'), true);
+});
+
+/* ------------------------------------------------------------------ Files API */
+
+const PNG_BYTES = new Uint8Array([1, 2, 3, 4]);
+const ATTACHMENT_ID = 'sha256:' + 'a'.repeat(64);
+const VARIANT_ID = 'sha256:' + 'b'.repeat(64);
+const FILE_KEY = 'files-secret-key';
+const FILE_CONNECTION = { baseURL: DEEPSEEK_CHAT_BASE_URL, apiKey: FILE_KEY, protocol: 'chat-completions' };
+const FILE_POLICY = { expiresAfterSeconds: 3600, refreshMarginSeconds: 60, quotaCleanupBatch: 10 };
+const FILE_VERSION = {
+  mediaType: 'image/png', data: PNG_BYTES, bytes: PNG_BYTES.byteLength, width: 2, height: 2,
+  attachment: { attachmentId: ATTACHMENT_ID, mediaType: 'image/png' }, variantId: VARIANT_ID,
+};
+
+/** One valid Chat Completions /files upload response body. */
+function uploadedFile(id, bytes, createdAt, expiresAt) {
+  return new Response(JSON.stringify({
+    id, object: 'file', bytes, created_at: createdAt, filename: 'dsh-test.png', purpose: 'user_data', expires_at: expiresAt,
+  }), { status: 200, headers: { 'content-type': 'application/json' } });
+}
+
+test('the Files scope hashes endpoint and key without ever persisting the key', async () => {
+  const dir = await filesDir();
+  const path = join(dir, 'deepseek-files.json');
+  const scope = deepSeekFileScope('https://api.deepseek.com/', FILE_KEY);
+  assert.match(scope, /^[0-9a-f]{64}$/);
+  assert.equal(scope, deepSeekFileScope('https://api.deepseek.com///', FILE_KEY), 'trailing slashes are stripped');
+  assert.notEqual(scope, deepSeekFileScope('https://api.deepseek.com', 'another-key'));
+
+  const index = new DeepSeekUploadIndex(path);
+  const record = { scope, attachmentId: ATTACHMENT_ID, variantId: VARIANT_ID, fileId: 'file-1', bytes: 4, createdAt: 1_000, expiresAt: 10_000 };
+  assert.deepEqual(await index.commit(record, 1_000, 0), { record, accepted: true });
+  assert.deepEqual(await readdir(dir), ['deepseek-files.json'], 'atomic writes leave no temp or lock files');
+  const stored = await readFile(path, 'utf8');
+  assert.equal(stored.includes(FILE_KEY), false, 'the API key is hash input only');
+  assert.equal(JSON.parse(stored).formatVersion, 3);
+  // Re-opening the same path reads the durable mapping; a second commit keeps the winner.
+  const reopened = new DeepSeekUploadIndex(path);
+  assert.deepEqual(await reopened.get(scope, VARIANT_ID, 1_000, 0), record);
+  const again = await reopened.commit({ ...record, fileId: 'file-2' }, 1_000, 0);
+  assert.equal(again.accepted, false);
+  assert.equal(again.record.fileId, 'file-1');
+
+  // Duplicate keys, invalid records and unknown formats are discarded, never trusted.
+  await writeFile(path, JSON.stringify({ formatVersion: 3, records: [record, { ...record, fileId: 'file-2' }] }));
+  assert.equal(await reopened.get(scope, VARIANT_ID, 1_000, 0), undefined);
+  await writeFile(path, JSON.stringify({ formatVersion: 3, records: [{ ...record, variantId: 'not-a-digest' }] }));
+  assert.equal(await reopened.get(scope, VARIANT_ID, 1_000, 0), undefined);
+  await writeFile(path, JSON.stringify({ formatVersion: 2, records: [record] }));
+  assert.equal(await reopened.get(scope, VARIANT_ID, 1_000, 0), undefined);
+});
+
+test('one stubbed provider upload serves every later request and stays durable', async () => {
+  const dir = await filesDir();
+  const path = deepSeekFilesIndexPath(join(dir, 'state.json'));
+  assert.equal(path, join(dir, 'deepseek-files.json'), 'the index lives beside the plugin state file');
+  const calls = [];
+  let uploads = 0;
+  const uploadFetch = async (url, init) => {
+    calls.push({ url, method: init.method, headers: init.headers, body: init.body });
+    uploads += 1;
+    return uploadedFile('file-1', PNG_BYTES.byteLength, 1_000, 9_999);
+  };
+  const store = new DeepSeekFileStore({ indexPath: path, now: () => 1_000_000, fetch: uploadFetch });
+  const first = await store.ensureUploaded(FILE_VERSION, FILE_CONNECTION, FILE_POLICY);
+  assert.equal(first.uploaded, true);
+  assert.equal(first.record.fileId, 'file-1');
+  assert.equal(first.record.bytes, PNG_BYTES.byteLength);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, DEEPSEEK_CHAT_BASE_URL + '/files');
+  assert.equal(calls[0].method, 'POST');
+  assert.equal(calls[0].headers.get('authorization'), 'Bearer ' + FILE_KEY);
+  assert.equal(calls[0].body.get('purpose'), 'user_data');
+  assert.equal(calls[0].body.get('expires_after[anchor]'), 'created_at');
+  assert.equal(calls[0].body.get('expires_after[seconds]'), '3600');
+  assert.equal(calls[0].body.get('file').type, 'image/png');
+
+  const second = await store.ensureUploaded(FILE_VERSION, FILE_CONNECTION, FILE_POLICY);
+  assert.equal(second.uploaded, false);
+  assert.equal(second.record.fileId, 'file-1');
+  assert.equal(uploads, 1, 'the second request reuses the cached file id');
+  const reopened = new DeepSeekFileStore({ indexPath: path, now: () => 1_000_000, fetch: uploadFetch });
+  assert.equal((await reopened.ensureUploaded(FILE_VERSION, FILE_CONNECTION, FILE_POLICY)).uploaded, false);
+  assert.equal(uploads, 1, 'the durable index is reused across store instances');
+});
+
+test('a file id inside the refresh margin is re-uploaded instead of reused', async () => {
+  const dir = await filesDir();
+  const path = join(dir, 'deepseek-files.json');
+  let clock = 1_000_000;
+  let uploads = 0;
+  const uploadFetch = async () => {
+    uploads += 1;
+    const createdAt = Math.floor(clock / 1_000);
+    return uploadedFile('file-' + uploads, PNG_BYTES.byteLength, createdAt, createdAt + 120);
+  };
+  const store = new DeepSeekFileStore({ indexPath: path, now: () => clock, fetch: uploadFetch });
+  assert.equal((await store.ensureUploaded(FILE_VERSION, FILE_CONNECTION, FILE_POLICY)).uploaded, true);
+  clock += 30_000;
+  assert.equal((await store.ensureUploaded(FILE_VERSION, FILE_CONNECTION, FILE_POLICY)).uploaded, false, '90s remaining beats the 60s margin');
+  assert.equal(uploads, 1);
+  clock += 40_000;
+  const refreshed = await store.ensureUploaded(FILE_VERSION, FILE_CONNECTION, FILE_POLICY);
+  assert.equal(refreshed.uploaded, true, '50s remaining is inside the 60s refresh margin');
+  assert.equal(refreshed.record.fileId, 'file-2');
+  assert.equal(uploads, 2);
+  const reopened = new DeepSeekFileStore({ indexPath: path, now: () => clock, fetch: uploadFetch });
+  assert.equal((await reopened.ensureUploaded(FILE_VERSION, FILE_CONNECTION, FILE_POLICY)).record.fileId, 'file-2');
+});
+
+test('image requests can travel as provider file ids with one chat request', async () => {
+  const dir = await filesDir();
+  const path = join(dir, 'deepseek-files.json');
+  const chatRequests = [];
+  let uploads = 0;
+  const adapter = createDeepSeekChatAdapter({
+    connection: () => resolveChatConnection({ streamIdleTimeoutMs: 50 }),
+    resolveApiKey: async () => FILE_KEY,
+    resolveRequestImages: async () => new Map([[ATTACHMENT_ID, FILE_VERSION]]),
+    resolveFiles: () => new DeepSeekFileStore({
+      indexPath: path, now: () => 1_000_000,
+      fetch: async (url, init) => (init.method === 'POST' ? (uploads += 1, uploadedFile('file-42', PNG_BYTES.byteLength, 1_000, 9_999)) : new Response('{}')),
+    }),
+    fetch: async (url, init) => { chatRequests.push({ url, body: JSON.parse(init.body) }); return sseResponse(['[DONE]']); },
+  });
+  await collect(adapter.stream({
+    provider: DEEPSEEK_CHAT_PROVIDER_ID, model: 'deepseek-flash',
+    messages: [{ role: 'user', content: [{ type: 'image', attachment: { attachmentId: ATTACHMENT_ID, mediaType: 'image/png', width: 2, height: 2 } }] }],
+  }));
+  assert.equal(uploads, 1);
+  assert.equal(chatRequests.length, 1);
+  const content = chatRequests[0].body.messages[0].content;
+  assert.equal(Array.isArray(content), true);
+  assert.deepEqual(content[1], { type: 'file', file_id: 'file-42' });
+  assert.equal(JSON.stringify(chatRequests[0].body).includes('base64'), false);
+});
+
+test('a Files resolution failure downgrades the request to inline base64 exactly once', async () => {
+  const dir = await filesDir();
+  const path = join(dir, 'deepseek-files.json');
+  const chatRequests = [];
+  const fileCalls = [];
+  const adapter = createDeepSeekChatAdapter({
+    connection: () => resolveChatConnection({ streamIdleTimeoutMs: 50 }),
+    resolveApiKey: async () => FILE_KEY,
+    resolveRequestImages: async () => new Map([[ATTACHMENT_ID, FILE_VERSION]]),
+    resolveFiles: () => new DeepSeekFileStore({
+      indexPath: path, now: () => 1_000_000,
+      fetch: async (url, init) => {
+        fileCalls.push({ url, method: init.method });
+        return new Response(JSON.stringify({ error: { message: 'upload exploded' } }), { status: 500, headers: { 'content-type': 'application/json' } });
+      },
+    }),
+    fetch: async (url, init) => { chatRequests.push({ url, body: JSON.parse(init.body) }); return sseResponse(['[DONE]']); },
+  });
+  await collect(adapter.stream({
+    provider: DEEPSEEK_CHAT_PROVIDER_ID, model: 'deepseek-flash',
+    messages: [{ role: 'user', content: [{ type: 'image', attachment: { attachmentId: ATTACHMENT_ID, mediaType: 'image/png', width: 2, height: 2 } }] }],
+  }));
+  assert.equal(fileCalls.length, 1, 'the upload is attempted once');
+  assert.equal(chatRequests.length, 1, 'only the downgraded body is sent');
+  const content = chatRequests[0].body.messages[0].content;
+  assert.equal(content[1].type, 'image_url');
+  assert.equal(content[1].image_url.url, 'data:image/png;base64,' + Buffer.from(PNG_BYTES).toString('base64'));
+  assert.equal(JSON.stringify(chatRequests[0].body).includes('file_id'), false);
+});
+
+test('a request version without variantId fails the file path and degrades to base64', async () => {
+  const dir = await filesDir();
+  const path = join(dir, 'deepseek-files.json');
+  let fileCalls = 0;
+  const store = new DeepSeekFileStore({
+    indexPath: path, now: () => 1_000_000,
+    fetch: async () => { fileCalls += 1; return uploadedFile('file-x', PNG_BYTES.byteLength, 1_000, 9_999); },
+  });
+  // The invariant at the unit boundary: a version without its cache identity never uploads.
+  const requestFiles = new RequestFiles(store, FILE_CONNECTION, FILE_POLICY, 5_000, new AbortController().signal);
+  await assert.rejects(
+    requestFiles.resolve({ mediaType: 'image/png', data: PNG_BYTES, bytes: PNG_BYTES.byteLength }, { message: 1, image: 1 }),
+    (error) => error instanceof FileResolutionFailure);
+  assert.equal(fileCalls, 0);
+
+  const chatRequests = [];
+  const adapter = createDeepSeekChatAdapter({
+    connection: () => resolveChatConnection({ streamIdleTimeoutMs: 50 }),
+    resolveApiKey: async () => FILE_KEY,
+    resolveRequestImages: async () => new Map([['a1', { mediaType: 'image/png', data: PNG_BYTES, bytes: PNG_BYTES.byteLength, width: 2, height: 2, attachment: { attachmentId: ATTACHMENT_ID } }]]),
+    resolveFiles: () => store,
+    fetch: async (url, init) => { chatRequests.push({ url, body: JSON.parse(init.body) }); return sseResponse(['[DONE]']); },
+  });
+  await collect(adapter.stream({
+    provider: DEEPSEEK_CHAT_PROVIDER_ID, model: 'deepseek-flash',
+    messages: [{ role: 'user', content: [{ type: 'image', attachment: { attachmentId: 'a1', mediaType: 'image/png', width: 2, height: 2 } }] }],
+  }));
+  assert.equal(fileCalls, 0, 'the upload path is never reached without a variant id');
+  assert.equal(chatRequests.length, 1);
+  assert.equal(chatRequests[0].body.messages[0].content[1].type, 'image_url');
+});
+
+test('the file path refuses an image above the 32 MiB request-version limit', async () => {
+  const dir = await filesDir();
+  let uploads = 0;
+  const store = new DeepSeekFileStore({
+    indexPath: join(dir, 'deepseek-files.json'), now: () => 1_000_000,
+    fetch: async () => { uploads += 1; return uploadedFile('file-y', 4, 1_000, 9_999); },
+  });
+  await assert.rejects(
+    store.ensureUploaded({ ...FILE_VERSION, bytes: 33 * 1024 * 1024 }, FILE_CONNECTION, FILE_POLICY),
+    (error) => error instanceof LlmError && error.code === 'INVALID_REQUEST');
+  assert.equal(uploads, 0);
+});
+
+test('the file representation reports each true occurrence location to resolveFileId', async () => {
+  const bytes = new Uint8Array([1, 2, 3]);
+  const version = id => ({ mediaType: 'image/png', data: bytes, bytes: bytes.byteLength, variantId: 'variant-' + id });
+  const options = {
+    provider: 'p', model: 'deepseek-flash',
+    messages: [
+      { role: 'user', content: [{ type: 'text', text: 'one' }, { type: 'image', attachment: { attachmentId: 'i1' } }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'ok' }] },
+      { role: 'user', content: [
+        { type: 'tool-result', toolCallId: 'c1', content: [{ type: 'image', attachment: { attachmentId: 'i2' } }] },
+        { type: 'image', attachment: { attachmentId: 'i3' } },
+      ] },
+    ],
+  };
+  const seen = [];
+  const body = await serializeRequestWithImages(options, {
+    representation: {
+      kind: 'file',
+      resolveFileId: async (resolved, block, location) => {
+        seen.push({ id: block.attachment.attachmentId, variant: resolved.variantId, ...location });
+        return 'file-' + block.attachment.attachmentId;
+      },
+    },
+    requestImages: new Map([['i1', version('i1')], ['i2', version('i2')], ['i3', version('i3')]]),
+    maxRequestImageBytes: 1024,
+  }, {});
+  // Regular blocks precede tool-result blocks of the same message, and the
+  // per-message image counter continues across both.
+  assert.deepEqual(seen, [
+    { id: 'i1', variant: 'variant-i1', message: 1, image: 1 },
+    { id: 'i3', variant: 'variant-i3', message: 3, image: 1 },
+    { id: 'i2', variant: 'variant-i2', message: 3, image: 2 },
+  ]);
+  assert.deepEqual(body.messages[0].content[2], { type: 'file', file_id: 'file-i1' });
+  assert.deepEqual(body.messages[2].content[1], { type: 'file', file_id: 'file-i3' });
+  assert.deepEqual(body.messages[4].content[1], { type: 'file', file_id: 'file-i2' });
 });

@@ -28,6 +28,11 @@ export const DEFAULT_CHAT_CONNECTION = {
     maxImagesPerRequest: 600,
     inlineImageOffloadByteQuantum: 10 * 1024 * 1024,
     imageOffloadCountQuantum: 20,
+    // Files path bounds and policy mirror the upstream Chat defaults.
+    maxRequestFilesBytes: 128 * 1024 * 1024,
+    imageOffloadByteQuantum: 64 * 1024 * 1024,
+    filesApiTimeoutMs: 60_000,
+    filePolicy: { expiresAfterSeconds: 7 * 24 * 60 * 60, refreshMarginSeconds: 60 * 60, quotaCleanupBatch: 100 },
     retryPolicy: { mode: 'normal', maxRetries: 5, baseDelayMs: 500 },
 };
 /** Merge partial plugin config over the defaults. */
@@ -36,6 +41,7 @@ export function resolveChatConnection(config = {}) {
         ...DEFAULT_CHAT_CONNECTION,
         ...config,
         models: config.models ?? DEFAULT_CHAT_CONNECTION.models,
+        filePolicy: config.filePolicy ?? DEFAULT_CHAT_CONNECTION.filePolicy,
         retryPolicy: config.retryPolicy ?? DEFAULT_CHAT_CONNECTION.retryPolicy,
     };
 }

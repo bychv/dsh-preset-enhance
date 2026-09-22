@@ -4,6 +4,7 @@
  * and packages/llm/llm/src/attribution.ts. MIT licensed upstream; Copyright (c) DeepSeek.
  */
 
+import type { DeepSeekFilePolicy } from './file-store.mjs';
 import type { LlmModelInfo, LlmResolvedModelInfo, ModelModality, RetryPolicy } from './host-types.mjs';
 
 /** Official Chat Completions root. Never the /anthropic Messages base. */
@@ -37,6 +38,14 @@ export interface ChatConnectionConfig {
   maxImagesPerRequest?: number;
   inlineImageOffloadByteQuantum?: number;
   imageOffloadCountQuantum?: number;
+  /** Maximum accumulated file-referenced image bytes in one request (Files path bound). */
+  maxRequestFilesBytes: number;
+  /** Raw-byte removal step after the file-reference bound is exceeded. */
+  imageOffloadByteQuantum: number;
+  /** Maximum duration of one request-image Files API resolution. */
+  filesApiTimeoutMs: number;
+  /** Upload expiry, refresh, and quota-recovery policy. */
+  filePolicy: DeepSeekFilePolicy;
   retryPolicy: RetryPolicy;
 }
 
@@ -64,6 +73,11 @@ export const DEFAULT_CHAT_CONNECTION: ChatConnectionConfig = {
   maxImagesPerRequest: 600,
   inlineImageOffloadByteQuantum: 10 * 1024 * 1024,
   imageOffloadCountQuantum: 20,
+  // Files path bounds and policy mirror the upstream Chat defaults.
+  maxRequestFilesBytes: 128 * 1024 * 1024,
+  imageOffloadByteQuantum: 64 * 1024 * 1024,
+  filesApiTimeoutMs: 60_000,
+  filePolicy: { expiresAfterSeconds: 7 * 24 * 60 * 60, refreshMarginSeconds: 60 * 60, quotaCleanupBatch: 100 },
   retryPolicy: { mode: 'normal', maxRetries: 5, baseDelayMs: 500 },
 };
 
@@ -73,6 +87,7 @@ export function resolveChatConnection(config: Partial<ChatConnectionConfig> = {}
     ...DEFAULT_CHAT_CONNECTION,
     ...config,
     models: config.models ?? DEFAULT_CHAT_CONNECTION.models,
+    filePolicy: config.filePolicy ?? DEFAULT_CHAT_CONNECTION.filePolicy,
     retryPolicy: config.retryPolicy ?? DEFAULT_CHAT_CONNECTION.retryPolicy,
   };
 }

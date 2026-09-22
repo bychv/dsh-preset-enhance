@@ -9,6 +9,7 @@ import { parseSse } from './sse.mjs';
 import { translate } from './translate.mjs';
 import { contentHasImage, serializeRequest, serializeRequestWithImages } from './serialize.mjs';
 import { deepSeekImageRequestPricing } from './pricing.mjs';
+import { FileResolutionFailure, RequestFiles } from './request-files.mjs';
 /** Provider route id the plugin registers. */
 export const DEEPSEEK_CHAT_PROVIDER_ID = 'preset-deepseek-chat';
 /** Display name shown by the host selectors. */
@@ -147,15 +148,56 @@ export class DeepSeekChatAdapter {
                 throw new LlmError('DeepSeek image input requires the host attachment bridge.', 'UNSUPPORTED_CONTENT');
             }
             const requestImages = await resolveImages(options, signal);
-            body = serializeRequestWithImages(options, {
+            const imageAccess = this.dependencies.resolveImageAccess === undefined ? {} : { resolveImageAccess: this.dependencies.resolveImageAccess };
+            // Inline fallback knobs: the base64 payload bound after a Files downgrade.
+            const base64Images = {
                 representation: { kind: 'base64' },
                 requestImages,
-                ...this.dependencies.resolveImageAccess === undefined ? {} : { resolveImageAccess: this.dependencies.resolveImageAccess },
+                ...imageAccess,
                 maxRequestImageBytes: connection.maxInlineRequestImageBytes,
                 ...connection.maxImagesPerRequest === undefined ? {} : { maxImagesPerRequest: connection.maxImagesPerRequest },
                 ...connection.inlineImageOffloadByteQuantum === undefined ? {} : { byteQuantum: connection.inlineImageOffloadByteQuantum },
                 ...connection.imageOffloadCountQuantum === undefined ? {} : { countQuantum: connection.imageOffloadCountQuantum },
-            }, defaults);
+            };
+            const files = this.dependencies.resolveFiles?.();
+            if (files === undefined) {
+                // No Files store is wired for this activation: inline base64 is the only representation.
+                body = serializeRequestWithImages(options, base64Images, defaults);
+            }
+            else {
+                const fileConnection = { baseURL: connection.baseURL, apiKey, protocol: 'chat-completions' };
+                const requestFiles = new RequestFiles(files, fileConnection, connection.filePolicy, connection.filesApiTimeoutMs, signal);
+                // Representation starts on the Files path; exactly one downgrade is allowed.
+                let representation = 'file';
+                for (;;) {
+                    requestFiles.beginAttempt();
+                    if (representation === 'base64') {
+                        body = serializeRequestWithImages(options, base64Images, defaults);
+                        break;
+                    }
+                    try {
+                        body = await serializeRequestWithImages(options, {
+                            representation: {
+                                kind: 'file',
+                                resolveFileId: (version, _block, location) => requestFiles.resolve(version, location),
+                            },
+                            requestImages,
+                            ...imageAccess,
+                            maxRequestImageBytes: connection.maxRequestFilesBytes,
+                            ...connection.maxImagesPerRequest === undefined ? {} : { maxImagesPerRequest: connection.maxImagesPerRequest },
+                            ...connection.imageOffloadByteQuantum === undefined ? {} : { byteQuantum: connection.imageOffloadByteQuantum },
+                            ...connection.imageOffloadCountQuantum === undefined ? {} : { countQuantum: connection.imageOffloadCountQuantum },
+                        }, defaults);
+                        break;
+                    }
+                    catch (error) {
+                        // Only a Files resolution failure may downgrade the whole request, and only once.
+                        if (!(error instanceof FileResolutionFailure))
+                            throw error;
+                        representation = 'base64';
+                    }
+                }
+            }
         }
         let response;
         try {

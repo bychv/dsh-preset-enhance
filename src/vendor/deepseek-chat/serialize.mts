@@ -11,6 +11,7 @@ import type {
   Message, RequestImageAttachment,
 } from './host-types.mjs';
 import type { WireImageContentPart, WireMessage, WireRequest, WireTextContentPart, WireTool, WireUserContentPart } from './wire-types.mjs';
+import type { ImageWireLocation } from './request-files.mjs';
 
 /** Adapter-level thinking defaults from the connection config. */
 export interface RequestDefaults {
@@ -23,8 +24,17 @@ interface ResolvedThinking {
   reasoningEffort?: 'low' | 'high' | 'max';
 }
 
+/** Position of one image occurrence in the request's conversation messages (1-based). */
+export type { ImageWireLocation } from './request-files.mjs';
+
 /** Provider representation for every retained image in one request. */
-export type ImageRequestRepresentation = { kind: 'base64' };
+export type ImageRequestRepresentation =
+  | {
+    kind: 'file';
+    /** Resolve a retained request version to a reusable DeepSeek file id. */
+    resolveFileId: (version: RequestImageAttachment, block: ImageBlock, location: ImageWireLocation) => Promise<string>;
+  }
+  | { kind: 'base64' };
 
 /** Dependencies required only when the request contains image input. */
 export interface ImageSerializationOptions {
@@ -218,20 +228,113 @@ export function serializeMessages(messages: readonly Message[]): WireMessage[] {
   return wire;
 }
 
-/** One retained image resolved to its text handle plus inline base64 part. */
-function imageParts(
-  block: ImageBlock,
-  images: ImageSerializationOptions,
-  precededByContent: boolean,
-): [WireTextContentPart, WireImageContentPart] {
+/** Resolved file ids keyed by occurrence location (file representation only). */
+type ResolvedFileIds = ReadonlyMap<string, string>;
+
+const EMPTY_FILE_IDS: ResolvedFileIds = new Map<string, string>();
+
+/** Stable key for one 1-based wire location. */
+function locationKey(location: ImageWireLocation): string {
+  return location.message + ':' + location.image;
+}
+
+/** One retained image occurrence in wire order, with its true wire location. */
+interface ImageOccurrence {
+  block: ImageBlock;
+  version: RequestImageAttachment;
+  location: ImageWireLocation;
+}
+
+/** Request version for one retained occurrence; refuses an unprepared image. */
+function requestImageVersion(block: ImageBlock, images: ImageSerializationOptions): RequestImageAttachment {
   const version = images.requestImages.get(block.attachment.attachmentId);
   if (version === undefined) {
     throw new LlmError('DeepSeek request image ' + block.attachment.attachmentId + ' was not prepared.', 'INVALID_REQUEST');
   }
-  const image: WireImageContentPart = {
-    type: 'image_url',
-    image_url: { url: 'data:' + version.mediaType + ';base64,' + Buffer.from(version.data).toString('base64') },
+  return version;
+}
+
+/**
+ * Every retained occurrence of one request in the exact order the wire
+ * traversal emits them, carrying the same 1-based message index (as upstream)
+ * and per-message image counter that contentParts uses for its location.
+ */
+function imageOccurrences(messages: readonly Message[], images: ImageSerializationOptions): ImageOccurrence[] {
+  const occurrences: ImageOccurrence[] = [];
+  const walk = (blocks: readonly ContentBlock[], message: number, nextImage: { value: number }): void => {
+    for (const block of blocks) {
+      if (block.type === 'image') {
+        nextImage.value += 1;
+        const image = block as ImageBlock;
+        occurrences.push({
+          block: image,
+          version: requestImageVersion(image, images),
+          location: { message, image: nextImage.value },
+        });
+        continue;
+      }
+      if (block.type === 'tool-result') walk((block as { content: ContentBlock[] }).content, message, nextImage);
+    }
   };
+  for (const [index, message] of messages.entries()) {
+    if (message.role === 'system' || message.role === 'assistant') continue;
+    const nextImage = { value: 0 };
+    walk(message.content.filter(block => block.type !== 'tool-result'), index + 1, nextImage);
+    for (const result of message.content.filter(block => block.type === 'tool-result')) {
+      walk((result as { content: ContentBlock[] }).content, index + 1, nextImage);
+    }
+  }
+  return occurrences;
+}
+
+/**
+ * Resolve every retained occurrence to a reusable file id before the wire
+ * traversal. resolveFileId is asynchronous, so the file representation cannot
+ * run inside the synchronous traversal the inline representation keeps for
+ * existing callers; the traversal itself still derives the location from its
+ * own counters and looks the id up by that location.
+ */
+async function resolveFileIds(messages: readonly Message[], images: ImageSerializationOptions): Promise<ResolvedFileIds> {
+  const representation = images.representation;
+  if (representation.kind !== 'file') return EMPTY_FILE_IDS;
+  const resolved = new Map<string, string>();
+  for (const occurrence of imageOccurrences(messages, images)) {
+    resolved.set(locationKey(occurrence.location), await representation.resolveFileId(
+      occurrence.version,
+      occurrence.block,
+      occurrence.location,
+    ));
+  }
+  return resolved;
+}
+
+/** The resolved id for one occurrence; the file representation always pre-resolves it. */
+function requireFileId(fileIds: ResolvedFileIds, location: ImageWireLocation): string {
+  const fileId = fileIds.get(locationKey(location));
+  if (fileId === undefined) {
+    throw new LlmError(
+      'DeepSeek file id for message ' + location.message + ', image ' + location.image + ' was not resolved.',
+      'INVALID_REQUEST',
+    );
+  }
+  return fileId;
+}
+
+/** One retained image resolved to its text handle plus wire part (file id or inline base64). */
+function imageParts(
+  block: ImageBlock,
+  images: ImageSerializationOptions,
+  fileIds: ResolvedFileIds,
+  location: ImageWireLocation,
+  precededByContent: boolean,
+): [WireTextContentPart, WireImageContentPart] {
+  const version = requestImageVersion(block, images);
+  const image: WireImageContentPart = images.representation.kind === 'file'
+    ? { type: 'file', file_id: requireFileId(fileIds, location) }
+    : {
+      type: 'image_url',
+      image_url: { url: 'data:' + version.mediaType + ';base64,' + Buffer.from(version.data).toString('base64') },
+    };
   const handle = (precededByContent ? '\n' : '') + requestImageHandleText(block.attachment, version, images.resolveImageAccess?.(block.attachment));
   return [{ type: 'text', text: handle }, image];
 }
@@ -240,18 +343,20 @@ function imageParts(
 function contentParts(
   blocks: readonly ContentBlock[],
   images: ImageSerializationOptions,
+  message: number,
   nextImage: { value: number },
+  fileIds: ResolvedFileIds,
 ): WireUserContentPart[] {
   const parts: WireUserContentPart[] = [];
   for (const block of blocks) {
     if (block.type === 'text') { const part = block as { text: string }; if (part.text.length > 0) parts.push({ type: 'text', text: part.text }); continue; }
     if (block.type === 'image') {
       nextImage.value += 1;
-      parts.push(...imageParts(block as ImageBlock, images, parts.length > 0));
+      parts.push(...imageParts(block as ImageBlock, images, fileIds, { message, image: nextImage.value }, parts.length > 0));
       continue;
     }
     if (block.type === 'tool-result') {
-      parts.push(...contentParts((block as { content: ContentBlock[] }).content, images, nextImage));
+      parts.push(...contentParts((block as { content: ContentBlock[] }).content, images, message, nextImage, fileIds));
       continue;
     }
   }
@@ -274,6 +379,7 @@ const TOOL_RESULT_IMAGE_TEXT = 'Attached image(s) from tool result:';
 export function serializeMessagesWithImages(
   messages: readonly Message[],
   images: ImageSerializationOptions,
+  fileIds: ResolvedFileIds = EMPTY_FILE_IDS,
 ): WireMessage[] {
   const wire: WireMessage[] = [];
   let pendingToolImages: WireImageContentPart[] = [];
@@ -282,19 +388,19 @@ export function serializeMessagesWithImages(
     wire.push({ role: 'user', content: [{ type: 'text', text: TOOL_RESULT_IMAGE_TEXT }, ...pendingToolImages] });
     pendingToolImages = [];
   };
-  for (const message of messages) {
+  for (const [messageIndex, message] of messages.entries()) {
     const nextImage = { value: 0 };
     if (message.role === 'system') { flushToolImages(); wire.push({ role: 'system', content: flattenText(message.content) }); continue; }
     if (message.role === 'assistant') { flushToolImages(); wire.push(serializeAssistant(message)); continue; }
     const regular = message.content.filter(block => block.type !== 'tool-result');
     const toolResults = message.content.filter(block => block.type === 'tool-result');
-    const content = userContent(contentParts(regular, images, nextImage));
+    const content = userContent(contentParts(regular, images, messageIndex + 1, nextImage, fileIds));
     if (content.length > 0 || toolResults.length === 0) {
       flushToolImages();
       wire.push({ role: 'user', content });
     }
     for (const result of toolResults) {
-      const parts = contentParts((result as { content: ContentBlock[] }).content, images, nextImage);
+      const parts = contentParts((result as { content: ContentBlock[] }).content, images, messageIndex + 1, nextImage, fileIds);
       const imageOnly = parts.filter((part): part is WireImageContentPart => part.type !== 'text');
       const text = parts.filter(part => part.type === 'text').map(part => part.text).join('');
       wire.push({ role: 'tool', tool_call_id: String((result as ToolResultBlock).toolCallId), content: text || '(no output)' });
@@ -351,21 +457,53 @@ function assertRetainedImagesFit(messages: readonly Message[], images: ImageSeri
 /** Build one image-capable request over the inline base64 representation. */
 export function serializeRequestWithImages(
   options: GenerateOptions,
+  images: ImageSerializationOptions & { representation: { kind: 'base64' } },
+  defaults?: RequestDefaults,
+): WireRequest;
+/** Build one image-capable request over the file representation (resolves ids first). */
+export function serializeRequestWithImages(
+  options: GenerateOptions,
+  images: ImageSerializationOptions,
+  defaults?: RequestDefaults,
+): WireRequest | Promise<WireRequest>;
+export function serializeRequestWithImages(
+  options: GenerateOptions,
   images: ImageSerializationOptions,
   defaults: RequestDefaults = {},
-): WireRequest {
+): WireRequest | Promise<WireRequest> {
+  const requestMessages = projectedImageMessages(options, images);
+  if (images.representation.kind === 'base64') {
+    return imageRequest(options, requestMessages, images, EMPTY_FILE_IDS, defaults);
+  }
+  return resolveFileIds(requestMessages, images).then(fileIds => (
+    imageRequest(options, requestMessages, images, fileIds, defaults)
+  ));
+}
+
+/** Refuse image content in roles the wire cannot carry, then project offloaded occurrences. */
+function projectedImageMessages(options: GenerateOptions, images: ImageSerializationOptions): readonly Message[] {
   for (const message of options.messages) {
     if (message.role !== 'user' && contentHasImage(message.content)) {
       throw new LlmError('The DeepSeek chat adapter cannot represent image content in a ' + message.role + ' message.', 'UNSUPPORTED_CONTENT');
     }
   }
   assertRetainedImagesFit(options.messages, images);
-  const requestMessages = projectOffloadedImages(
+  return projectOffloadedImages(
     options.messages,
     ref => offloadedImageText(ref, images.resolveImageAccess?.(ref)),
   );
+}
+
+/** Assemble one image-capable request from an already projected history. */
+function imageRequest(
+  options: GenerateOptions,
+  requestMessages: readonly Message[],
+  images: ImageSerializationOptions,
+  fileIds: ResolvedFileIds,
+  defaults: RequestDefaults,
+): WireRequest {
   const messages: WireMessage[] = [];
   if (options.system !== undefined) messages.push({ role: 'system', content: options.system });
-  messages.push(...serializeMessagesWithImages(requestMessages, images));
+  messages.push(...serializeMessagesWithImages(requestMessages, images, fileIds));
   return requestWithMessages(options, messages, defaults);
 }
