@@ -176,3 +176,15 @@ export interface PreparedAdapterCall {
 }
 
 export type AttributionHeaders = () => Record<string, string>;
+
+/**
+ * Injectable construction seam for the error the host must recognize. The host narrows turn
+ * failures by CLASS IDENTITY (`instanceof LlmError`, packages/core/agent-loop/src/agent.ts:359),
+ * which a vendored tree cannot reproduce; the plugin entry can pass a factory that builds real
+ * host LlmError instances (or leave it undefined and accept the documented UNKNOWN degradation).
+ */
+export type LlmErrorFactory = (
+  message: string,
+  code: string,
+  details?: { cause?: unknown; status?: number; providerRetryAfterMs?: number; requestId?: string; offloadImages?: number },
+) => Error;

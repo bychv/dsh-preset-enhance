@@ -51,6 +51,8 @@ function providerRetryAfterMs(value) {
  */
 export class DeepSeekChatAdapter {
     dependencies;
+    /** Errors built by the injected factory, so normalization passes them through untouched. */
+    produced = new WeakSet();
     constructor(dependencies) {
         this.dependencies = dependencies;
     }
@@ -80,13 +82,33 @@ export class DeepSeekChatAdapter {
     stream(options) {
         return this.streamWithConnection(options, this.dependencies.connection());
     }
+    /** Build one failure through the injected host factory when present. */
+    fail(message, code, details = {}) {
+        const factory = this.dependencies.createError;
+        if (factory === undefined)
+            return new LlmError(message, code, details);
+        const error = factory(message, code, details);
+        if (typeof error === 'object' && error !== null)
+            this.produced.add(error);
+        return error;
+    }
+    /** Rebuild one of our failures through the factory so the host class carries the same facts. */
+    rewrap(error) {
+        return this.fail(error.message, error.code, {
+            cause: error,
+            ...error.status === undefined ? {} : { status: error.status },
+            ...error.providerRetryAfterMs === undefined ? {} : { providerRetryAfterMs: error.providerRetryAfterMs },
+            ...error.requestId === undefined ? {} : { requestId: error.requestId },
+            ...error.offloadImages === undefined ? {} : { offloadImages: error.offloadImages },
+        });
+    }
     get fetchImpl() {
         return this.dependencies.fetch ?? globalThis.fetch;
     }
     async *streamWithConnection(options, connection) {
         const hasImages = options.messages.some(message => contentHasImage(message.content));
         if (hasImages && this.dependencies.resolveRequestImages === undefined) {
-            throw new LlmError('DeepSeek image input requires the host attachment bridge (resolveRequestImages).', 'UNSUPPORTED_CONTENT');
+            throw this.fail('DeepSeek image input requires the host attachment bridge (resolveRequestImages).', 'UNSUPPORTED_CONTENT');
         }
         const apiKey = await this.dependencies.resolveApiKey(connection, options);
         const consumer = new AbortController();
@@ -108,14 +130,21 @@ export class DeepSeekChatAdapter {
         }
         catch (error) {
             if (idle.timedOut) {
-                throw new LlmError('DeepSeek stream idle timeout after ' + connection.streamIdleTimeoutMs + 'ms', 'TIMEOUT', { cause: error });
+                throw this.fail('DeepSeek stream idle timeout after ' + connection.streamIdleTimeoutMs + 'ms', 'TIMEOUT', { cause: error });
             }
             if (options.signal?.aborted === true) {
-                throw new LlmError('DeepSeek request aborted by caller', 'ABORTED', { cause: error });
+                throw this.fail('DeepSeek request aborted by caller', 'ABORTED', { cause: error });
             }
-            if (error instanceof LlmError)
+            if (error instanceof LlmError) {
+                // A serializer/pricing failure reaches this normalization too: rebuild it through the
+                // factory so the host recognizes the class and keeps the code instead of UNKNOWN.
+                if (this.dependencies.createError !== undefined)
+                    throw this.rewrap(error);
                 throw error;
-            throw new LlmError('DeepSeek API stream from ' + connection.baseURL + ' failed', 'TRANSPORT', { cause: error });
+            }
+            if (typeof error === 'object' && error !== null && this.produced.has(error))
+                throw error;
+            throw this.fail('DeepSeek API stream from ' + connection.baseURL + ' failed', 'TRANSPORT', { cause: error });
         }
         finally {
             // The consumer controller owns termination for every exit path.
@@ -145,7 +174,7 @@ export class DeepSeekChatAdapter {
         else {
             const resolveImages = this.dependencies.resolveRequestImages;
             if (resolveImages === undefined) {
-                throw new LlmError('DeepSeek image input requires the host attachment bridge.', 'UNSUPPORTED_CONTENT');
+                throw this.fail('DeepSeek image input requires the host attachment bridge.', 'UNSUPPORTED_CONTENT');
             }
             const requestImages = await resolveImages(options, signal);
             const imageAccess = this.dependencies.resolveImageAccess === undefined ? {} : { resolveImageAccess: this.dependencies.resolveImageAccess };
@@ -211,7 +240,7 @@ export class DeepSeekChatAdapter {
         catch (error) {
             if (signal.aborted)
                 throw error;
-            throw new LlmError('DeepSeek API request to ' + connection.baseURL + ' failed', 'TRANSPORT', { cause: error });
+            throw this.fail('DeepSeek API request to ' + connection.baseURL + ' failed', 'TRANSPORT', { cause: error });
         }
         if (!response.ok) {
             let message = 'DeepSeek API error (HTTP ' + response.status + ')';
@@ -229,7 +258,7 @@ export class DeepSeekChatAdapter {
             const detail = [providerError?.code, providerError?.type, providerError?.message].filter(Boolean).join(' ');
             const delay = providerRetryAfterMs(response.headers.get('retry-after'));
             const id = response.headers.get('x-request-id') ?? response.headers.get('x-deepseek-request-id') ?? undefined;
-            throw new LlmError(message, httpErrorCode(response.status, providerError ?? {}), {
+            throw this.fail(message, httpErrorCode(response.status, providerError ?? {}), {
                 cause: new Error(rawResponse.length > 0 ? rawResponse : 'DeepSeek HTTP ' + response.status),
                 status: response.status,
                 ...delay === undefined ? {} : { providerRetryAfterMs: delay },
@@ -237,7 +266,7 @@ export class DeepSeekChatAdapter {
             });
         }
         if (response.body === null)
-            throw new LlmError('DeepSeek API returned no response body', 'EMPTY_RESPONSE');
+            throw this.fail('DeepSeek API returned no response body', 'EMPTY_RESPONSE');
         const sseBody = response.body.pipeThrough(idleTimeoutStream(connection.streamIdleTimeoutMs, idle));
         yield* translate(parseSse(sseBody));
     }

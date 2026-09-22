@@ -13,6 +13,13 @@ export class LlmError extends Error {
     providerRetryAfterMs;
     requestId;
     offloadImages;
+    /**
+      * Serializable facts the host reads off the live error: agent-loop normalizes a turn failure
+      * with `error instanceof LlmError ? error.failure : { message: errorChain(error), code: "UNKNOWN" }`
+      * (packages/core/agent-loop/src/agent.ts:359-361), and the host LlmError freezes exactly this shape
+      * (packages/llm/llm/src/index.ts:120-127). Keep it identical so the code survives the boundary.
+      */
+    failure;
     constructor(message, code, details = {}) {
         super(message, details.cause === undefined ? undefined : { cause: details.cause });
         this.name = 'LlmError';
@@ -21,6 +28,14 @@ export class LlmError extends Error {
         this.providerRetryAfterMs = details.providerRetryAfterMs;
         this.requestId = details.requestId;
         this.offloadImages = details.offloadImages;
+        this.failure = Object.freeze({
+            message,
+            code,
+            ...details.status === undefined ? {} : { status: details.status },
+            ...details.providerRetryAfterMs === undefined ? {} : { providerRetryAfterMs: details.providerRetryAfterMs },
+            ...details.requestId === undefined ? {} : { requestId: details.requestId },
+            ...details.offloadImages === undefined ? {} : { offloadImages: details.offloadImages },
+        });
     }
 }
 /**

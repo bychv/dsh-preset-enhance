@@ -147,9 +147,11 @@ export async function apply(ctx, config = {}) {
     // The upload cache is owner-private and lives next to the plugin's own state file; the
     // index is keyed by a hash of the endpoint and key, so no credential reaches disk.
     const chatFiles = new DeepSeekFileStore({ indexPath: deepSeekFilesIndexPath(store.file) });
+    const chatErrorFactory = await resolveHostErrorFactory();
     const chatAdapter = createDeepSeekChatAdapter({
         connection: chatConnection,
         resolveFiles: () => chatFiles,
+        ...(chatErrorFactory ? { createError: chatErrorFactory } : {}),
         resolveApiKey: async () => resolveChatApiKey(ctx, config.chatApiKeyEnv ?? DEFAULT_CHAT_API_KEY_ENV),
         resolveUserId: () => 'preset-enhance',
         // Images keep going through the host's attachment service: we only turn the
@@ -954,6 +956,29 @@ function connectionProtocolFor(state, connection) {
     return state.protocolMode === 'messages' ? 'messages' : 'chat-completions';
 }
 const DEFAULT_CHAT_API_KEY_ENV = 'DEEPSEEK_API_KEY';
+/**
+ * The host classifies a failed turn by class identity
+ * (core/agent-loop/src/agent.ts:355 — `error instanceof LlmError ? error.failure : { code: 'UNKNOWN' }`),
+ * and its own docs state that duck-typed or cross-realm errors do not narrow. Our
+ * structural error therefore cannot carry a code to the panel on its own, so we use the
+ * host's class when it is resolvable from the profile. When it is not, we keep the
+ * structural error and accept the generic code rather than faking an identity we do not have.
+ */
+async function resolveHostErrorFactory() {
+    try {
+        // A variable specifier keeps the compiler from requiring a package we deliberately
+        // do not depend on at build time; the class only exists at runtime inside the host.
+        const specifier = '@deepseek-ai/dsh-llm';
+        const host = await import(specifier);
+        const HostLlmError = host.LlmError;
+        if (typeof HostLlmError !== 'function')
+            return undefined;
+        return (message, code, details) => new HostLlmError(message, code, details);
+    }
+    catch {
+        return undefined;
+    }
+}
 /**
  * Collect the retained image references of one request and resolve each through the
  * host attachment service, at the size target this model route asks for. Offloaded

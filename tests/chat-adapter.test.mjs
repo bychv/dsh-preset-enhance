@@ -710,3 +710,78 @@ test('an unlisted model id still resolves complete metadata', async () => {
   const pricing = adapter.imageRequestPricing(DEEPSEEK_CHAT_PROVIDER_ID, model);
   assert.equal(pricing.priceImages([{ type: 'image', attachment }])[0].visualTokens, 0);
 });
+
+test('adapter failures expose the fields the host reads (agent-loop agent.ts:359-361)', async () => {
+  const parts = makeAdapter(() => sseResponse(['[DONE]']));
+  const attachment = { attachmentId: 'tool-img', mediaType: 'image/png', width: 4, height: 4 };
+  // The live case: an image arrives inside a role:tool message and the serializer refuses it.
+  const messages = [{ role: 'tool', tool_call_id: 't1', content: [{ type: 'image', attachment }] }];
+  await assert.rejects(collect(parts.adapter.stream({ ...baseOptions(), messages })), (error) => {
+    assert.equal(error.code, 'UNSUPPORTED_CONTENT');
+    // The host normalizes with: error instanceof LlmError ? error.failure : { code: 'UNKNOWN' }.
+    assert.equal(error.failure.code, 'UNSUPPORTED_CONTENT');
+    assert.equal(typeof error.failure.message, 'string');
+    assert.equal(error.failure.message.length > 0, true);
+    assert.equal(Object.isFrozen(error.failure), true);
+    return true;
+  });
+  // Every other code carries the same shape (checked on the HTTP mapping path).
+  const denied = makeAdapter(() => new Response('{}', { status: 429 }));
+  await assert.rejects(collect(denied.adapter.stream(baseOptions())), (error) => {
+    assert.equal(error.code, 'RATE_LIMIT');
+    assert.equal(error.failure.code, 'RATE_LIMIT');
+    return true;
+  });
+});
+
+test('an injected error factory builds every failure with host class identity', async () => {
+  class HostLikeLlmError extends Error {
+    constructor(message, code, details = {}) {
+      super(message);
+      this.name = 'LlmError';
+      this.code = code;
+      this.failure = Object.freeze({
+        message, code,
+        ...details.offloadImages === undefined ? {} : { offloadImages: details.offloadImages },
+        ...details.status === undefined ? {} : { status: details.status },
+      });
+    }
+  }
+  const created = [];
+  const createError = (message, code, details) => {
+    const error = new HostLikeLlmError(message, code, details);
+    created.push(error);
+    return error;
+  };
+  const connection = resolveChatConnection({ streamIdleTimeoutMs: 50 });
+  const adapter = createDeepSeekChatAdapter({
+    connection: () => connection,
+    resolveApiKey: async () => 'k',
+    createError,
+    fetch: async () => { throw new TypeError('fetch failed'); },
+  });
+  await assert.rejects(collect(adapter.stream(baseOptions())), (error) => {
+    assert.equal(error instanceof HostLikeLlmError, true);
+    assert.equal(error.code, 'TRANSPORT');
+    assert.equal(error.failure.code, 'TRANSPORT');
+    return true;
+  });
+  // A failure carrying provider facts keeps them through the seam (budget -> IMAGE_OFFLOAD_REQUIRED).
+  const offloadConnection = resolveChatConnection({ streamIdleTimeoutMs: 50, maxInlineRequestImageBytes: 2 });
+  const offloadAdapter = createDeepSeekChatAdapter({
+    connection: () => offloadConnection,
+    resolveApiKey: async () => 'k',
+    createError,
+    resolveRequestImages: async () => new Map([['a1', { mediaType: 'image/png', data: new Uint8Array([1, 2, 3]), bytes: 3, width: 2, height: 2 }]]),
+    fetch: async () => sseResponse(['[DONE]']),
+  });
+  const attachment = { attachmentId: 'a1', mediaType: 'image/png', width: 2, height: 2 };
+  await assert.rejects(collect(offloadAdapter.stream({ ...baseOptions(), messages: [{ role: 'user', content: [{ type: 'image', attachment }] }] })), (error) => {
+    assert.equal(error instanceof HostLikeLlmError, true);
+    assert.equal(error.code, IMAGE_OFFLOAD_REQUIRED_CODE);
+    assert.equal(error.failure.code, IMAGE_OFFLOAD_REQUIRED_CODE);
+    assert.equal(error.failure.offloadImages, 1);
+    return true;
+  });
+  assert.equal(created.length >= 2, true);
+});

@@ -46,3 +46,4 @@ export {
   resolveRequestImageTarget, textOnlyImageText,
 } from './pricing.mjs';
 export type { ProjectedDimensions } from './pricing.mjs';
+export type { LlmErrorFactory } from './host-types.mjs';
