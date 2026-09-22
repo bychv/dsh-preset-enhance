@@ -112,7 +112,8 @@ export function sessionConnection(ctx: PluginContext, sessionId: string, provide
 export interface ConnectionChoice {
   provider: string;
   label: string;
-  protocol: ConnectionProtocol;
+  /** 'unknown' for host providers whose wire protocol we cannot classify. */
+  protocol: ConnectionProtocol | 'unknown';
   /** Model this provider is switched to when the caller names none. */
   defaultModel: string;
 }
@@ -125,6 +126,19 @@ export interface ConnectionSelection {
   /** False when the host exposes no agentDefaultModel service, so nothing can be switched. */
   canSwitch: boolean;
 }
+
+/** Hosts may route through providers we do not curate (pi-ai, gateways), so they stay selectable. */
+const hostProviderChoices = (ctx: PluginContext): ConnectionChoice[] => {
+  const providers = (ctx.llm as { listProviders?(): { id?: string; name?: string }[] } | undefined)?.listProviders?.() ?? [];
+  return providers
+    .filter(provider => typeof provider?.id === 'string' && provider.id.length > 0)
+    .map(provider => ({
+      provider: provider.id as string,
+      label: typeof provider.name === 'string' && provider.name ? provider.name : String(provider.id),
+      protocol: 'unknown' as const,
+      defaultModel: '',
+    }));
+};
 
 const CONNECTION_CHOICES: ConnectionChoice[] = [
   { provider: 'preset-deepseek-chat', label: '插件 DeepSeek Chat（预设增强）', protocol: 'chat-completions', defaultModel: 'deepseek-flash' },
@@ -147,7 +161,8 @@ export function connectionSelection(ctx: PluginContext): ConnectionSelection {
     provider: typeof current?.provider === 'string' && current.provider ? current.provider : null,
     model: typeof current?.model === 'string' && current.model ? current.model : null,
     reasoningEffort: typeof current?.reasoningEffort === 'string' ? current.reasoningEffort : null,
-    choices: CONNECTION_CHOICES.map(choice => ({ ...choice })),
+    choices: [...CONNECTION_CHOICES.map(choice => ({ ...choice })),
+      ...hostProviderChoices(ctx).filter(extra => !CONNECTION_CHOICES.some(known => known.provider === extra.provider))],
     canSwitch: typeof service?.saveSelection === 'function',
   };
 }
@@ -165,12 +180,13 @@ export async function selectConnection(ctx: PluginContext, provider: string, mod
   if (typeof service?.saveSelection !== 'function') {
     throw new Error('当前 DSH 未提供 agentDefaultModel 服务，无法切换连接');
   }
-  const choice = CONNECTION_CHOICES.find(item => item.provider === provider);
+  const choice = CONNECTION_CHOICES.find(item => item.provider === provider)
+    ?? hostProviderChoices(ctx).find(item => item.provider === provider);
   if (!choice) throw new Error('未知的连接');
   const current = service.currentSelection?.();
   const next = {
     provider,
-    model: model && model.trim() ? model.trim() : choice.defaultModel,
+    model: model && model.trim() ? model.trim() : (choice.defaultModel || current?.model || ''),
     ...(typeof current?.reasoningEffort === 'string' ? { reasoningEffort: current.reasoningEffort } : {}),
   };
   await service.saveSelection(next);
