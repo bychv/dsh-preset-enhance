@@ -7,11 +7,12 @@ import { compilePreset, validatePreset, getOrder, dshSystemPromptEnabled } from 
 import { decodePresetDocument, encodePresetPackage, attachPrefillSettings, applyPackagePrefill } from './lib/preset-package.mjs';
 import { installDeepSeekBetaBridge } from './lib/deepseek-beta.mjs';
 import { createProtocolObserver } from './lib/protocol.mjs';
-import { readConnectionProtocol, writeConnectionProtocol } from './lib/connection.mjs';
+import { sessionConnection, writeConnectionProtocol } from './lib/connection.mjs';
+import { installToolRestrictions } from './lib/tool-restrictions.mjs';
 import { adaptPresetForMessages } from './lib/messages.mjs';
 import { clearPresetEnhanceUnavailableReason, markPresetEnhanceActive, setPresetEnhanceUnavailableReason, } from './lib/availability.mjs';
 import { OUTPUT_EXTRACTION_PROMPT_TEMPLATE } from './lib/output-extractor.mjs';
-import { normalizeToolGroups, normalizeToolPreset, normalizeToolSelection, assertPresetGroupIds, toolPolicySnapshot, effectiveToolEnabled, effectiveToolPolicy, remapToolPackage, presetReferenceCounts, unresolvedToolRefs, resetPresetSelections, exportToolsSection, TOOL_PRESET_LIMIT, } from './lib/tool-presets.mjs';
+import { normalizeToolGroups, normalizeToolPreset, normalizeToolSelection, assertPresetGroupIds, toolPolicySnapshot, effectiveToolEnabled, effectiveToolPolicy, remapToolPackage, editableToolCatalog, presetReferenceCounts, unresolvedToolRefs, resetPresetSelections, exportToolsSection, TOOL_PRESET_LIMIT, } from './lib/tool-presets.mjs';
 export const name = 'preset-enhance';
 export const inject = ['llm', 'sessions', 'webServer', 'commands', 'tools', 'agentPresets', 'agents'];
 export const AGENT_PRESET_ID = 'st-preset';
@@ -137,14 +138,6 @@ export async function apply(ctx, config = {}) {
     // assistant-prefix/toolcall compatibility bridge cannot apply. Observations are
     // recorded per session so the workbench can say so instead of pretending.
     const protocolObserver = createProtocolObserver();
-    // Detected from the host's own connection settings at start-up (no network call), so
-    // the workbench can show and change the protocol of the connection in use.
-    let connectionInfo = readConnectionProtocol(ctx);
-    // The settings service may arrive after this plugin; the host's own pattern is a scoped
-    // inject callback, so detection re-runs once it is available.
-    ctx.inject?.(['settings'], (scoped) => {
-        connectionInfo = readConnectionProtocol(ctx, scoped?.settings);
-    });
     // The in-app official-request switch is parked behind an explicit opt-in; the shipped
     // default leaves the host's own protocol behaviour untouched.
     const deepSeekBeta = installDeepSeekBetaBridge(ctx, {
@@ -199,6 +192,8 @@ export async function apply(ctx, config = {}) {
         clearPresetEnhanceUnavailableReason();
     }
     const refreshPolicies = (state) => { policySnapshot = toolPolicySnapshot(state); };
+    if (!startupError)
+        installToolRestrictions(ctx, () => policySnapshot, sessionModeId);
     const tools = ctx.tools;
     if (tools?.guard && !startupError) {
         const guard = tools.guard.bind(tools);
@@ -228,6 +223,7 @@ export async function apply(ctx, config = {}) {
             yield* next();
             return;
         }
+        const connectionInfo = sessionConnection(ctx, sessionId, options.provider);
         const modeId = sessionModeId(session);
         const exclusive = modeId === AGENT_PRESET_ID;
         const incoming = options.messages ?? [];
@@ -238,7 +234,7 @@ export async function apply(ctx, config = {}) {
         const explicit = ownGet(initial.bindings, sessionId);
         const wantsPreset = explicit?.enabled ||
             (!explicit && shouldAutoEnable(initial, session) && defaultRecord(initial));
-        const catalogChanged = observed.length > 0 && !sameCatalog(initial.toolCatalogs[modeId] ?? [], observed);
+        const catalogChanged = observed.length > 0 && !sameCatalog(initial.toolCatalogs[modeId] ?? [], editableToolCatalog([initial.toolCatalogs, { [modeId]: observed }])[modeId]);
         let compiled = null;
         if (wantsPreset || catalogChanged) {
             compiled = await lifecycle.track(store.transaction((current) => {
@@ -388,6 +384,7 @@ export async function apply(ctx, config = {}) {
                     refreshPolicies(state);
                     const sessionId = url.searchParams.get('sessionId') ?? '';
                     const session = sessionId ? ctx.sessions.get(sessionId) : undefined;
+                    const connectionInfo = sessionConnection(ctx, sessionId);
                     const fallback = !ownGet(state.bindings, sessionId) && shouldAutoEnable(state, session) ?
                         defaultBinding(state) : undefined;
                     const modeDefault = defaultRecord(state);
@@ -473,13 +470,14 @@ export async function apply(ctx, config = {}) {
                     if (protocol !== 'chat-completions' && protocol !== 'messages')
                         throw new Error('连接协议无效');
                     // Re-read right before writing so the merge carries a fresh settings revision.
-                    const info = readConnectionProtocol(ctx);
+                    const connectionSessionId = url.searchParams.get('sessionId') ?? '';
+                    const info = sessionConnection(ctx, connectionSessionId);
                     if (!info)
                         throw new Error('当前 DSH 未暴露可配置的连接，无法切换协议');
                     if (info.source !== 'settings')
                         throw new Error('当前 DSH 未提供设置服务，无法切换连接协议');
                     await writeConnectionProtocol(ctx, info, protocol);
-                    connectionInfo = readConnectionProtocol(ctx);
+                    const connectionInfo = sessionConnection(ctx, connectionSessionId);
                     return respond(res, 200, { connection: connectionInfo });
                 }
                 if (body.action === 'save-tool-groups') {
@@ -585,7 +583,7 @@ export async function apply(ctx, config = {}) {
                         assign(current.modeToolSelections, body.modeId, selection);
                         current.revision++;
                         refreshPolicies(current);
-                        return { modeId: body.modeId, selection };
+                        return { modeId: body.modeId, selection, revision: current.revision };
                     }));
                 }
                 if (body.action === 'save-session-tools') {
@@ -611,7 +609,7 @@ export async function apply(ctx, config = {}) {
                         }
                         current.revision++;
                         refreshPolicies(current);
-                        return { inherited: inherit };
+                        return { inherited: inherit, revision: current.revision };
                     }));
                 }
                 if (body.action === 'import-package-tools') {
@@ -948,14 +946,7 @@ function dshSystemPromptText(messages) {
 }
 /** Live catalogs plus the last catalog seen for each mode, so a removed plugin is not silently forgotten. */
 function knownToolCatalogs(state, discovered) {
-    const catalogs = {};
-    for (const source of [state?.toolCatalogs, discovered]) {
-        for (const [modeId, catalog] of Object.entries(source ?? {})) {
-            if (Array.isArray(catalog))
-                assign(catalogs, modeId, catalog);
-        }
-    }
-    return catalogs;
+    return editableToolCatalog([state?.toolCatalogs, discovered]);
 }
 /** Match GET's catalog view for writes opened from a live conversation. */
 function requestToolCatalogs(ctx, state, discovered, sessionId) {
@@ -964,7 +955,7 @@ function requestToolCatalogs(ctx, state, discovered, sessionId) {
     const modeId = sessionModeId(session);
     const live = liveToolCatalog(ctx, sessionId);
     if (live.length > 0 && modeId)
-        assign(catalogs, modeId, live);
+        assign(catalogs, modeId, editableToolCatalog([catalogs, { [modeId]: live }])[modeId]);
     return catalogs;
 }
 /** Group DSH MCP public tool names by their stable server namespace. */
@@ -1027,9 +1018,12 @@ function sameCatalog(left, right) {
     return JSON.stringify(left) === JSON.stringify(right);
 }
 function syncToolCatalog(state, modeId, observed) {
-    if (!modeId || sameCatalog(state.toolCatalogs[modeId] ?? [], observed))
+    if (!modeId)
         return false;
-    assign(state.toolCatalogs, modeId, observed);
+    const merged = editableToolCatalog([state.toolCatalogs, { [modeId]: observed }])[modeId];
+    if (sameCatalog(state.toolCatalogs[modeId] ?? [], merged))
+        return false;
+    assign(state.toolCatalogs, modeId, merged);
     return true;
 }
 function filterTools(tools, policy) {

@@ -167,7 +167,6 @@ async function reload(id) {
   $('prefix-tool-calls').checked = state.prefixToolCalls === true;
   $('prefix-output-extraction').checked = state.prefixOutputExtraction === true;
   $('prefix-nonofficial-remove-tools').checked = state.prefixNonOfficialRemoveTools !== false;
-  $('output-extraction-template').value = state.outputExtractionTemplate ?? '';
   $('post-tool-prefix-mode').value = state.postToolPrefixMode ?? 'inherit';
   $('post-tool-prefix-text').value = state.postToolPrefixText ?? '';
   renderConnectionProtocol();
@@ -228,7 +227,10 @@ function connectionProtocolUsable() {
 function renderConnectionProtocol() {
   const connection = state.connection ?? null;
   const usable = connectionProtocolUsable();
-  const protocol = connection?.protocol;
+  const protocol = connection?.protocol ?? state.protocol?.protocol;
+  const messages = protocol === 'messages';
+  $('prefill-settings').disabled = messages;
+  $('prefill-disabled-note').hidden = !messages;
   const known = protocol === 'chat-completions' || protocol === 'messages';
   const input = $('connection-protocol');
   $('connection-protocol-bar').classList.toggle('unknown', !known);
@@ -285,20 +287,19 @@ function renderProtocolNotice() {
   const box = $('protocol-notice');
   const binding = state.binding ?? {};
   const observation = state.protocol ?? null;
-  const notes = protocolNoteList(state.protocolNotes);
+  const currentProtocol = state.connection?.protocol ?? observation?.protocol;
+  const notes = currentProtocol === 'messages' ? protocolNoteList(state.protocolNotes) : [];
   const hide = () => { box.hidden = true; box.className = 'notice'; box.replaceChildren(); };
   if (!sessionId || binding.enabled !== true) { hide(); return; }
-  if (!observation && notes.length === 0) { hide(); return; }
+  if (!currentProtocol && notes.length === 0) { hide(); return; }
   const parts = [];
-  const unsupported = observation?.skipped === true ||
-    (observation?.capability != null && observation.capability.supported !== true);
-  if (observation && observation.protocol === 'messages' && unsupported) {
+  if (currentProtocol === 'messages') {
     const head = document.createElement('strong');
     const body = document.createElement('p');
     head.textContent = '当前连接使用 Messages 协议：预设兼容路径不适用';
     body.textContent = '预填充续写、工具调用转换与正文提取只在对话补全接口下生效，插件不会改写该请求。' +
       (connectionProtocolUsable()
-        ? `如需这些能力，请在下方“Assistant 预填充接口”面板的“连接协议”里把 ${connectionDisplayName()} 改为对话补全接口。`
+        ? `如需这些能力，请在页面顶部的“连接协议”里把 ${connectionDisplayName()} 改为对话补全接口。`
         : '如需这些能力，请先在宿主的连接设置里把该连接改为对话补全接口。');
     parts.push(head, body);
   }
@@ -366,7 +367,6 @@ let toolDraftVersion = 0;
 let autoSaveTimer = null;
 let autoSaveChain = Promise.resolve();
 let autoSaveInFlight = false;
-let autoSaveInFlightVersion = -1;
 let keepaliveFlushedVersion = -1;
 let groupDraft = [];
 let groupsDirty = false;
@@ -441,6 +441,18 @@ function toolContext() {
   const modeId = sessionScope ? (state.sessionMode ?? $('tool-mode').value) : $('tool-mode').value;
   return { sessionScope, modeId };
 }
+function toolJournalKey(key = toolDraft.key) {
+  return 'dsh-preset-enhance.pending-tools:' + (key.startsWith('session:') ? sessionId + ':' : '') + key;
+}
+function journalToolDraft() {
+  if (autoSaveIsOn() && toolDraft.dirty) storageSet(toolJournalKey(), JSON.stringify(toolDraft.policy));
+}
+function acknowledgeToolDraft(key, policy) {
+  const storageKey = toolJournalKey(key);
+  if (storageGet(storageKey, '') === JSON.stringify(policy)) {
+    try { localStorage.removeItem(storageKey); } catch { /* keep the draft for recovery */ }
+  }
+}
 function loadToolDraft(force) {
   const { sessionScope, modeId } = toolContext();
   const key = `${sessionScope ? 'session' : 'mode'}:${modeId}`;
@@ -448,6 +460,18 @@ function loadToolDraft(force) {
     // 保留尚未保存的草稿：无关的 reload()（保存预设、保存接口设置等）不得丢弃用户的开关改动。
   } else if (force || toolDraft.key !== key) {
     toolDraft = { key, policy: effectiveToolPolicy(modeId, sessionScope), dirty: false };
+    const pending = storageGet(toolJournalKey(key), '');
+    if (pending) {
+      try {
+        const policy = JSON.parse(pending);
+        if (policy && typeof policy === 'object' && !Array.isArray(policy) &&
+            Object.values(policy).every(value => typeof value === 'boolean')) {
+          toolDraft = { key, policy, dirty: true };
+          toolDraftVersion++;
+          scheduleAutoSave();
+        }
+      } catch { /* ignore malformed browser storage */ }
+    }
   }
   toolView.sessionScope = sessionScope;
   toolView.modeId = modeId;
@@ -468,6 +492,7 @@ function syncDraftsWithState() {
 function markToolDirty() {
   toolDraft.dirty = true;
   toolDraftVersion++;
+  journalToolDraft();
   status('工具开关草稿尚未保存');
   scheduleAutoSave();
 }
@@ -483,6 +508,7 @@ function presetDiscardOkay() {
 function toolDiscardOkay() {
   if (!toolDraft.dirty) return true;
   if (!confirm('放弃尚未保存的工具开关草稿？')) return false;
+  acknowledgeToolDraft(toolDraft.key, toolDraft.policy);
   resetToolDraft();
   return true;
 }
@@ -631,7 +657,7 @@ async function configWrite(payload) {
   }
 }
 function acceptRevision(result) {
-  state.revision = Number.isInteger(result?.revision) ? result.revision : state.revision + 1;
+  state.revision = Number.isInteger(result?.revision) ? Math.max(state.revision, result.revision) : state.revision + 1;
 }
 function toolGroupsPayload() {
   return groupDraft.map(group => ({
@@ -645,6 +671,11 @@ function toolGroupsPayload() {
 async function persistPrefillSettingsDraft() {
   if (!prefillSettingsDirty) return false;
   const version = prefillSettingsVersion;
+  if ($('prefill-settings').disabled) return false;
+  if (dirty) {
+    const saved = await runPresetAutoSave();
+    if (!saved?.ok) throw saved?.error ?? new Error('预设保存失败');
+  }
   const payload = prefillSettingsPayload();
   const result = await configWrite(payload);
   acceptRevision(result);
@@ -762,13 +793,16 @@ async function persistToolDraft() {
   const version = toolDraftVersion;
   const policy = { ...toolDraft.policy };
   const send = () => api(toolSaveRequest(scope, modeId, policy));
+  journalToolDraft();
+  let result;
   try {
-    await send();
+    result = await send();
   } catch (error) {
     if (!isRevisionConflict(error)) return { ok: false, error };
     try {
-      await reload(selectedId);            // 刷新 revision，reload 会保留脏草稿
-      await send();                        // 用新 revision 重试一次
+      const latest = await api();
+      state.revision = latest.revision;
+      result = await send();
     } catch (retryError) {
       return { ok: false, error: retryError };
     }
@@ -781,14 +815,13 @@ async function persistToolDraft() {
       scheduleAutoSave();                    // 保存在途时又有新改动，稍后再存一次
     }
   }
-  // 每次成功事务服务端只 +1；冲突时上面的 reload() 会重新同步 revision。
-  state.revision += 1;
+  acknowledgeToolDraft(key, policy);
+  acceptRevision(result);
   return { ok: true, scope, modeId };
 }
 function runAutoSave() {
   autoSaveChain = autoSaveChain.then(async () => {
     autoSaveInFlight = true;
-    autoSaveInFlightVersion = toolDraftVersion;
     let result;
     try {
       result = await persistToolDraft();
@@ -810,23 +843,33 @@ function runAutoSave() {
   return autoSaveChain;
 }
 // 页面卸载/隐藏时的尽力而为冲刷：同一个 payload 构造函数，keepalive 让浏览器在卸载期间完成请求。
-// 卸载期间无法观察结果，因此草稿保持为脏，也不从卸载处理函数里弹错；同一批改动最多发送一次。
+// 失败时保留本地草稿；新页面用最新 revision 续存，旧请求的回执不能清除更新的草稿。
 function flushToolDraftKeepalive() {
   if (!autoSaveIsOn() || !toolDraft.dirty) return 0;
-  cancelAutoSave();                        // 先取消排队定时器，保证不会双发
-  if (autoSaveInFlight && autoSaveInFlightVersion === toolDraftVersion) return 0;
+  journalToolDraft();
+  cancelAutoSave();
+  if (autoSaveInFlight) return 0;
   if (keepaliveFlushedVersion === toolDraftVersion) return 0;
   const scope = toolView.sessionScope ? 'session' : 'mode';
   const modeId = toolView.modeId;
   if (!modeId || (scope === 'session' && !sessionId)) return 0;
-  keepaliveFlushedVersion = toolDraftVersion;
+  const version = toolDraftVersion;
+  const key = toolDraft.key;
+  keepaliveFlushedVersion = version;
   const policy = { ...toolDraft.policy };
   // Keep the revision in sync even though this request is fire-and-forget: without it a
   // second hide/close in the same page lifetime would post the pre-flush revision and be
   // rejected as stale.
   void api(toolSaveRequest(scope, modeId, policy), { keepalive: true })
-    .then(result => { acceptRevision(result); })
-    .catch(() => {});
+    .then(result => {
+      acceptRevision(result);
+      acknowledgeToolDraft(key, policy);
+      if (toolDraft.key === key && toolDraftVersion === version) toolDraft.dirty = false;
+    })
+    .catch(() => {
+      if (keepaliveFlushedVersion === version) keepaliveFlushedVersion = -1;
+      scheduleAutoSave();
+    });
   return 1;
 }
 // 返回 true 表示没有待处理的自动保存；false 表示自动保存失败且草稿仍处于未保存状态。
@@ -1633,11 +1676,14 @@ $('prefix-tool-calls').onchange = () => {
   syncPrefixToolControls();
   markPrefillSettingsDirty();
 };
-$('prefix-output-extraction').onchange = markPrefillSettingsDirty;
+$('prefix-output-extraction').onchange = () => {
+  if ($('prefix-output-extraction').checked) insertOutputExtractionTemplate();
+  markPrefillSettingsDirty();
+};
 $('prefix-nonofficial-remove-tools').onchange = markPrefillSettingsDirty;
 for (const id of ['user', 'char', 'markers']) $(id).oninput = markBindingDirty;
 $('enabled').onchange = markBindingDirty;
-$('add-output-extraction-template').onclick = () => {
+function insertOutputExtractionTemplate() {
   const identifier = 'dsh-output-extraction-template';
   let prompt = preset.prompts.find(item => item.identifier === identifier);
   if (!prompt) {
@@ -1649,23 +1695,20 @@ $('add-output-extraction-template').onclick = () => {
       injection_position: 0,
     };
     preset.prompts.push(prompt);
-  } else {
-    prompt.name = '正文/工具调用提取格式（实验）';
-    prompt.role = 'user';
-    prompt.content = state.outputExtractionTemplate ?? '';
-    prompt.injection_position = 0;
   }
   const items = order();
   const oldIndex = items.findIndex(item => item.identifier === identifier);
   if (oldIndex >= 0) items.splice(oldIndex, 1);
   const historyIndex = items.findIndex(item => item.identifier === 'chatHistory');
-  items.splice(historyIndex < 0 ? items.length : historyIndex + 1, 0, { identifier, enabled: true });
+  const tail = items.findLastIndex(item => item.enabled !== false &&
+    ['assistant', 'model'].includes(preset.prompts.find(prompt => prompt.identifier === item.identifier)?.role));
+  items.splice(historyIndex >= 0 ? historyIndex + 1 : tail >= 0 ? tail : items.length, 0, { identifier, enabled: true });
   selectedPrompt = identifier;
   markDirty();
   renderList();
   renderEditor();
-  status('已将实验格式提示词加入当前预设，请保存预设');
-};
+  status('已将格式提示词加入当前预设，可在条目中编辑；保存接口设置时一并保存');
+}
 for (const [id, delta] of [['up', -1], ['down', 1]]) $(id).onclick = () => {
   const items = order();
   const index = items.findIndex(item => item.identifier === selectedPrompt);
@@ -1790,7 +1833,12 @@ function prefillSettingsPayload() {
   };
 }
 $('save-deepseek-beta').onclick = guard(async () => {
-  if (!(await presetDraftReady())) return;
+  if ($('prefill-settings').disabled) return;
+  if (dirty) {
+    cancelPresetAutoSave();
+    const saved = await runPresetAutoSave();
+    if (!saved?.ok) throw saved?.error ?? new Error('预设保存失败');
+  }
   const result = await api(prefillSettingsPayload());
   acceptRevision(result);
   prefillSettingsDirty = false;
@@ -1959,16 +2007,10 @@ $('save-tools').onclick = guard(async () => {
   const scope = toolView.sessionScope ? 'session' : 'mode';
   const modeId = toolView.modeId;
   const kind = toolSelectionKind(scope, modeId);
-  const policy = { ...toolDraft.policy };
-  if (scope === 'session') {
-    if (!sessionId) throw new Error('当前页面没有会话，无法保存会话工具开关');
-    await api({ action: 'save-session-tools', sessionId, policy });
-  } else {
-    if (!modeId) throw new Error('请先选择要保存的 DSH 模式');
-    await api({ action: 'save-mode-tools', modeId, policy });
-    storageSet(TOOL_LAST_MODE_KEY, modeId);
-  }
-  resetToolDraft();
+  toolDraft.dirty = true;
+  const saved = await runAutoSave();
+  if (!saved?.ok) throw saved?.error ?? new Error('工具开关保存失败');
+  if (scope === 'mode') storageSet(TOOL_LAST_MODE_KEY, modeId);
   await reload(selectedId);
   status(kind === 'preset' ? '工具开关已保存并切换为自定义策略，下一次请求生效' :
     scope === 'session' ? '当前会话工具已更新，下一次请求生效' :
@@ -2139,5 +2181,18 @@ window.addEventListener('beforeunload', event => {
 window.addEventListener('pagehide', () => { flushToolDraftKeepalive(); });
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') flushToolDraftKeepalive();
+  else void refreshConnectionState();
 });
+async function refreshConnectionState() {
+  if (connectionProtocolSaving) return;
+  try {
+    const latest = await api();
+    state.connection = latest.connection;
+    state.protocol = latest.protocol;
+    state.protocolNotes = latest.protocolNotes;
+    renderConnectionProtocol();
+    renderProtocolNotice();
+  } catch { /* keep the last confirmed state while disconnected */ }
+}
+window.addEventListener('focus', () => { void refreshConnectionState(); });
 await guard(() => reload())();

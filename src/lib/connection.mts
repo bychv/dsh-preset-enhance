@@ -3,7 +3,7 @@
  *
  * DSH 0.1.6 leaves the protocol to the connection's own settings (the official
  * route defaults to Messages) and the web UI has no selector for it. The plugin
- * therefore reads the connection's `protocol` from the host's settings at start-up
+ * therefore reads the session connection's current protocol from host settings
  * — no network call, no guessing — and can write it back through the same settings
  * service, so the switch belongs to the connection it changes instead of being a
  * plugin-local preference.
@@ -34,9 +34,6 @@ export interface ConnectionProtocolInfo {
   source: 'settings' | 'none';
 }
 
-/** Official DeepSeek route; preferred when the directory offers several routes. */
-const OFFICIAL_PROVIDER = 'deepseek-official';
-
 function protocolOf(value: unknown): ConnectionProtocol | 'unknown' {
   const raw = value !== null && typeof value === 'object'
     ? (value as Record<string, unknown>).protocol
@@ -58,10 +55,11 @@ function atPath(root: unknown, path: readonly string[]): unknown {
  * @returns the connection facts, or null when the host reports no configurable route.
  */
 export function readConnectionProtocol(
-  ctx: PluginContext, service?: SettingsServiceLike | null,
+  ctx: PluginContext, service?: SettingsServiceLike | null, provider?: string,
 ): ConnectionProtocolInfo | null {
   const directory = ctx.llm?.listConfigurableProviders?.() ?? [];
-  const entry = directory.find(item => item.provider === OFFICIAL_PROVIDER) ?? directory[0];
+  const entry = provider ? directory.find(item => item.provider === provider)
+    : directory.length === 1 ? directory[0] : undefined;
   if (!entry) return null;
   const settingsPath = [...(entry.settingsPath ?? [])];
   const info: ConnectionProtocolInfo = {
@@ -100,4 +98,13 @@ export async function writeConnectionProtocol(
   let patch: Record<string, unknown> = { protocol };
   for (const step of [...info.settingsPath].reverse()) patch = { [step]: patch };
   await settings.update(info.settingsNs, patch, info.revision ?? undefined);
+}
+
+/** Live agent options win over the persisted header when the user changes models. */
+export function sessionConnection(ctx: PluginContext, sessionId: string, provider?: string): ConnectionProtocolInfo | null {
+  const session = sessionId ? ctx.sessions.get(sessionId) : undefined;
+  const route = provider || ctx.agents?.get(sessionId)?.options?.provider || session?.requestHeader?.()?.config?.provider;
+  // A session with an unresolved route must not change another provider's settings.
+  if (sessionId && !route) return null;
+  return readConnectionProtocol(ctx, undefined, route);
 }

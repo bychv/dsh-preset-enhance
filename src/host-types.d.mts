@@ -54,6 +54,7 @@ export interface ToolExecution {
 }
 
 export interface StreamOptions {
+  provider?: string;
   sessionId?: string;
   messages?: HostMessage[];
   tools?: ToolSchemaRow[];
@@ -69,6 +70,7 @@ export interface AgentPresetEvent {
 }
 
 export interface SessionLike {
+  requestHeader?: () => { config?: { provider?: string } } | undefined;
   id?: string;
   header?: { agentPreset?: string; createdAt?: number | string; [key: string]: unknown };
   snapshotEvents?: () => AgentPresetEvent[] | undefined;
@@ -78,6 +80,7 @@ export interface SessionLike {
 
 /** The agent-scoped tool surface. restrict() lives here, not on the plugin context. */
 export interface AgentToolScope {
+  get?(name: string, scope?: unknown): unknown;
   schemas(scope: unknown): ToolSchemaRow[];
   /**
    * Narrow what the model is offered in this scope. The host throws when the
@@ -89,8 +92,10 @@ export interface AgentToolScope {
 }
 
 export interface AgentHandle {
+  options?: { provider?: string };
+  session?: SessionLike;
   id?: string;
-  ctx?: { tools?: Partial<AgentToolScope> };
+  ctx?: { tools?: Partial<AgentToolScope>; effect?(callback: () => () => void): unknown };
   [key: string]: unknown;
 }
 
@@ -194,7 +199,9 @@ export interface PluginContext {
   sessions: { get(id: string): SessionLike | undefined };
   webServer: { register(route: WebRoute): void };
   commands?: { register(command: PluginCommand): void };
+  systemPrompt?: { assemble(context: any): Promise<any> };
   tools?: {
+    get?(name: string, scope?: unknown): unknown;
     guard?(handler: (exec: ToolExecution) => string | undefined): void;
     schemas?(scope: unknown): ToolSchemaRow[];
     /**
