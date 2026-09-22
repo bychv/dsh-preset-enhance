@@ -26,7 +26,12 @@ function editor(storage = new Map(), fetch = async () => { throw new Error('offl
     }, toggleExtraction() { $('prefix-output-extraction').checked = true; $('prefix-output-extraction').onchange(); },
     prompt: () => preset.prompts.find(p => p.identifier === 'dsh-output-extraction-template'),
     order: () => order(),
-    protocol(value) { state.connection = { source: 'settings', protocol: value }; renderConnectionProtocol(); },
+    protocol(value) {
+      state.connectionChoice = { provider: 'p', model: null, reasoningEffort: null, canSwitch: true,
+        choices: [{ provider: 'p', label: 'p', protocol: value, defaultModel: '' }] };
+      state.connection = { source: 'settings', protocol: value };
+      renderConnectionChoice();
+    },
     change(value) { toolDraft.policy.read = value; markToolDirty(); },
     draft: () => toolDraft,
     save: runAutoSave, flush: flushToolDraftKeepalive,
@@ -40,7 +45,7 @@ test('Messages disables prefill; enabling extraction inserts one template and pr
   const ui = editor();
   ui.protocol('messages');
   assert.equal(ui.get('prefill-settings').disabled, true);
-  assert.equal(ui.get('connection-protocol').disabled, false);
+  assert.equal(ui.get('connection-select').disabled, false);
   ui.protocol('chat-completions');
   assert.equal(ui.get('prefill-settings').disabled, false);
   ui.toggleExtraction();

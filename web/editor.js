@@ -20,8 +20,8 @@ let autoModesDirty = false;
 let autoModesVersion = 0;
 let bindingDirty = false;
 let bindingVersion = 0;
-// 连接协议滑块直接写宿主该连接自身的设置：切换即保存，不参与任何自动保存。
-let connectionProtocolSaving = false;
+// 顶部会话连接选择器直接改宿主的 provider/model：选中即切换，不参与任何自动保存。
+let connectionSwitchSaving = false;
 
 function blank() {
   return {
@@ -169,7 +169,7 @@ async function reload(id) {
   $('prefix-nonofficial-remove-tools').checked = state.prefixNonOfficialRemoveTools !== false;
   $('post-tool-prefix-mode').value = state.postToolPrefixMode ?? 'inherit';
   $('post-tool-prefix-text').value = state.postToolPrefixText ?? '';
-  renderConnectionProtocol();
+  renderConnectionChoice();
   syncPrefixToolControls();
   renderAutoModes();
   syncDraftsWithState();
@@ -209,67 +209,123 @@ async function refreshPrefillWarning() {
   }
 }
 
-/* ---------- 连接协议：显示并修改宿主该连接自身的设置 ---------- */
+/* ---------- 会话连接：选择会话被路由到的连接（宿主 provider/model） ---------- */
 
 const CONNECTION_PROTOCOL_LABELS = { 'chat-completions': '对话补全接口', messages: 'Messages 接口' };
 function connectionProtocolLabel(protocol) {
-  return CONNECTION_PROTOCOL_LABELS[protocol] ?? '未识别';
+  return CONNECTION_PROTOCOL_LABELS[protocol] ?? '协议未知';
 }
-function connectionDisplayName() {
-  const connection = state.connection;
-  return connection?.displayName || connection?.provider || '未命名连接';
+function connectionSelectionState() {
+  const selection = state.connectionChoice;
+  return selection && typeof selection === 'object' ? selection : null;
 }
-/** 宿主连接自身的设置才是请求实际使用的协议；读不到时绝不猜测默认值。 */
-function connectionProtocolUsable() {
-  return state.connection?.source === 'settings';
+function connectionChoices() {
+  const choices = connectionSelectionState()?.choices;
+  return Array.isArray(choices)
+    ? choices.filter(choice => choice && typeof choice.provider === 'string' && choice.provider)
+    : [];
 }
-/** 滑块位置只表达宿主当前真实的协议；读不到或未识别时两侧都不高亮，不伪造一侧为“已生效”。 */
-function renderConnectionProtocol() {
-  const connection = state.connection ?? null;
-  const usable = connectionProtocolUsable();
-  const protocol = connection?.protocol ?? state.protocol?.protocol;
-  const messages = protocol === 'messages';
-  $('prefill-settings').disabled = messages;
-  $('prefill-disabled-note').hidden = !messages;
-  const known = protocol === 'chat-completions' || protocol === 'messages';
-  const input = $('connection-protocol');
-  $('connection-protocol-bar').classList.toggle('unknown', !known);
-  $('connection-side-chat').classList.toggle('active', known && protocol === 'chat-completions');
-  $('connection-side-messages').classList.toggle('active', known && protocol === 'messages');
-  input.disabled = !usable || connectionProtocolSaving;
-  input.checked = known && protocol === 'messages';
-  $('connection-name').textContent = connection ? `检测到的连接：${connectionDisplayName()}` : '';
-  if (!connection || !usable) {
-    $('connection-note').textContent = connection
-      ? `未能从宿主读取连接协议（连接 ${connectionDisplayName()} 未提供可读的设置），工作台不会猜测默认值。`
-      : '未能从宿主读取连接协议：当前 DSH 未暴露可配置的连接，工作台不会猜测默认值。';
-    return;
-  }
-  if (connectionProtocolSaving) {
-    $('connection-note').textContent = '正在保存连接协议…';
-    return;
-  }
-  $('connection-note').textContent = known
-    ? `当前协议：${connectionProtocolLabel(protocol)}。拨动滑块会直接修改该连接自身的协议，立即生效，不需要重启，也不需要改配置文件。`
-    : '宿主未显式设置该连接的协议，未能识别当前值；拨动滑块即可写入所选协议。';
+/** 当前会话路由到的连接；宿主没给出信息时不伪造协议。 */
+function currentConnectionChoice() {
+  const provider = connectionSelectionState()?.provider;
+  if (typeof provider !== 'string' || !provider) return null;
+  return connectionChoices().find(choice => choice.provider === provider)
+    ?? { provider, label: provider, protocol: 'unknown', defaultModel: '' };
+}
+/** 连接自己声明的协议优先；未知时退回本会话观测到的协议与宿主设置里的连接协议，都不知就是未知。 */
+function currentConnectionProtocol() {
+  const choice = currentConnectionChoice();
+  if (choice && choice.protocol !== 'unknown') return choice.protocol;
+  return state.protocol?.protocol ?? state.connection?.protocol ?? 'unknown';
+}
+function connectionChoiceLabel(choice) {
+  return `${choice.label || choice.provider} · ${connectionProtocolLabel(choice.protocol)}`;
+}
+/** 能切换到的对话补全连接；没有就不给出无法执行的建议。 */
+function chatCompletionChoice() {
+  if (connectionSelectionState()?.canSwitch !== true) return null;
+  return connectionChoices().find(choice => choice.protocol === 'chat-completions') ?? null;
 }
 /**
- * 滑块切换即保存：写的是宿主该连接自身的设置。保存中禁用滑块；失败时按服务端已确认的状态
- * 把滑块回退，避免界面停在一个假的成功位置。
+ * 顶部选择器：列出宿主提供的连接并标明各自的协议。读不到连接信息或 canSwitch === false 时
+ * 禁用控件并说明原因，绝不猜测一个默认连接。
  */
-async function saveConnectionProtocol(protocol) {
-  if (connectionProtocolSaving) return;
-  connectionProtocolSaving = true;
+function renderConnectionChoice() {
+  const selection = connectionSelectionState();
+  const select = $('connection-select');
+  const choices = connectionChoices();
+  const current = currentConnectionChoice();
+  const rows = current && !choices.some(choice => choice.provider === current.provider)
+    ? [current, ...choices] : choices;
+  const optionFor = choice => {
+    const option = document.createElement('option');
+    option.value = choice.provider;
+    option.textContent = connectionChoiceLabel(choice);
+    return option;
+  };
+  if (current) {
+    select.replaceChildren(...rows.map(optionFor));
+  } else {
+    // 宿主没有给出当前连接时用一个禁用占位项说明，绝不让下拉框停在第 1 个选项上冒充已选。
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = rows.length ? '未读取到当前连接' : '未能从宿主读取连接信息';
+    placeholder.disabled = true;
+    select.replaceChildren(placeholder, ...rows.map(optionFor));
+  }
+  const canSwitch = selection?.canSwitch === true && rows.length > 0;
+  // 切换进行中保留用户刚选中的那一项，不要先弹回旧值再跳过去。
+  if (!connectionSwitchSaving) select.value = current ? current.provider : '';
+  select.disabled = !canSwitch || connectionSwitchSaving;
+  $('connection-name').textContent = current ? `当前：${current.label || current.provider}` : '';
+  // 连接声明为 Messages 时预填充设置不适用：整块禁用并说明原因，而不是让它看起来可用。
+  const messages = currentConnectionProtocol() === 'messages';
+  $('prefill-settings').disabled = messages;
+  $('prefill-disabled-note').hidden = !messages;
+  if (!selection) {
+    $('connection-note').textContent = '未能从宿主读取连接信息：工作台无法列出会话可用的连接，也无法切换。';
+    return;
+  }
+  if (!rows.length) {
+    $('connection-note').textContent = selection.canSwitch === true
+      ? '未能从宿主读取连接信息：宿主没有返回任何可选连接，无法切换。'
+      : '未能从宿主读取连接信息：当前 DSH 未提供 agentDefaultModel 服务，无法切换会话连接。';
+    return;
+  }
+  if (selection.canSwitch !== true) {
+    $('connection-note').textContent = '未能从宿主读取连接信息：当前 DSH 未提供 agentDefaultModel 服务，无法切换会话连接。';
+    return;
+  }
+  if (connectionSwitchSaving) {
+    $('connection-note').textContent = '正在切换连接…';
+    return;
+  }
+  const protocol = currentConnectionProtocol();
+  const protocolText = protocol === 'unknown'
+    ? '协议未知（无法确认该连接是否支持对话补全兼容路径）'
+    : connectionProtocolLabel(protocol);
+  $('connection-note').textContent = current
+    ? `当前连接：${current.label || current.provider} · ${protocolText}。切换会改变会话被路由到的连接，立即生效，不需要重启。`
+    : '未读取到当前连接。切换会改变会话被路由到的连接，立即生效，不需要重启。';
+}
+/**
+ * 选中即切换：走宿主自己的 provider/model 选择（agentDefaultModel），请求记录、模型能力与
+ * 真正执行的适配器因此保持一致。切换中禁用选择器；失败时按服务端已确认的选择回退。
+ */
+async function selectConnectionChoice(provider) {
+  if (connectionSwitchSaving || !provider) return;
+  connectionSwitchSaving = true;
   try {
-    renderConnectionProtocol();
-    const result = await api({ action: 'save-connection-protocol', protocol });
-    if (result?.connection) state.connection = result.connection;
-    status(`连接协议已保存：${connectionDisplayName()} → ${connectionProtocolLabel(protocol)}`);
+    renderConnectionChoice();
+    const result = await api({ action: 'select-connection', provider });
+    if (result?.connectionChoice) state.connectionChoice = result.connectionChoice;
+    const applied = currentConnectionChoice();
+    status(`连接已切换：${applied ? connectionChoiceLabel(applied) : provider}`);
   } catch (error) {
-    status(`连接协议保存失败：${error.message}`, true);
+    status(`连接切换失败：${error.message}`, true);
   } finally {
-    connectionProtocolSaving = false;
-    renderConnectionProtocol();
+    connectionSwitchSaving = false;
+    renderConnectionChoice();
     renderProtocolNotice();
   }
 }
@@ -278,7 +334,7 @@ async function saveConnectionProtocol(protocol) {
  * 协议提示只在用户需要知道时出现，且不涉及插件自身的协议切换方案（该方案的 UI 仍隐藏，
  * 实现保留在 src/lib/messages-translate.mts 与 fetch 桥里，默认不启用）：
  * 1. 没有会话、未启用预设注入、或尚未观测到协议时：不显示任何内容；
- * 2. 观测到 Messages 协议且预设已启用：说明预设兼容路径不适用，并指向连接协议开关。
+ * 2. 连接使用 Messages 协议且预设已启用：说明预设兼容路径不适用，并指向顶部的会话连接选择器。
  */
 function protocolNoteList(notes) {
   return Array.isArray(notes) ? notes.filter(note => typeof note === 'string' && note.trim() !== '') : [];
@@ -287,7 +343,7 @@ function renderProtocolNotice() {
   const box = $('protocol-notice');
   const binding = state.binding ?? {};
   const observation = state.protocol ?? null;
-  const currentProtocol = state.connection?.protocol ?? observation?.protocol;
+  const currentProtocol = currentConnectionProtocol();
   const notes = currentProtocol === 'messages' ? protocolNoteList(state.protocolNotes) : [];
   const hide = () => { box.hidden = true; box.className = 'notice'; box.replaceChildren(); };
   if (!sessionId || binding.enabled !== true) { hide(); return; }
@@ -297,10 +353,11 @@ function renderProtocolNotice() {
     const head = document.createElement('strong');
     const body = document.createElement('p');
     head.textContent = '当前连接使用 Messages 协议：预设兼容路径不适用';
+    const target = chatCompletionChoice();
     body.textContent = '预填充续写、工具调用转换与正文提取只在对话补全接口下生效，插件不会改写该请求。' +
-      (connectionProtocolUsable()
-        ? `如需这些能力，请在页面顶部的“连接协议”里把 ${connectionDisplayName()} 改为对话补全接口。`
-        : '如需这些能力，请先在宿主的连接设置里把该连接改为对话补全接口。');
+      (target
+        ? `如需这些能力，请在页面顶部的“会话连接”里切换到「${target.label || target.provider}」（对话补全接口）。`
+        : '如需这些能力，请切换到提供对话补全接口的连接。');
     parts.push(head, body);
   }
   if (notes.length) {
@@ -1667,10 +1724,10 @@ $('post-tool-prefix-mode').onchange = () => {
 };
 $('post-tool-prefix-text').oninput = markPrefillSettingsDirty;
 $('deepseek-beta-prefix').onchange = markPrefillSettingsDirty;
-// 滑块切换即保存：写的是宿主该连接自身的设置（不是插件本地偏好），立即生效。
+// 选中即切换：走宿主自己的 provider/model 选择，立即生效。
 // 不参与自动保存，也不触碰未保存的工具开关/分组草稿。
-$('connection-protocol').onchange = () => {
-  void saveConnectionProtocol($('connection-protocol').checked ? 'messages' : 'chat-completions');
+$('connection-select').onchange = () => {
+  void selectConnectionChoice($('connection-select').value);
 };
 $('prefix-tool-calls').onchange = () => {
   syncPrefixToolControls();
@@ -2184,13 +2241,13 @@ document.addEventListener('visibilitychange', () => {
   else void refreshConnectionState();
 });
 async function refreshConnectionState() {
-  if (connectionProtocolSaving) return;
+  if (connectionSwitchSaving) return;
   try {
     const latest = await api();
-    state.connection = latest.connection;
+    state.connectionChoice = latest.connectionChoice;
     state.protocol = latest.protocol;
     state.protocolNotes = latest.protocolNotes;
-    renderConnectionProtocol();
+    renderConnectionChoice();
     renderProtocolNotice();
   } catch { /* keep the last confirmed state while disconnected */ }
 }
