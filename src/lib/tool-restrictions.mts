@@ -7,7 +7,10 @@ export function installToolRestrictions(
   ctx: PluginContext, snapshot: () => ToolPolicySnapshot,
   modeOf: (session: SessionLike | undefined) => string,
 ): void {
-  if (!ctx.systemPrompt || !ctx.tools?.get) return;
+  // Resolve through ctx.get(): a bare ctx.systemPrompt access throws in Cordis when the
+  // service is not declared in inject, which is why the whole plugin failed to load.
+  const systemPrompt = ctx.get?.('systemPrompt') as { assemble(context: unknown): Promise<unknown> } | undefined;
+  if (!systemPrompt || !ctx.tools?.get) return;
   const releases = new Map<AgentHandle, () => void>();
   const rebuilding = new WeakSet<object>();
   const tracked = new WeakSet<AgentHandle>();
@@ -36,7 +39,7 @@ export function installToolRestrictions(
     if (!previous && !plan) return next();
     // The host assembles the SDK before this hook. Rebuild once with the new visibility.
     rebuilding.add(context);
-    try { return await ctx.systemPrompt!.assemble(context); }
+    try { return await systemPrompt.assemble(context); }
     finally { rebuilding.delete(context); }
   });
 }
