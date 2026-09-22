@@ -8,7 +8,7 @@ export { DeepSeekChatAdapter, createDeepSeekChatAdapter, DEEPSEEK_CHAT_PROVIDER_
 export type { DeepSeekChatDependencies } from './adapter.mjs';
 export {
   ATTRIBUTION_PRODUCT, ATTRIBUTION_URL, ATTRIBUTION_VERSION_FALLBACK, CHAT_REASONING_EFFORTS,
-  DEFAULT_CHAT_CONNECTION, DEEPSEEK_CHAT_BASE_URL, attributionHeaders, catalogModelInfo, modelInfo, resolveChatConnection,
+  DEFAULT_CHAT_CONNECTION, DEFAULT_CONTEXT_WINDOW, UNCATALOGUED_MODALITIES, DEEPSEEK_CHAT_BASE_URL, attributionHeaders, catalogModelInfo, modelInfo, resolveChatConnection, resolveRetryPolicy,
 } from './config.mjs';
 export type { ChatConnectionConfig, ChatModelConfig } from './config.mjs';
 export {

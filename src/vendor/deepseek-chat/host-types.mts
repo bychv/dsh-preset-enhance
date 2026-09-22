@@ -148,7 +148,27 @@ export interface LlmImageRequestPricing {
   priceImages(images: readonly ImageBlock[]): readonly LlmImageRequestPrice[];
 }
 
-export interface RetryPolicy { mode: 'normal' | 'always' | 'never'; maxRetries: number; baseDelayMs?: number }
+/**
+ * Resolved retry policy replica (host: packages/llm/llm/src/retry-policy.ts:60-79).
+ * The host retry plugin reads policy.retryableCodes.includes(code) for a normal-mode
+ * policy (packages/llm/llm-retry/src/index.ts:215), so every field below MUST be present:
+ * a partial policy throws "Cannot read properties of undefined (reading 'includes')"
+ * exactly when a provider request fails.
+ */
+export interface ResolvedRetryBackoff {
+  readonly initialDelayMs: number;
+  readonly maxDelayMs: number;
+  readonly jitterRatio: number;
+}
+export interface ResolvedNormalRetryPolicy extends ResolvedRetryBackoff {
+  readonly mode: 'normal';
+  readonly maxRetries: number;
+  readonly retryableCodes: readonly string[];
+}
+export interface ResolvedAlwaysRetryPolicy extends ResolvedRetryBackoff {
+  readonly mode: 'always';
+}
+export type ResolvedRetryPolicy = ResolvedNormalRetryPolicy | ResolvedAlwaysRetryPolicy;
 
 export interface PreparedAdapterCall {
   model: LlmResolvedModelInfo;
@@ -156,4 +176,3 @@ export interface PreparedAdapterCall {
 }
 
 export type AttributionHeaders = () => Record<string, string>;
-

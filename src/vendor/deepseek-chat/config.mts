@@ -5,7 +5,7 @@
  */
 
 import type { DeepSeekFilePolicy } from './file-store.mjs';
-import type { LlmModelInfo, LlmResolvedModelInfo, ModelModality, RetryPolicy } from './host-types.mjs';
+import type { LlmModelInfo, LlmResolvedModelInfo, ModelModality, ResolvedNormalRetryPolicy, ResolvedRetryPolicy } from './host-types.mjs';
 
 /** Official Chat Completions root. Never the /anthropic Messages base. */
 export const DEEPSEEK_CHAT_BASE_URL = 'https://api.deepseek.com';
@@ -46,7 +46,7 @@ export interface ChatConnectionConfig {
   filesApiTimeoutMs: number;
   /** Upload expiry, refresh, and quota-recovery policy. */
   filePolicy: DeepSeekFilePolicy;
-  retryPolicy: RetryPolicy;
+  retryPolicy: ResolvedRetryPolicy;
 }
 
 /** Reasoning levels the Chat wire accepts (off is expressed as thinking disabled). */
@@ -58,6 +58,9 @@ export const CHAT_REASONING_EFFORTS = [
 ] as const;
 
 /** Defaults for the plugin Chat connection (model ids and caps are config-overridable). */
+/** Context capacity assumed for an id the plugin does not catalogue. */
+export const DEFAULT_CONTEXT_WINDOW = 1000000;
+
 export const DEFAULT_CHAT_CONNECTION: ChatConnectionConfig = {
   baseURL: DEEPSEEK_CHAT_BASE_URL,
   models: [
@@ -78,17 +81,53 @@ export const DEFAULT_CHAT_CONNECTION: ChatConnectionConfig = {
   imageOffloadByteQuantum: 64 * 1024 * 1024,
   filesApiTimeoutMs: 60_000,
   filePolicy: { expiresAfterSeconds: 7 * 24 * 60 * 60, refreshMarginSeconds: 60 * 60, quotaCleanupBatch: 100 },
-  retryPolicy: { mode: 'normal', maxRetries: 5, baseDelayMs: 500 },
+  retryPolicy: {
+    mode: 'normal',
+    maxRetries: 5,
+    // Host default transient codes (packages/llm/llm/src/retry-policy.ts:18-24).
+    retryableCodes: ['EMPTY_RESPONSE', 'RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT'],
+    initialDelayMs: 500,
+    maxDelayMs: 10000,
+    jitterRatio: 0.1,
+  },
 };
 
 /** Merge partial plugin config over the defaults. */
+/**
+ * Complete a partially configured retry policy. Never returns a partial shape: the host
+ * dereferences retryableCodes on every failed request, so a caller-supplied partial policy
+ * (for example { mode: "normal", maxRetries: 3 }) must be filled in here.
+ */
+export function resolveRetryPolicy(policy?: Partial<ResolvedRetryPolicy>): ResolvedRetryPolicy {
+  const fallback = DEFAULT_CHAT_CONNECTION.retryPolicy as ResolvedNormalRetryPolicy;
+  if (policy?.mode === 'always') {
+    return {
+      mode: 'always',
+      initialDelayMs: policy.initialDelayMs ?? fallback.initialDelayMs,
+      maxDelayMs: policy.maxDelayMs ?? fallback.maxDelayMs,
+      jitterRatio: policy.jitterRatio ?? fallback.jitterRatio,
+    };
+  }
+  const configured = policy as Partial<ResolvedNormalRetryPolicy> | undefined;
+  const requested = configured?.retryableCodes;
+  const retryableCodes = Array.isArray(requested) && requested.length > 0 ? [...requested] : [...fallback.retryableCodes];
+  return {
+    mode: 'normal',
+    maxRetries: configured?.maxRetries ?? fallback.maxRetries,
+    retryableCodes,
+    initialDelayMs: policy?.initialDelayMs ?? fallback.initialDelayMs,
+    maxDelayMs: policy?.maxDelayMs ?? fallback.maxDelayMs,
+    jitterRatio: policy?.jitterRatio ?? fallback.jitterRatio,
+  };
+}
+
 export function resolveChatConnection(config: Partial<ChatConnectionConfig> = {}): ChatConnectionConfig {
   return {
     ...DEFAULT_CHAT_CONNECTION,
     ...config,
     models: config.models ?? DEFAULT_CHAT_CONNECTION.models,
     filePolicy: config.filePolicy ?? DEFAULT_CHAT_CONNECTION.filePolicy,
-    retryPolicy: config.retryPolicy ?? DEFAULT_CHAT_CONNECTION.retryPolicy,
+    retryPolicy: resolveRetryPolicy(config.retryPolicy),
   };
 }
 
@@ -104,20 +143,25 @@ export function catalogModelInfo(provider: string, model: ChatModelConfig): LlmM
 }
 
 /** Exact-route metadata for one model id (unlisted ids keep id/name only). */
+/** Conservative modality claim for an id we do not catalogue: text only. */
+export const UNCATALOGUED_MODALITIES: readonly ModelModality[] = ['text'];
+
 export function modelInfo(connection: ChatConnectionConfig, provider: string, model: string): LlmResolvedModelInfo {
   const entry = connection.models.find(candidate => candidate.id === model);
-  const base: LlmResolvedModelInfo = { provider, id: model, name: entry?.name ?? model };
-  if (entry === undefined) return base;
-  const effort = entry.reasoningEffort ?? connection.reasoningEffort;
-  const reasoning = effort === undefined ? undefined : { efforts: CHAT_REASONING_EFFORTS, defaultEffort: effort };
+  const effort = entry?.reasoningEffort ?? connection.reasoningEffort;
+  // Every requested id resolves a COMPLETE shape: the host validates provider metadata and
+  // downstream consumers read inputModalities/reasoning/context, so an unlisted id must not
+  // yield a partial object (that produced a live TypeError before this fix).
   return {
-    ...base,
-    ...entry.description === undefined ? {} : { description: entry.description },
-    ...entry.inputModalities === undefined ? {} : { inputModalities: entry.inputModalities },
-    ...entry.contextWindow === undefined ? {} : { context: { contextWindow: entry.contextWindow } },
-    ...entry.maxTokens === undefined ? {} : { defaultMaxTokens: entry.maxTokens },
-    ...reasoning === undefined ? {} : { reasoning },
-    ...entry.systemPromptUpdate === undefined ? {} : { systemPromptUpdate: entry.systemPromptUpdate },
+    provider,
+    id: model,
+    name: entry?.name ?? model,
+    ...entry?.description === undefined ? {} : { description: entry.description },
+    inputModalities: entry?.inputModalities ?? UNCATALOGUED_MODALITIES,
+    context: { contextWindow: entry?.contextWindow ?? DEFAULT_CONTEXT_WINDOW },
+    defaultMaxTokens: entry?.maxTokens ?? connection.maxTokens,
+    reasoning: { efforts: CHAT_REASONING_EFFORTS, ...effort === undefined ? {} : { defaultEffort: effort } },
+    ...entry?.systemPromptUpdate === undefined ? {} : { systemPromptUpdate: entry.systemPromptUpdate },
   };
 }
 

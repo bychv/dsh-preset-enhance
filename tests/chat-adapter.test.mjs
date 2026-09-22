@@ -5,15 +5,15 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import {
   ATTRIBUTION_PRODUCT, ATTRIBUTION_URL, DEFAULT_REQUEST_IMAGE_MAX_BYTES, DEEPSEEK_CHAT_BASE_URL,
   DEEPSEEK_CHAT_PROVIDER_ID, DEEPSEEK_CHAT_PROVIDER_NAME, DeepSeekFileStore, DeepSeekUploadIndex, FileResolutionFailure,
   IMAGE_OFFLOAD_REQUIRED_CODE, LlmError, RequestFiles,
   createDeepSeekChatAdapter, deepSeekFileScope, deepSeekFilesIndexPath, deepSeekImageRequestPricing, deepSeekImageTokens,
   deepSeekRequestImageDimensions, longEdgeDimensions, mapUsage, offloadedImageText, requestImageDimensions,
-  resolveChatConnection, resolveRequestImageMaxBytes, resolveRequestImageTarget, serializeRequest,
+  resolveChatConnection, resolveRetryPolicy, resolveRequestImageMaxBytes, resolveRequestImageTarget, serializeRequest,
   serializeRequestWithImages, textOnlyImageText,
 } from '../vendor/deepseek-chat/index.mjs';
 
@@ -656,4 +656,57 @@ test('the file representation reports each true occurrence location to resolveFi
   assert.deepEqual(body.messages[0].content[2], { type: 'file', file_id: 'file-i1' });
   assert.deepEqual(body.messages[2].content[1], { type: 'file', file_id: 'file-i3' });
   assert.deepEqual(body.messages[4].content[1], { type: 'file', file_id: 'file-i2' });
+});
+
+test('the retry policy handed to the host is complete (live TypeError regression)', () => {
+  const parts = makeAdapter(() => sseResponse(['[DONE]']));
+  const policy = parts.adapter.providerRetryPolicy(DEEPSEEK_CHAT_PROVIDER_ID);
+  assert.equal(policy.mode, 'normal');
+  assert.equal(Array.isArray(policy.retryableCodes), true);
+  assert.equal(policy.retryableCodes.length > 0, true);
+  assert.equal(Number.isInteger(policy.maxRetries), true);
+  assert.equal(Number.isFinite(policy.initialDelayMs), true);
+  assert.equal(Number.isFinite(policy.maxDelayMs), true);
+  assert.equal(Number.isFinite(policy.jitterRatio), true);
+  // The exact host expression (packages/llm/llm-retry/src/index.ts:215) must not throw.
+  assert.equal(policy.retryableCodes.includes('SERVER'), true);
+  assert.equal(policy.retryableCodes.includes('RATE_LIMIT'), true);
+  // A partial caller-supplied policy is completed, never passed through as a partial shape.
+  const partial = makeAdapter(() => sseResponse(['[DONE]']), { retryPolicy: { mode: 'normal', maxRetries: 3 } });
+  const completed = partial.adapter.providerRetryPolicy(DEEPSEEK_CHAT_PROVIDER_ID);
+  assert.equal(completed.maxRetries, 3);
+  assert.equal(Array.isArray(completed.retryableCodes), true);
+  assert.equal(completed.retryableCodes.length > 0, true);
+  assert.equal(Number.isFinite(completed.initialDelayMs), true);
+  const always = resolveRetryPolicy({ mode: 'always' });
+  assert.equal(always.mode, 'always');
+  assert.equal(Number.isFinite(always.jitterRatio), true);
+});
+
+test('an unlisted model id still resolves complete metadata', async () => {
+  const parts = makeAdapter(() => sseResponse(['[DONE]']));
+  const model = 'deepseek-nonexistent-model-x';
+  const resolved = await parts.adapter.resolveModel(DEEPSEEK_CHAT_PROVIDER_ID, model);
+  assert.equal(resolved.id, model);
+  assert.equal(Array.isArray(resolved.inputModalities), true);
+  assert.equal(resolved.inputModalities.length > 0, true);
+  assert.equal(resolved.context.contextWindow > 0, true);
+  assert.equal(resolved.defaultMaxTokens > 0, true);
+  assert.equal(Array.isArray(resolved.reasoning.efforts), true);
+  assert.equal(resolved.reasoning.efforts.length > 0, true);
+  // An image turn against the unlisted id resolves metadata and prices text-only, without a host TypeError.
+  const requests = [];
+  const connection = resolveChatConnection({ streamIdleTimeoutMs: 50 });
+  const adapter = createDeepSeekChatAdapter({
+    connection: () => connection,
+    resolveApiKey: async () => 'k',
+    resolveRequestImages: async () => new Map([['b1', { mediaType: 'image/png', data: new Uint8Array([1, 2, 3]), bytes: 3, width: 2, height: 2 }]]),
+    fetch: async (url, init) => { requests.push(JSON.parse(init.body)); return sseResponse(['[DONE]']); },
+  });
+  const attachment = { attachmentId: 'b1', mediaType: 'image/png', width: 2, height: 2 };
+  const chunks = await collect(adapter.stream({ provider: DEEPSEEK_CHAT_PROVIDER_ID, model, messages: [{ role: 'user', content: [{ type: 'image', attachment }] }] }));
+  assert.equal(requests.length, 1);
+  assert.equal(chunks.at(-1).type, 'finish');
+  const pricing = adapter.imageRequestPricing(DEEPSEEK_CHAT_PROVIDER_ID, model);
+  assert.equal(pricing.priceImages([{ type: 'image', attachment }])[0].visualTokens, 0);
 });
