@@ -114,13 +114,18 @@ export function modelInfo(connection, provider, model) {
     };
 }
 /**
- * Replica of the host default attribution identity. product/url match
- * packages/llm/llm/src/attribution.ts of the pinned 0.1.7 clone; the version is
- * injectable so the caller can supply the real host value when reachable.
+ * Replica of the host default attribution identity: product/url match
+ * packages/llm/llm/src/attribution.ts, and the version tracks the DSH baseline this tree
+ * was vendored for.
+ *
+ * This is only the LAST resort. The entry injects the host's own attributionHeaders()
+ * (or its APP_IDENTITY.version) when the host module is reachable from the plugin
+ * location, so a request normally names the harness version actually running rather than
+ * this constant - reporting a version we are not running would misattribute the request.
  */
 export const ATTRIBUTION_PRODUCT = 'deepseek-harness';
 export const ATTRIBUTION_URL = 'https://github.com/deepseek-ai/deepseek-harness';
-export const ATTRIBUTION_VERSION_FALLBACK = '0.1.7-alpha.1';
+export const ATTRIBUTION_VERSION_FALLBACK = '0.1.7-alpha.2';
 export function attributionHeaders(version = ATTRIBUTION_VERSION_FALLBACK) {
     return { 'user-agent': ATTRIBUTION_PRODUCT + '/' + version + ' (+' + ATTRIBUTION_URL + ')' };
 }

@@ -10,7 +10,7 @@ import { createProtocolObserver } from './lib/protocol.mjs';
 import { connectionSelection, selectConnection, sessionConnection, writeConnectionProtocol } from './lib/connection.mjs';
 import { installToolRestrictions } from './lib/tool-restrictions.mjs';
 import { createPresetModeController, modeCapability, readModeToolCatalog } from './lib/modes.mjs';
-import { createDeepSeekChatAdapter, DEEPSEEK_CHAT_PROVIDER_ID, DeepSeekFileStore, deepSeekFilesIndexPath, resolveChatConnection, resolveRequestImageTarget, } from './vendor/deepseek-chat/index.mjs';
+import { attributionHeaders, createDeepSeekChatAdapter, DEEPSEEK_CHAT_PROVIDER_ID, DeepSeekFileStore, deepSeekFilesIndexPath, resolveChatConnection, resolveRequestImageTarget, } from './vendor/deepseek-chat/index.mjs';
 import { adaptPresetForMessages } from './lib/messages.mjs';
 import { clearPresetEnhanceUnavailableReason, markPresetEnhanceActive, setPresetEnhanceUnavailableReason, } from './lib/availability.mjs';
 import { OUTPUT_EXTRACTION_PROMPT_TEMPLATE } from './lib/output-extractor.mjs';
@@ -148,10 +148,12 @@ export async function apply(ctx, config = {}) {
     // index is keyed by a hash of the endpoint and key, so no credential reaches disk.
     const chatFiles = new DeepSeekFileStore({ indexPath: deepSeekFilesIndexPath(store.file) });
     const chatErrorFactory = await resolveHostErrorFactory();
+    const chatAttribution = await resolveHostAttribution();
     const chatAdapter = createDeepSeekChatAdapter({
         connection: chatConnection,
         resolveFiles: () => chatFiles,
         ...(chatErrorFactory ? { createError: chatErrorFactory } : {}),
+        ...(chatAttribution ? { attributionHeaders: chatAttribution } : {}),
         resolveApiKey: async () => resolveChatApiKey(ctx, config.chatApiKeyEnv ?? DEFAULT_CHAT_API_KEY_ENV),
         resolveUserId: () => 'preset-enhance',
         // Images keep going through the host's attachment service: we only turn the
@@ -964,6 +966,29 @@ const DEFAULT_CHAT_API_KEY_ENV = 'DEEPSEEK_API_KEY';
  * host's class when it is resolvable from the profile. When it is not, we keep the
  * structural error and accept the generic code rather than faking an identity we do not have.
  */
+/**
+ * Use the running host's attribution identity, so the provider sees the harness version we
+ * are actually inside. The host package is resolvable from the plugin location at runtime
+ * and exports attributionHeaders()/APP_IDENTITY; when neither is reachable we keep the
+ * vendored replica rather than inventing a version.
+ */
+async function resolveHostAttribution() {
+    try {
+        const specifier = '@deepseek-ai/dsh-llm';
+        const host = await import(specifier);
+        if (typeof host.attributionHeaders === 'function') {
+            const hostHeaders = host.attributionHeaders;
+            return () => hostHeaders();
+        }
+        const version = host.APP_IDENTITY?.version;
+        if (typeof version === 'string' && version.length > 0)
+            return () => attributionHeaders(version);
+    }
+    catch {
+        // Fall through to the vendored replica.
+    }
+    return undefined;
+}
 async function resolveHostErrorFactory() {
     try {
         // A variable specifier keeps the compiler from requiring a package we deliberately

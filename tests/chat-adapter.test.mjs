@@ -8,7 +8,7 @@ import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
-  ATTRIBUTION_PRODUCT, ATTRIBUTION_URL, DEFAULT_REQUEST_IMAGE_MAX_BYTES, DEEPSEEK_CHAT_BASE_URL,
+  ATTRIBUTION_PRODUCT, ATTRIBUTION_URL, ATTRIBUTION_VERSION_FALLBACK, DEFAULT_REQUEST_IMAGE_MAX_BYTES, DEEPSEEK_CHAT_BASE_URL,
   DEEPSEEK_CHAT_PROVIDER_ID, DEEPSEEK_CHAT_PROVIDER_NAME, DeepSeekFileStore, DeepSeekUploadIndex, FileResolutionFailure,
   IMAGE_OFFLOAD_REQUIRED_CODE, LlmError, RequestFiles,
   createDeepSeekChatAdapter, deepSeekFileScope, deepSeekFilesIndexPath, deepSeekImageRequestPricing, deepSeekImageTokens,
@@ -31,8 +31,9 @@ async function filesDir() {
 
 const NL = String.fromCharCode(10);
 const KEY = 'test-key-never-printed';
+// Built from the exported constant so the expected header cannot drift from the vendored default.
 const ATTRIBUTION = {
-  'user-agent': ATTRIBUTION_PRODUCT + '/0.1.7-alpha.1 (+' + ATTRIBUTION_URL + ')',
+  'user-agent': ATTRIBUTION_PRODUCT + '/' + ATTRIBUTION_VERSION_FALLBACK + ' (+' + ATTRIBUTION_URL + ')',
 };
 
 /** One SSE response whose bytes are emitted in configurable slices. */
