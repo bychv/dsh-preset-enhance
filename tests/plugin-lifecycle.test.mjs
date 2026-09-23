@@ -209,3 +209,45 @@ test('an image turn resolves through the host attachment service', async () => {
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('a declarative host is never asked for the legacy preset document', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'preset-rc1-'));
+  const file = join(dir, 'state.json');
+  const disposers = [];
+  const registrations = [];
+  let legacyReads = 0;
+  const standardEntry = {
+    id: 'preset-standard',
+    options: {
+      id: 'preset-standard',
+      name: '@deepseek-ai/dsh-agent-preset',
+      config: { id: 'standard', plugins: [{ id: 'persona', name: '@deepseek-ai/dsh-persona', config: { prefix: 'from-host' } }] },
+    },
+  };
+  const ctx = {
+    effect(setup) { const dispose = setup(); if (typeof dispose === 'function') disposers.push(dispose); },
+    on() {},
+    get() { return undefined; },
+    loader: { entries: () => [standardEntry] },
+    llm: { async *stream() {}, registerAdapter() { return () => {}; } },
+    // The 0.1.7-rc.1 shape: register and acquireScope exist, and readDocument is back with a
+    // contract that rejects an unknown preset.
+    agentPresets: {
+      async register(definition) { registrations.push(definition); return async () => {}; },
+      async acquireScope() { return { key: 'k', async [Symbol.asyncDispose]() {} }; },
+      async readDocument() { legacyReads += 1; throw new Error('Unknown agent preset: standard'); },
+    },
+    sessions: { get() { return undefined; } },
+    webServer: { register() { return () => {}; } },
+  };
+  try {
+    await apply(ctx, { dataFile: file, agentPresetRoot: join(dir, 'modes') });
+    assert.equal(legacyReads, 0, 'the 0.1.6 document is never requested on a declarative host');
+    // Registering proves activation got past the staging step, i.e. no startup failure was recorded.
+    assert.equal(registrations.length, 1);
+    assert.equal(registrations[0].id, 'st-preset');
+  } finally {
+    for (const dispose of disposers.splice(0).reverse()) await dispose();
+    await rm(dir, { recursive: true, force: true });
+  }
+});

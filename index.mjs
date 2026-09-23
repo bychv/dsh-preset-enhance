@@ -189,12 +189,18 @@ export async function apply(ctx, config = {}) {
     // never cleared as a recovery step.
     let startupError = null;
     let standard;
-    try {
-        standard = config.standardComposition ??
-            (ctx.agentPresets?.readDocument ? (await ctx.agentPresets.readDocument('standard')).content : undefined);
-    }
-    catch (error) {
-        startupError = describeStartupFailure('无法读取 standard 模式组成', `服务 agentPresets，模式目录 ${presetRoot}`, error);
+    if (!presetModeCapability.declarative) {
+        // 0.1.6 only. A 0.1.7 host registers declarations instead of scanning a directory, and
+        // 0.1.7-rc.1 re-added a readDocument with a different shape that REJECTS an unknown preset -
+        // calling it there made activation depend on composition order, and its result is unused on
+        // a declarative host anyway.
+        try {
+            standard = config.standardComposition ??
+                (ctx.agentPresets?.readDocument ? (await ctx.agentPresets.readDocument('standard')).content : undefined);
+        }
+        catch (error) {
+            startupError = describeStartupFailure('无法读取 standard 模式组成', `服务 agentPresets，模式目录 ${presetRoot}`, error);
+        }
     }
     if (!startupError) {
         if (presetModeCapability.declarative) {

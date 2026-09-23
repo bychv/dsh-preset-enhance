@@ -314,3 +314,18 @@ test('registerWhenAvailable registers once a late standard declaration lands', a
   await assert.rejects(() => absent.registerWhenAvailable({ timeoutMs: 30, intervalMs: 5 }), /config\.id=standard/);
   assert.equal(absent.current(), null);
 });
+
+test('a 0.1.7-rc.1 host stays declarative even though readDocument came back', () => {
+  // rc.1 re-added readDocument with a viewing-only contract that REJECTS an unknown preset, so
+  // its presence must not push the plugin back onto the 0.1.6 directory path.
+  const rc1 = modeCapability({
+    agentPresets: {
+      register: async () => async () => {},
+      acquireScope: async () => lease('k'),
+      readDocument: async () => { throw new Error('Unknown agent preset: standard'); },
+    },
+  });
+  assert.equal(rc1.declarative, true);
+  assert.equal(rc1.scopeLease, true);
+  assert.equal(rc1.reason, '');
+});
