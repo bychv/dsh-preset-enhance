@@ -7,13 +7,38 @@
  * state file (deepSeekFilesIndexPath), never at DSH_HOME/llm-deepseek.
  */
 import { dirname, join } from 'node:path';
-import { DeepSeekFilesClient, isFilesQuotaError } from './files-api.mjs';
+import { DeepSeekFilesClient, MAX_STORED_FILE_COUNT, isFilesQuotaError } from './files-api.mjs';
 import { LlmError } from './errors.mjs';
 import { messagesApiRoot } from './messages-api.mjs';
 import { DeepSeekUploadIndex, deepSeekFileScope } from './upload-index.mjs';
 /** Shared Files-store limit for each request image, including file-id references. */
 export const MAX_IMAGE_BYTES = 32 * 1024 * 1024;
 const OWNED_FILE_PREFIX = 'dsh-';
+/**
+ * Bound on quota-recovery rounds inside one upload. The provider's 25 GiB
+ * storage quota (MAX_STORED_FILE_BYTES) has no client enforcement point, so one
+ * batch of deletions need not free enough space; recovery repeats until the
+ * upload fits or a round deletes nothing.
+ */
+export const MAX_QUOTA_CLEANUP_ROUNDS = 3;
+/**
+ * Clamp one cleanup request to the provider's 10_000-file count quota.
+ * @param count - requested delete count.
+ * @returns 0 for a non-positive or non-integer count, otherwise count capped at MAX_STORED_FILE_COUNT.
+ */
+export function cleanupBatchLimit(count) {
+    if (!Number.isSafeInteger(count) || count < 1)
+        return 0;
+    return Math.min(count, MAX_STORED_FILE_COUNT);
+}
+/**
+ * Resolve the configured policy batch into a positive, quota-bounded delete count.
+ * @param policy - file policy carrying the configured batch.
+ * @returns at least 1 and at most MAX_STORED_FILE_COUNT.
+ */
+export function quotaCleanupBatch(policy) {
+    return cleanupBatchLimit(policy.quotaCleanupBatch) || 1;
+}
 /**
  * Durable upload index path for one plugin state file: the index sits beside it.
  * @param stateFilePath - absolute path of the plugin's own state.json.
@@ -210,10 +235,7 @@ export class DeepSeekFileStore {
         catch (error) {
             if (!isFilesQuotaError(error))
                 throw error;
-            const deleted = await this.reclaimOldestOwned(connection, policy.quotaCleanupBatch, signal);
-            if (deleted === 0)
-                throw error;
-            candidate = await upload();
+            candidate = await this.uploadAfterQuotaCleanup(upload, error, connection, policy, signal);
         }
         const committed = await this.index.commit(candidate, this.now(), marginMs);
         if (!committed.accepted) {
@@ -225,6 +247,31 @@ export class DeepSeekFileStore {
             }
         }
         return { record: committed.record, uploaded: committed.accepted };
+    }
+    /**
+     * Reclaim bounded quota and retry the upload. Cleanup repeats at most
+     * MAX_QUOTA_CLEANUP_ROUNDS times because one batch of the oldest owned files
+     * may not free enough of the provider storage quota; a round that deletes
+     * nothing stops immediately and rethrows the quota failure so the request can
+     * fall back to inline base64.
+     */
+    async uploadAfterQuotaCleanup(upload, quotaError, connection, policy, signal) {
+        const batch = quotaCleanupBatch(policy);
+        let lastError = quotaError;
+        for (let round = 0; round < MAX_QUOTA_CLEANUP_ROUNDS; round += 1) {
+            const deleted = await this.reclaimOldestOwned(connection, batch, signal);
+            if (deleted === 0)
+                throw lastError;
+            try {
+                return await upload();
+            }
+            catch (error) {
+                if (!isFilesQuotaError(error))
+                    throw error;
+                lastError = error;
+            }
+        }
+        throw lastError;
     }
     /**
      * Invalidate one exact local mapping after a model request rejects its remote id.
@@ -257,15 +304,18 @@ export class DeepSeekFileStore {
     /**
      * Delete the oldest provider files whose names identify plugin ownership.
      * @param connection - endpoint and API-key snapshot.
-     * @param count - positive maximum number of files to delete.
+     * @param count - requested number of files to delete; capped at MAX_STORED_FILE_COUNT.
      * @param signal - request cancellation.
      * @returns number of successfully deleted files.
      */
     async reclaimOldestOwned(connection, count, signal) {
+        const limit = cleanupBatchLimit(count);
+        if (limit === 0)
+            return 0;
         const client = this.client(connection);
         let after;
         const owned = [];
-        while (connection.protocol === 'messages' || owned.length < count) {
+        while (connection.protocol === 'messages' || owned.length < limit) {
             const page = await client.list({
                 ...after === undefined ? {} : { after },
                 limit: 1_000,
@@ -276,13 +326,13 @@ export class DeepSeekFileStore {
                 if (!file.filename.startsWith(OWNED_FILE_PREFIX))
                     continue;
                 owned.push({ id: file.id, createdAt: file.createdAt });
-                if (connection.protocol === 'chat-completions' && owned.length === count)
+                if (connection.protocol === 'chat-completions' && owned.length === limit)
                     break;
             }
             if (connection.protocol === 'messages') {
                 // Messages offers no ascending-order query; retain the oldest candidates across every page.
                 owned.sort((left, right) => left.createdAt - right.createdAt);
-                owned.splice(count);
+                owned.splice(limit);
             }
             if (!page.hasMore || page.lastId === undefined || page.lastId === after)
                 break;

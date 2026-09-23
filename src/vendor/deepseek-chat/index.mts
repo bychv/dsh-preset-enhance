@@ -33,7 +33,9 @@ export {
 export type { DeepSeekFileObject, DeepSeekFilePage } from './files-api.mjs';
 export { DeepSeekUploadIndex, deepSeekFileScope } from './upload-index.mjs';
 export type { DeepSeekUploadRecord, UploadIndexCommit } from './upload-index.mjs';
-export { DeepSeekFileStore, MAX_IMAGE_BYTES, deepSeekFilesIndexPath } from './file-store.mjs';
+export {
+  DeepSeekFileStore, MAX_IMAGE_BYTES, MAX_QUOTA_CLEANUP_ROUNDS, cleanupBatchLimit, deepSeekFilesIndexPath, quotaCleanupBatch,
+} from './file-store.mjs';
 export type { DeepSeekFileConnection, DeepSeekFilePolicy, DeepSeekFileReference, DeepSeekFileStoreOptions } from './file-store.mjs';
 export { FileResolutionFailure, RequestFiles } from './request-files.mjs';
 export type { ImageWireLocation } from './request-files.mjs';

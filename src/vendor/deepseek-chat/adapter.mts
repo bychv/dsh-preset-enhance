@@ -227,19 +227,26 @@ export class DeepSeekChatAdapter {
       ...connection.thinking === undefined ? {} : { thinking: connection.thinking },
       ...connection.reasoningEffort === undefined ? {} : { reasoningEffort: connection.reasoningEffort },
     };
-    let body: WireRequest;
-    if (!options.messages.some(message => contentHasImage(message.content))) {
-      body = serializeRequest(options, defaults);
-    } else {
+    const hasImages = options.messages.some(message => contentHasImage(message.content));
+    let requestImages = new Map<string, RequestImageAttachment>();
+    let imageAccess: Pick<ImageSerializationOptions, 'resolveImageAccess'> = {};
+    // Placeholder only; replaced below whenever the request actually carries images.
+    let base64Images: ImageSerializationOptions & { representation: { kind: 'base64' } } = {
+      representation: { kind: 'base64' },
+      requestImages,
+      maxRequestImageBytes: connection.maxInlineRequestImageBytes,
+    };
+    if (hasImages) {
       const resolveImages = this.dependencies.resolveRequestImages;
       if (resolveImages === undefined) {
         throw this.fail('DeepSeek image input requires the host attachment bridge.', 'UNSUPPORTED_CONTENT');
       }
-      const requestImages = await resolveImages(options, signal);
-      const imageAccess: Pick<ImageSerializationOptions, 'resolveImageAccess'> =
-        this.dependencies.resolveImageAccess === undefined ? {} : { resolveImageAccess: this.dependencies.resolveImageAccess };
+      requestImages = await resolveImages(options, signal);
+      imageAccess = this.dependencies.resolveImageAccess === undefined
+        ? {}
+        : { resolveImageAccess: this.dependencies.resolveImageAccess };
       // Inline fallback knobs: the base64 payload bound after a Files downgrade.
-      const base64Images: ImageSerializationOptions & { representation: { kind: 'base64' } } = {
+      base64Images = {
         representation: { kind: 'base64' },
         requestImages,
         ...imageAccess,
@@ -248,81 +255,93 @@ export class DeepSeekChatAdapter {
         ...connection.inlineImageOffloadByteQuantum === undefined ? {} : { byteQuantum: connection.inlineImageOffloadByteQuantum },
         ...connection.imageOffloadCountQuantum === undefined ? {} : { countQuantum: connection.imageOffloadCountQuantum },
       };
-      const files = this.dependencies.resolveFiles?.();
-      if (files === undefined) {
-        // No Files store is wired for this activation: inline base64 is the only representation.
+    }
+    const files = hasImages ? this.dependencies.resolveFiles?.() : undefined;
+    const requestFiles = files === undefined ? undefined : new RequestFiles(
+      files,
+      { baseURL: connection.baseURL, apiKey, protocol: 'chat-completions' },
+      connection.filePolicy,
+      connection.filesApiTimeoutMs,
+      signal,
+    );
+    // One representation per request: it starts on the Files path, and the only transition is
+    // file -> base64 on a FileResolutionFailure. A stale-id retry rebuilds the same representation.
+    let representation: 'file' | 'base64' = 'file';
+    for (;;) {
+      requestFiles?.beginAttempt();
+      let body: WireRequest;
+      if (!hasImages) {
+        body = serializeRequest(options, defaults);
+      } else if (requestFiles === undefined || representation === 'base64') {
+        // No Files store is wired for this activation, or the request already downgraded.
         body = serializeRequestWithImages(options, base64Images, defaults);
       } else {
-        const fileConnection = { baseURL: connection.baseURL, apiKey, protocol: 'chat-completions' } as const;
-        const requestFiles = new RequestFiles(files, fileConnection, connection.filePolicy, connection.filesApiTimeoutMs, signal);
-        // Representation starts on the Files path; exactly one downgrade is allowed.
-        let representation: 'file' | 'base64' = 'file';
-        for (;;) {
-          requestFiles.beginAttempt();
-          if (representation === 'base64') {
-            body = serializeRequestWithImages(options, base64Images, defaults);
-            break;
-          }
-          try {
-            body = await serializeRequestWithImages(options, {
-              representation: {
-                kind: 'file',
-                resolveFileId: (version, _block, location) => requestFiles.resolve(version, location),
-              },
-              requestImages,
-              ...imageAccess,
-              maxRequestImageBytes: connection.maxRequestFilesBytes,
-              ...connection.maxImagesPerRequest === undefined ? {} : { maxImagesPerRequest: connection.maxImagesPerRequest },
-              ...connection.imageOffloadByteQuantum === undefined ? {} : { byteQuantum: connection.imageOffloadByteQuantum },
-              ...connection.imageOffloadCountQuantum === undefined ? {} : { countQuantum: connection.imageOffloadCountQuantum },
-            }, defaults);
-            break;
-          } catch (error: unknown) {
-            // Only a Files resolution failure may downgrade the whole request, and only once.
-            if (!(error instanceof FileResolutionFailure)) throw error;
-            representation = 'base64';
-          }
+        try {
+          body = await serializeRequestWithImages(options, {
+            representation: {
+              kind: 'file',
+              resolveFileId: (version, _block, location) => requestFiles.resolve(version, location),
+            },
+            requestImages,
+            ...imageAccess,
+            maxRequestImageBytes: connection.maxRequestFilesBytes,
+            ...connection.maxImagesPerRequest === undefined ? {} : { maxImagesPerRequest: connection.maxImagesPerRequest },
+            ...connection.imageOffloadByteQuantum === undefined ? {} : { byteQuantum: connection.imageOffloadByteQuantum },
+            ...connection.imageOffloadCountQuantum === undefined ? {} : { countQuantum: connection.imageOffloadCountQuantum },
+          }, defaults);
+        } catch (error: unknown) {
+          // Only a Files resolution failure may downgrade the whole request, and only once.
+          if (!(error instanceof FileResolutionFailure)) throw error;
+          representation = 'base64';
+          continue;
         }
       }
-    }
 
-    let response: Response;
-    try {
-      response = await this.fetchImpl(connection.baseURL + '/chat/completions', {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(body),
-        signal,
-      });
-    } catch (error: unknown) {
-      if (signal.aborted) throw error;
-      throw this.fail('DeepSeek API request to ' + connection.baseURL + ' failed', 'TRANSPORT', { cause: error });
-    }
-
-    if (!response.ok) {
-      let message = 'DeepSeek API error (HTTP ' + response.status + ')';
-      let providerError: WireError['error'];
-      const rawResponse = await response.text();
+      let response: Response;
       try {
-        const parsed = JSON.parse(rawResponse) as WireError;
-        providerError = parsed.error;
-        if (providerError?.message !== undefined) message = providerError.message;
-      } catch {
-        // The HTTP status remains authoritative for a malformed gateway body.
+        response = await this.fetchImpl(connection.baseURL + '/chat/completions', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(body),
+          signal,
+        });
+      } catch (error: unknown) {
+        if (signal.aborted) throw error;
+        throw this.fail('DeepSeek API request to ' + connection.baseURL + ' failed', 'TRANSPORT', { cause: error });
       }
-      const detail = [providerError?.code, providerError?.type, providerError?.message].filter(Boolean).join(' ');
-      const delay = providerRetryAfterMs(response.headers.get('retry-after'));
-      const id = response.headers.get('x-request-id') ?? response.headers.get('x-deepseek-request-id') ?? undefined;
-      throw this.fail(message, httpErrorCode(response.status, providerError ?? {}), {
-        cause: new Error(rawResponse.length > 0 ? rawResponse : 'DeepSeek HTTP ' + response.status),
-        status: response.status,
-        ...delay === undefined ? {} : { providerRetryAfterMs: delay },
-        ...id === undefined || id.length === 0 ? {} : { requestId: id },
-      });
+
+      if (!response.ok) {
+        let message = 'DeepSeek API error (HTTP ' + response.status + ')';
+        let providerError: WireError['error'];
+        const rawResponse = await response.text();
+        try {
+          const parsed = JSON.parse(rawResponse) as WireError;
+          providerError = parsed.error;
+          if (providerError?.message !== undefined) message = providerError.message;
+        } catch {
+          // The HTTP status remains authoritative for a malformed gateway body.
+        }
+        const detail = [providerError?.code, providerError?.type, providerError?.message].filter(Boolean).join(' ');
+        // A stale remote id (deleted, expired or unknown) invalidates exactly the mapping this
+        // attempt used and re-serializes once, uploading again before the second dispatch. No
+        // response bytes were consumed, so this bounded retry is not a stream restart, and it
+        // never flips a downgraded base64 request back to the Files representation.
+        if (requestFiles !== undefined && await requestFiles.retry(detail)) continue;
+        if (requestFiles !== undefined) message = requestFiles.errorMessage(response.status, message, detail);
+        const delay = providerRetryAfterMs(response.headers.get('retry-after'));
+        const id = response.headers.get('x-request-id') ?? response.headers.get('x-deepseek-request-id') ?? undefined;
+        throw this.fail(message, httpErrorCode(response.status, providerError ?? {}), {
+          cause: new Error(rawResponse.length > 0 ? rawResponse : 'DeepSeek HTTP ' + response.status),
+          status: response.status,
+          ...delay === undefined ? {} : { providerRetryAfterMs: delay },
+          ...id === undefined || id.length === 0 ? {} : { requestId: id },
+        });
+      }
+      if (response.body === null) throw this.fail('DeepSeek API returned no response body', 'EMPTY_RESPONSE');
+      const sseBody = response.body.pipeThrough(idleTimeoutStream(connection.streamIdleTimeoutMs, idle));
+      yield* translate(parseSse(sseBody));
+      return;
     }
-    if (response.body === null) throw this.fail('DeepSeek API returned no response body', 'EMPTY_RESPONSE');
-    const sseBody = response.body.pipeThrough(idleTimeoutStream(connection.streamIdleTimeoutMs, idle));
-    yield* translate(parseSse(sseBody));
   }
 }
 

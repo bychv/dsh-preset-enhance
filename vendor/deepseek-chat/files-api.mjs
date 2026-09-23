@@ -198,8 +198,13 @@ export class DeepSeekFilesClient {
         const query = new URLSearchParams(this.protocol === 'messages' ? {} : { purpose: 'user_data' });
         if (options.after !== undefined)
             query.set(this.protocol === 'messages' ? 'after_id' : 'after', options.after);
-        if (options.limit !== undefined)
-            query.set('limit', String(options.limit));
+        if (options.limit !== undefined) {
+            if (!Number.isSafeInteger(options.limit) || options.limit < 1) {
+                throw new LlmError('DeepSeek Files API list limit must be a positive integer.', 'INVALID_REQUEST');
+            }
+            // The provider caps one page at its 10_000-file count quota; clamp instead of failing.
+            query.set('limit', String(Math.min(options.limit, MAX_STORED_FILE_COUNT)));
+        }
         if (options.order !== undefined && this.protocol === 'chat-completions')
             query.set('order', options.order);
         const response = await this.request(this.path + '?' + query.toString(), { method: 'GET' }, options.signal);
