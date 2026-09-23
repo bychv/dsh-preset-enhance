@@ -1,0 +1,22 @@
+{
+  "note": "Wire-level tool-pairing snapshot for the vendored DeepSeek Chat adapter. The host shape was decoded from a real DSH 0.1.7-alpha.2 session transcript: tool results arrive as TOP-LEVEL role:tool messages whose id is camelCase toolCallId (there is no nested tool-result block), so the serializer must read toolCallId FIRST and emit one role:tool row per result. Roles, tool_call ids and content kinds only - deliberately NOT a full-body golden, so unrelated field additions cannot break it. Regenerate only from a real captured body, never by hand.",
+  "case1TextToolResult": {
+    "roles": ["system", "user", "assistant", "tool", "assistant"],
+    "messages": [
+      { "role": "system", "content": ["text"] },
+      { "role": "user", "content": ["text"] },
+      { "role": "assistant", "content": ["text"], "tool_calls": ["call_weather_1"], "reasoning": true },
+      { "role": "tool", "tool_call_id": "call_weather_1", "content": ["text"] },
+      { "role": "assistant", "content": ["text"], "reasoning": false }
+    ]
+  },
+  "case2ImageToolResult": {
+    "roles": ["system", "user", "assistant", "tool"],
+    "messages": [
+      { "role": "system", "content": ["text"] },
+      { "role": "user", "content": ["text"] },
+      { "role": "assistant", "content": ["text"], "tool_calls": ["call_image_1"], "reasoning": false },
+      { "role": "tool", "tool_call_id": "call_image_1", "content": ["text", "text", "image_url"] }
+    ]
+  }
+}

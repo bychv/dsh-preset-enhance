@@ -854,3 +854,130 @@ test('an injected error factory builds every failure with host class identity', 
   });
   assert.equal(created.length >= 2, true);
 });
+/**
+ * Tool-pairing wire fixtures. The host shape was decoded from a REAL DSH 0.1.7-alpha.2 session
+ * transcript: the host writes tool results as top-level role:tool messages whose id is camelCase
+ * toolCallId (no nested tool-result block). Reading only snake_case emitted every result as a user
+ * message and the provider rejected the follow-up with "insufficient tool messages following
+ * tool_calls message" (fixed in afff1d0). These tests capture the actual outgoing body so that
+ * regression is pinned at the wire level, not only by "multi-step turns now complete".
+ */
+async function toolPairingSnapshot() {
+  const url = new URL('../src/vendor/deepseek-chat/fixtures/tool-pairing.snapshot.json', import.meta.url);
+  return JSON.parse(await readFile(url, 'utf8'));
+}
+
+/** Structure-only projection of one wire messages array (no volatile fields). */
+function normalizeMessages(messages) {
+  return messages.map(message => {
+    const kinds = typeof message.content === "string"
+      ? ["text"]
+      : (message.content ?? []).map(part => part.type === "text" ? "text" : part.type);
+    return {
+      role: message.role,
+      content: kinds,
+      ...message.tool_call_id === undefined ? {} : { tool_call_id: message.tool_call_id },
+      ...Array.isArray(message.tool_calls) ? { tool_calls: message.tool_calls.map(call => call.id) } : {},
+      ...message.role === "assistant" || message.tool_calls !== undefined
+        ? { reasoning: typeof message.reasoning_content === "string" && message.reasoning_content.length > 0 }
+        : {},
+    };
+  });
+}
+
+function hostShapedConversation() {
+  return [
+    { role: 'user', content: [{ type: 'text', text: 'what is the weather in Shanghai?' }] },
+    { role: 'assistant', content: [
+      { type: 'reasoning', text: 'need the weather tool' },
+      { type: 'tool-call', id: 'call_weather_1', name: 'get_weather', arguments: '{"city":"Shanghai"}' },
+    ] },
+    // The host shape: top-level tool message, camelCase id, own content.
+    { role: 'tool', toolCallId: 'call_weather_1', content: [{ type: 'text', text: '22C and sunny' }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'It is 22C and sunny.' }] },
+  ];
+}
+
+test('the outgoing body pairs every tool call with a role:tool result (host camelCase id)', async () => {
+  const snapshot = await toolPairingSnapshot();
+  const parts = makeAdapter(() => sseResponse(['[DONE]']));
+  const messages = hostShapedConversation();
+  await collect(parts.adapter.stream({ ...baseOptions(), system: 'sys', messages }));
+  assert.equal(parts.requests.length, 1);
+  const sent = parts.requests[0].body.messages;
+  // Snapshot: structure only, so an unrelated field addition cannot break it.
+  const normalized = normalizeMessages(sent);
+  assert.deepEqual(normalized, snapshot.case1TextToolResult.messages);
+  assert.deepEqual(sent.map(message => message.role), snapshot.case1TextToolResult.roles);
+  // The assistant carrying tool_calls is IMMEDIATELY followed by its role:tool result.
+  const assistantIndex = sent.findIndex(message => Array.isArray(message.tool_calls) && message.tool_calls.length > 0);
+  assert.equal(sent[assistantIndex + 1].role, 'tool');
+  assert.equal(sent[assistantIndex + 1].tool_call_id, sent[assistantIndex].tool_calls[0].id);
+  // One-to-one pairing in both directions.
+  const callIds = sent.flatMap(message => (message.tool_calls ?? []).map(call => call.id));
+  const resultIds = sent.filter(message => message.role === 'tool').map(message => message.tool_call_id);
+  assert.deepEqual(callIds, ['call_weather_1']);
+  assert.deepEqual(resultIds, ['call_weather_1']);
+  assert.equal(callIds.length, new Set(callIds).size);
+  assert.equal(resultIds.length, new Set(resultIds).size);
+  assert.deepEqual([...callIds].sort(), [...resultIds].sort());
+  // No tool result was re-emitted as a user message, and role order is otherwise unchanged.
+  const userTexts = sent.filter(message => message.role === 'user').map(message => JSON.stringify(message.content)).join(' ');
+  assert.equal(userTexts.includes('22C and sunny'), false);
+  assert.equal(userTexts.includes('tool_execution_result'), false);
+  assert.deepEqual(sent.map(message => message.role), ['system', 'user', 'assistant', 'tool', 'assistant']);
+});
+
+test('a tool message carrying an image stays a role:tool message with its image part', async () => {
+  const snapshot = await toolPairingSnapshot();
+  const requests = [];
+  const connection = resolveChatConnection({ streamIdleTimeoutMs: 50 });
+  const adapter = createDeepSeekChatAdapter({
+    connection: () => connection,
+    resolveApiKey: async () => 'k',
+    resolveRequestImages: async () => new Map([['tool-image-1', { mediaType: 'image/png', data: new Uint8Array([1, 2, 3]), bytes: 3, width: 2, height: 2 }]]),
+    fetch: async (url, init) => { requests.push(JSON.parse(init.body)); return sseResponse(['[DONE]']); },
+  });
+  const messages = [
+    { role: 'user', content: [{ type: 'text', text: 'make a chart' }] },
+    { role: 'assistant', content: [{ type: 'tool-call', id: 'call_image_1', name: 'render_chart', arguments: '{}' }] },
+    { role: 'tool', toolCallId: 'call_image_1', content: [
+      { type: 'text', text: 'chart rendered' },
+      { type: 'image', attachment: { attachmentId: 'tool-image-1', mediaType: 'image/png', width: 2, height: 2 } },
+    ] },
+  ];
+  await collect(adapter.stream({ ...baseOptions(), system: 'sys', messages }));
+  assert.equal(requests.length, 1);
+  const sent = requests[0].messages;
+  assert.deepEqual(normalizeMessages(sent), snapshot.case2ImageToolResult.messages);
+  const toolRow = sent.find(message => message.role === 'tool');
+  assert.equal(toolRow.tool_call_id, 'call_image_1');
+  assert.equal(Array.isArray(toolRow.content), true);
+  const kinds = toolRow.content.map(part => part.type === 'text' ? 'text' : part.type);
+  assert.deepEqual(kinds, ['text', 'text', 'image_url']);
+  assert.equal(kinds.at(-1), 'image_url');
+  assert.equal(toolRow.content.at(-1).image_url.url.startsWith('data:image/png;base64,'), true);
+  assert.equal(toolRow.content.some(part => part.type === 'text' && part.text.includes('tool-image-1')), true);
+  // No synthetic "Attached image(s) from tool result:" user turn was introduced.
+  const userMessages = sent.filter(message => message.role === 'user');
+  assert.equal(userMessages.length, 1);
+  assert.equal(JSON.stringify(userMessages[0].content).includes('Attached image(s) from tool result:'), false);
+});
+
+test('a tool message without any call id fails before anything is sent', async () => {
+  const parts = makeAdapter(() => sseResponse(['[DONE]']));
+  const messages = [
+    { role: 'user', content: [{ type: 'text', text: 'hi' }] },
+    { role: 'tool', content: [{ type: 'text', text: 'orphan result with no pairing id' }] },
+  ];
+  await assert.rejects(collect(parts.adapter.stream({ ...baseOptions(), messages })), (error) => {
+    assert.equal(error instanceof LlmError, true);
+    assert.equal(error.code, 'INVALID_REQUEST');
+    assert.equal(error.failure.code, 'INVALID_REQUEST');
+    assert.equal(error.message.includes('tool call id'), true);
+    assert.equal(error.message.includes('tool'), true);
+    return true;
+  });
+  // Nothing was sent: the failure happens while the body is built.
+  assert.equal(parts.requests.length, 0);
+});
