@@ -2,7 +2,7 @@
 
 在 DeepSeek Harness 中导入、编辑和使用 SillyTavern 预设，并为不同模式、不同会话管理工具开关。
 
-当前为 **`0.1.6` 适配分支**，已验证的 0.1.6 宿主版本是 `0.1.6-alpha.2`，对应适配代码尚未发布到 npm。
+当前预览版已验证 DSH `0.1.6-alpha.2`、`0.1.7-alpha.1` 和 `0.1.7-alpha.2`。
 
 - 预设工作台：全局预设库、顺序编辑、消息预览、自动保存和单文件分享。
 - 消息注入：聊天记录前后及指定深度的提示词、变量宏和 assistant 预填充。
@@ -11,12 +11,12 @@
 
 ## 安装与上手
 
-### DSH 0.1.6-alpha.2
+### DSH 0.1.6 / 0.1.7 预览版
 
-从当前适配分支安装：
+安装当前预览版：
 
 ```powershell
-dsh plugin --profile web add github:bychv/dsh-preset-enhance#0.1.6
+dsh plugin --profile web add dsh-preset-enhance@0.3.3-alpha.1
 ```
 
 安装后重新启动 `dsh web`，侧边栏会出现“预设工作台”，新建对话的模式列表中会出现“预设模式”。
@@ -34,7 +34,7 @@ dsh plugin --profile web add github:bychv/dsh-preset-enhance#0.1.6
 dsh plugin --profile web add dsh-preset-enhance@0.3.2-rc.2
 ```
 
-当前分支声明的宿主范围为 `>=0.1.5-rc.2 <0.1.6`、`0.1.6-alpha.2` 与 `0.1.7-alpha.1`。后续版本需重新验证，不提前声明兼容整个系列。
+当前版本声明的宿主范围为 `>=0.1.5-rc.2 <0.1.6`、`0.1.6-alpha.2`、`0.1.7-alpha.1` 与 `0.1.7-alpha.2`。后续版本需重新验证。
 
 ## 连接协议与能力范围
 
@@ -48,14 +48,6 @@ DSH 0.1.6 的官方连接默认使用 Messages，0.1.7 更移除了官方的对�
 | 工具开关、分组与会话覆盖 | 支持 | 支持 |
 
 插件会合并预设开头连续的 system 消息，避免 Messages 序列化只保留最后一条。需要准确保留预设消息顺序、使用预填充或正文提取时，请选择对话补全接口。无法识别当前连接时，工作台不会代选其他连接来修改。
-
-也可以在宿主 profile 的 `cordis.patch.yml` 中配置官方连接，修改后重启：
-
-```yaml
-- id: llm-deepseek
-  config:
-    protocol: chat-completions
-```
 
 ## 预设工作台
 
@@ -210,9 +202,9 @@ flowchart TD
 
 ### 启动与运行时启停
 
-初始化会读取状态并从 `standard` 组成生成预设模式。状态损坏、模式组成缺失或目录不可写时，插件保留工作台并显示原因，停止注入和写入，不自动清空数据。修复后重新启用即可。
+初始化会读取状态并根据宿主的 `standard` 组成注册预设模式。状态损坏、模式组成缺失或目录不可写时，插件保留工作台并显示原因，停止注入和写入，不自动清空数据。修复后重新启用即可。
 
-停用时停止接受新操作，等待在途写入和流式请求收尾，再释放请求桥接。插件不可用时，预设模式会明确拒绝使用；重复启用只在内容变化时重写模式文件。运行时启停与升级安装包是不同操作，安装或升级后仍按安装步骤重启宿主。
+停用时停止接受新操作，等待在途写入和流式请求收尾，再释放请求桥接。插件不可用时，预设模式会明确拒绝使用。运行时启停与升级安装包是不同操作，安装或升级后仍按安装步骤重启宿主。
 
 ## 开发与验证
 
@@ -230,7 +222,7 @@ node tests/fixtures/protocol-server.mjs --demo
 node tests/fixtures/protocol-server.mjs
 ```
 
-具备本机沙盒环境时，`npm run test:mcp:candidate` 可在 **candidate 槽位**启动两个隔离的 stdio MCP 服务，检查发现、调用和分组；结束后关闭测试服务，不写入 candidate 配置。该命令不代表在 0.1.6 的 alpha 槽位验证。
+具备本机沙盒环境时，`npm run test:mcp:candidate` 可在 **candidate 槽位**启动两个隔离的 stdio MCP 服务，检查发现、调用和分组；结束后关闭测试服务，不写入 candidate 配置。
 
 ## 许可证
 
