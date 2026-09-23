@@ -35,10 +35,17 @@
 .tool-auto-save-hint{display:block;letter-spacing:0;color:#8da2ae;font-size:11px;line-height:1.5;margin-top:2px}
 .connection-select{border:1px solid #2a3942;border-radius:9px;background:#131d24;padding:10px 14px;margin:0 0 18px}
 .connection-select-title{display:flex;align-items:baseline;gap:10px;margin:0 0 4px;color:#b9d9d2;font-size:13px;font-weight:650}
-.connection-select-control{display:flex;align-items:center;gap:10px;margin:2px 0}
-.connection-select-field{flex-direction:row;align-items:center;gap:10px}
-.connection-select-field select{max-width:460px}
-.connection-select select:disabled{opacity:.55;cursor:not-allowed}
+.connection-switch{display:flex;align-items:center;gap:12px;margin:8px 0 4px}
+.connection-switch-side{flex:0 1 auto;max-width:320px;background:none;border:0;padding:2px 0;color:#7f9aa4;font:inherit;font-size:13px;line-height:1.35;text-align:left;cursor:pointer;transition:color .15s}
+.connection-switch-side:last-child{text-align:right}
+.connection-switch-side[aria-pressed="true"]{color:#e8f4f1;font-weight:650}
+.connection-switch-side:disabled{opacity:.55;cursor:not-allowed}
+.connection-switch-track{position:relative;flex:0 0 56px;height:26px;border-radius:999px;border:1px solid #2a3942;background:#0d151b;padding:0;cursor:pointer;transition:background .15s,border-color .15s}
+.connection-switch-track:disabled{opacity:.55;cursor:not-allowed}
+.connection-switch-knob{position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:#5c7d88;transition:left .18s,background .18s}
+.connection-switch[data-side="left"] .connection-switch-knob{background:#4fb3a0}
+.connection-switch[data-side="right"] .connection-switch-knob{left:33px;background:#4fb3a0}
+.connection-switch[data-side="none"] .connection-switch-knob{background:#5c7d88}
 #connection-note{margin:6px 0 0}
 .protocol-help{position:relative;display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border:1px solid #48907e;border-radius:50%;background:#16212a;color:#9edfc7;font-size:12px;line-height:1;cursor:help;user-select:none}
 .protocol-help-body{position:absolute;top:calc(100% + 10px);left:0;z-index:30;display:none;width:min(560px,80vw);padding:10px 12px;border:1px solid #2a3942;border-radius:9px;background:#131d24;color:#dce6eb;font-size:12px;line-height:1.6;font-weight:400;text-align:left;white-space:normal;box-shadow:0 10px 28px rgba(0,0,0,.45)}

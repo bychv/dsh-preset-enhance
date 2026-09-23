@@ -27,8 +27,13 @@ function editor(storage = new Map(), fetch = async () => { throw new Error('offl
     prompt: () => preset.prompts.find(p => p.identifier === 'dsh-output-extraction-template'),
     order: () => order(),
     protocol(value) {
-      state.connectionChoice = { provider: 'p', model: null, reasoningEffort: null, canSwitch: true,
-        choices: [{ provider: 'p', label: 'p', protocol: value, defaultModel: '' }] };
+      // The switch needs two sides to be usable, so the stub offers both the way a host does,
+      // and the current provider decides which protocol this session is on.
+      state.connectionChoice = { provider: value === 'messages' ? 'official' : 'plugin', model: null, reasoningEffort: null, canSwitch: true,
+        choices: [
+          { provider: 'plugin', label: 'plugin', protocol: 'chat-completions', defaultModel: '' },
+          { provider: 'official', label: 'official', protocol: 'messages', defaultModel: '' },
+        ] };
       state.connection = { source: 'settings', protocol: value };
       renderConnectionChoice();
     },
@@ -52,7 +57,7 @@ test('Messages disables prefill; enabling extraction inserts one template and pr
   const ui = editor();
   ui.protocol('messages');
   assert.equal(ui.get('prefill-settings').disabled, true);
-  assert.equal(ui.get('connection-select').disabled, false);
+  assert.equal(ui.get('connection-toggle').disabled, false);
   ui.protocol('chat-completions');
   assert.equal(ui.get('prefill-settings').disabled, false);
   ui.toggleExtraction();

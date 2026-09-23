@@ -250,33 +250,36 @@ function chatCompletionChoice() {
  * 顶部选择器：列出宿主提供的连接并标明各自的协议。读不到连接信息或 canSwitch === false 时
  * 禁用控件并说明原因，绝不猜测一个默认连接。
  */
+/** 滑块两侧：对话补全连接在左，Messages 连接在右；缺哪一侧就退到剩余的第一项。 */
+function connectionSwitchSides() {
+  const choices = connectionChoices();
+  const left = choices.find(choice => choice.protocol === 'chat-completions') ?? choices[0] ?? null;
+  const candidate = choices.find(choice => choice.protocol === 'messages')
+    ?? choices.find(choice => choice !== left) ?? null;
+  // One available connection must not put the same provider on both sides of the switch.
+  return { left, right: candidate === left ? null : candidate };
+}
 function renderConnectionChoice() {
   const selection = connectionSelectionState();
-  const select = $('connection-select');
   const choices = connectionChoices();
   const current = currentConnectionChoice();
-  const rows = current && !choices.some(choice => choice.provider === current.provider)
-    ? [current, ...choices] : choices;
-  const optionFor = choice => {
-    const option = document.createElement('option');
-    option.value = choice.provider;
-    option.textContent = connectionChoiceLabel(choice);
-    return option;
-  };
-  if (current) {
-    select.replaceChildren(...rows.map(optionFor));
-  } else {
-    // 宿主没有给出当前连接时用一个禁用占位项说明，绝不让下拉框停在第 1 个选项上冒充已选。
-    const placeholder = document.createElement('option');
-    placeholder.value = '';
-    placeholder.textContent = rows.length ? '未读取到当前连接' : '未能从宿主读取连接信息';
-    placeholder.disabled = true;
-    select.replaceChildren(placeholder, ...rows.map(optionFor));
+  const rows = choices;
+  const { left, right } = connectionSwitchSides();
+  for (const [side, choice] of [['left', left], ['right', right]]) {
+    const button = $('connection-side-' + side);
+    button.textContent = choice ? connectionChoiceLabel(choice) : '此侧不可用';
+    button.disabled = choice === null;
+    button.setAttribute('aria-pressed', current && choice && current.provider === choice.provider ? 'true' : 'false');
   }
-  const canSwitch = selection?.canSwitch === true && rows.length > 0;
-  // 切换进行中保留用户刚选中的那一项，不要先弹回旧值再跳过去。
-  if (!connectionSwitchSaving) select.value = current ? current.provider : '';
-  select.disabled = !canSwitch || connectionSwitchSaving;
+  // 滑块位置：指向当前连接；宿主走的是第三种连接时停在中间，绝不把某一侧显示成已选中。
+  const activeSide = !current ? 'none'
+    : left && current.provider === left.provider ? 'left'
+      : right && current.provider === right.provider ? 'right' : 'none';
+  $('connection-switch').dataset.side = activeSide;
+  const canSwitch = selection?.canSwitch === true && rows.length > 0 && left !== null && right !== null;
+  const toggle = $('connection-toggle');
+  toggle.setAttribute('aria-checked', activeSide === 'right' ? 'true' : 'false');
+  toggle.disabled = !canSwitch || connectionSwitchSaving;
   $('connection-name').textContent = current ? `当前：${current.label || current.provider}` : '';
   // 连接声明为 Messages 时预填充设置不适用：整块禁用并说明原因，而不是让它看起来可用。
   const messages = currentConnectionProtocol() === 'messages';
@@ -1726,8 +1729,20 @@ $('post-tool-prefix-text').oninput = markPrefillSettingsDirty;
 $('deepseek-beta-prefix').onchange = markPrefillSettingsDirty;
 // 选中即切换：走宿主自己的 provider/model 选择，立即生效。
 // 不参与自动保存，也不触碰未保存的工具开关/分组草稿。
-$('connection-select').onchange = () => {
-  void selectConnectionChoice($('connection-select').value);
+$('connection-side-left').onclick = () => {
+  const { left } = connectionSwitchSides();
+  if (left) void selectConnectionChoice(left.provider);
+};
+$('connection-side-right').onclick = () => {
+  const { right } = connectionSwitchSides();
+  if (right) void selectConnectionChoice(right.provider);
+};
+// 拨动滑块 = 切到另一侧；当前停在第三种连接上时，拨动先走向对话补全一侧。
+$('connection-toggle').onclick = () => {
+  const { left, right } = connectionSwitchSides();
+  if (!left || !right) return;
+  const side = $('connection-switch').dataset.side;
+  void selectConnectionChoice(side === 'left' ? right.provider : left.provider);
 };
 $('prefix-tool-calls').onchange = () => {
   syncPrefixToolControls();
