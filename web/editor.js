@@ -1766,6 +1766,49 @@ function insertOutputExtractionTemplate() {
   renderEditor();
   status('已将格式提示词加入当前预设，可在条目中编辑；保存接口设置时一并保存');
 }
+/**
+ * A prefill preset ends on an assistant turn, so the next request continues from what the
+ * model already wrote - exactly the case output extraction exists for. Importing one while
+ * extraction is enabled adds the format prompt (the caller then saves it) instead of leaving
+ * the user to flip the switch and save by hand.
+ */
+function ensurePrefillExtractionTemplate() {
+  if (state.prefixOutputExtraction !== true) return false;
+  if (preset.prompts.some(item => item.identifier === 'dsh-output-extraction-template')) return false;
+  const items = order();
+  const lastEnabled = items.findLast(item => item.enabled !== false);
+  const role = preset.prompts.find(prompt => prompt.identifier === lastEnabled?.identifier)?.role;
+  if (!['assistant', 'model'].includes(role)) return false;
+  insertOutputExtractionTemplate();
+  return true;
+}
+/** Clear the import notice: a fresh import must not leave the previous one on screen. */
+function hidePresetNotice() {
+  const box = $('preset-notice');
+  box.hidden = true;
+  box.dataset.kind = '';
+  box.replaceChildren();
+}
+
+/**
+ * Tell the user the import added the extraction format prompt. The entry appears in their list
+ * without them asking for it, so say why it is there and that it is theirs to edit or remove.
+ */
+function showImportedExtractionNotice() {
+  const box = $('preset-notice');
+  const title = document.createElement('strong');
+  title.textContent = '已自动加入正文提取格式提示词';
+  const text = document.createElement('p');
+  text.textContent = '导入的是预填充预设（最后一条是 Assistant 回复），且正文提取已开启，因此自动加入了「正文/工具调用提取格式（实验）」条目并已保存；可在提示词条目中编辑或删除。';
+  const dismiss = document.createElement('button');
+  dismiss.textContent = '知道了';
+  dismiss.onclick = () => hidePresetNotice();
+  box.className = 'notice';
+  box.dataset.kind = 'import-extraction';
+  box.hidden = false;
+  box.replaceChildren(title, text, dismiss);
+}
+
 for (const [id, delta] of [['up', -1], ['down', 1]]) $(id).onclick = () => {
   const items = order();
   const index = items.findIndex(item => item.identifier === selectedPrompt);
@@ -1831,13 +1874,25 @@ $('delete-preset').onclick = guard(async () => {
 $('import').onchange = guard(async () => {
   const file = $('import').files[0];
   if (!file || !(await discardOkay())) return;
+  hidePresetNotice();
   try {
     if (file.size > 8_000_000) throw new Error('预设文件不能超过 8 MB');
     const parsed = JSON.parse(await file.text());
     const name = file.name.replace(/(?:\.dsh-preset)?\.json$/i, '');
     const result = await api({ action: 'import', name, document: parsed });
     await reload(result.id);
-    status(parsed.format === 'dsh-preset-enhance' ? '预设包已导入并设为当前默认；全局接口设置保持原值' : '预设已导入、全局保存并设为当前默认');
+    // Add the extraction format prompt for an imported prefill preset, and persist it: the
+    // import already saved the preset, so leaving the addition as an unsaved draft would drop
+    // it whenever auto-save is off.
+    const autoExtraction = ensurePrefillExtractionTemplate();
+    if (autoExtraction) {
+      const saved = await persistPresetDraft({ force: true });
+      if (!saved.ok) throw saved.error;
+      await reload(saved.id ?? result.id);
+      showImportedExtractionNotice();
+    }
+    const imported = parsed.format === 'dsh-preset-enhance' ? '预设包已导入并设为当前默认；全局接口设置保持原值' : '预设已导入、全局保存并设为当前默认';
+    status(autoExtraction ? imported + '；已检测到预填充预设并自动加入正文提取格式提示词' : imported);
   } finally {
     $('import').value = '';
   }

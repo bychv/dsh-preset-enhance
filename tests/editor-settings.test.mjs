@@ -33,6 +33,13 @@ function editor(storage = new Map(), fetch = async () => { throw new Error('offl
       renderConnectionChoice();
     },
     change(value) { toolDraft.policy.read = value; markToolDirty(); },
+    setPreset(value) { preset = value; selectedPrompt = order()[0]?.identifier ?? ''; renderList(); },
+    prefill(value) { state.prefixOutputExtraction = value; },
+    autoExtraction: () => ensurePrefillExtractionTemplate(),
+    showImportNotice: () => showImportedExtractionNotice(),
+    hideImportNotice: () => hidePresetNotice(),
+    notice: () => ({ hidden: $('preset-notice').hidden, kind: $('preset-notice').dataset.kind }),
+    identifiers: () => order().map(item => item.identifier),
     draft: () => toolDraft,
     save: runAutoSave, flush: flushToolDraftKeepalive,
     };
@@ -83,4 +90,68 @@ test('failed keepalive keeps a recoverable draft', async () => {
   const recovered = editor(ui.storage);
   assert.equal(recovered.draft().policy.read, false);
   assert.equal(recovered.draft().dirty, true);
+});
+
+test('importing a prefill preset with extraction on adds and positions the extraction prompt', () => {
+  const ui = editor();
+  ui.prefill(true);
+  ui.setPreset({
+    prompts: [
+      { identifier: 'chatHistory', marker: true },
+      { identifier: 'lead', role: 'system', content: 'sys' },
+      { identifier: 'tail', role: 'assistant', content: 'Continue:' },
+    ],
+    prompt_order: [{ character_id: '100001', order: [
+      { identifier: 'lead', enabled: true },
+      { identifier: 'chatHistory', enabled: true },
+      { identifier: 'tail', enabled: true },
+    ] }],
+  });
+  assert.equal(ui.autoExtraction(), true, 'a prefill preset with extraction on gets the prompt');
+  assert.equal(ui.prompt()?.identifier, 'dsh-output-extraction-template');
+  assert.equal(ui.prompt()?.content, 'format');
+  const ids = ui.identifiers();
+  assert.equal(ids[ids.indexOf('chatHistory') + 1], 'dsh-output-extraction-template',
+    'it is placed right after the chat history');
+  // Idempotent: the same import shape again must not add a second entry.
+  assert.equal(ui.autoExtraction(), false);
+  assert.equal(ui.identifiers().filter(id => id === 'dsh-output-extraction-template').length, 1);
+});
+
+test('the extraction prompt is not added when extraction is off or the preset does not prefill', () => {
+  const off = editor();
+  off.prefill(false);
+  off.setPreset({
+    prompts: [{ identifier: 'chatHistory', marker: true }, { identifier: 'tail', role: 'assistant', content: 'x' }],
+    prompt_order: [{ character_id: '100001', order: [
+      { identifier: 'chatHistory', enabled: true }, { identifier: 'tail', enabled: true },
+    ] }],
+  });
+  assert.equal(off.autoExtraction(), false, 'extraction off means no insertion');
+  assert.equal(off.prompt(), undefined);
+
+  const notPrefill = editor();
+  notPrefill.prefill(true);
+  notPrefill.setPreset({
+    prompts: [{ identifier: 'chatHistory', marker: true }, { identifier: 'u', role: 'user', content: 'x' }],
+    prompt_order: [{ character_id: '100001', order: [
+      { identifier: 'chatHistory', enabled: true }, { identifier: 'u', enabled: true },
+    ] }],
+  });
+  assert.equal(notPrefill.autoExtraction(), false, 'a preset that does not end on an assistant turn is left alone');
+  assert.equal(notPrefill.prompt(), undefined);
+});
+
+test('the auto-inserted extraction prompt is announced to the user', () => {
+  const ui = editor();
+  // The DOM stub starts elements visible, so drive the clearing path explicitly instead of
+  // relying on the element's hidden attribute in index.html.
+  ui.hideImportNotice();
+  assert.equal(ui.notice().hidden, true, 'a fresh import clears any previous notice');
+  assert.equal(ui.notice().kind, '', 'and forgets what it was about');
+  ui.showImportNotice();
+  assert.equal(ui.notice().hidden, false, 'the notice is visible after the insert');
+  assert.equal(ui.notice().kind, 'import-extraction');
+  ui.hideImportNotice();
+  assert.equal(ui.notice().hidden, true, 'dismissing hides it again');
 });
