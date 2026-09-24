@@ -981,3 +981,31 @@ test('a tool message without any call id fails before anything is sent', async (
   // Nothing was sent: the failure happens while the body is built.
   assert.equal(parts.requests.length, 0);
 });
+
+test('a developer tool-update message never becomes a wire message', async () => {
+  // 0.1.7-rc.2 appends developer messages carrying tool-addition/tool-removal blocks when the tool
+  // set changes, and strips them for a route that declares no toolUpdate (ours). If one arrives
+  // anyway it must be dropped, not serialized as a user turn nor fed to the text-only assertion.
+  const options = {
+    provider: DEEPSEEK_CHAT_PROVIDER_ID, model: 'deepseek-flash',
+    messages: [
+      { role: 'user', content: [{ type: 'text', text: 'hello' }] },
+      { role: 'developer', content: [{ type: 'tool-addition', toolName: 'read' }] },
+    ],
+  };
+  const textOnly = serializeRequest(options, {});
+  assert.deepEqual(textOnly.messages.map(message => message.role), ['user']);
+
+  const requests = [];
+  const connection = resolveChatConnection({ streamIdleTimeoutMs: 50 });
+  const adapter = createDeepSeekChatAdapter({
+    connection: () => connection,
+    resolveApiKey: async () => 'k',
+    fetch: async (url, init) => { requests.push({ body: JSON.parse(init.body) }); return sseResponse(['[DONE]']); },
+  });
+  await collect(adapter.stream({
+    ...options,
+    messages: [...options.messages, { role: 'assistant', content: [{ type: 'text', text: 'hi' }] }],
+  }));
+  assert.deepEqual(requests[0].body.messages.map(message => message.role), ['user', 'assistant']);
+});

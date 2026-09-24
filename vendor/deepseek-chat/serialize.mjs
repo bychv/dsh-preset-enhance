@@ -185,6 +185,13 @@ export function serializeMessages(messages) {
     const wire = [];
     for (const message of messages) {
         assertTextOnly(message.content);
+        // A developer message carries tool-declaration updates (tool-addition / tool-removal),
+        // not user content. The runtime strips it before dispatch for a route that declares no
+        // toolUpdate - which this adapter does not - so reaching this point means the host changed.
+        // Its blocks are not text and emitting it as a user turn would fabricate user content, so
+        // skip it rather than fail or mislabel it.
+        if (message.role === 'developer')
+            continue;
         if (message.role === 'system') {
             wire.push({ role: 'system', content: flattenText(message.content) });
             continue;
@@ -339,6 +346,9 @@ export function serializeMessagesWithImages(messages, images, fileIds = EMPTY_FI
         pendingToolImages = [];
     };
     for (const [messageIndex, message] of messages.entries()) {
+        // See serializeMessages: a developer tool-update row never becomes a wire message.
+        if (message.role === 'developer')
+            continue;
         const nextImage = { value: 0 };
         if (message.role === 'system') {
             flushToolImages();

@@ -2,7 +2,7 @@
 
 在 DeepSeek Harness 中导入、编辑和使用 SillyTavern 预设，并为不同模式、不同会话管理工具开关。
 
-当前预览版已验证 DSH `0.1.6-alpha.2`、`0.1.7-alpha.1`、`0.1.7-alpha.2` 和 `0.1.7-rc.1`。
+当前预览版已验证 DSH `0.1.6-alpha.2`、`0.1.7-alpha.1`、`0.1.7-alpha.2`、`0.1.7-rc.1` 和 `0.1.7-rc.2`。
 
 - 预设工作台：全局预设库、顺序编辑、消息预览、自动保存和单文件分享。
 - 消息注入：聊天记录前后及指定深度的提示词、变量宏和 assistant 预填充。
@@ -16,7 +16,7 @@
 安装当前预览版：
 
 ```powershell
-dsh plugin --profile web add dsh-preset-enhance@0.3.3-rc.1
+dsh plugin --profile web add dsh-preset-enhance@0.3.3-rc.2
 ```
 
 安装后重新启动 `dsh web`，侧边栏会出现“预设工作台”，新建对话的模式列表中会出现“预设模式”。
@@ -34,7 +34,7 @@ dsh plugin --profile web add dsh-preset-enhance@0.3.3-rc.1
 dsh plugin --profile web add dsh-preset-enhance@0.3.2-rc.2
 ```
 
-当前版本声明的宿主范围为 `>=0.1.5-rc.2 <0.1.6`、`0.1.6-alpha.2`、`0.1.7-alpha.1`、`0.1.7-alpha.2` 与 `0.1.7-rc.1`。后续版本需重新验证。
+当前版本声明的宿主范围为 `>=0.1.5-rc.2 <0.1.6`、`0.1.6-alpha.2`、`0.1.7-alpha.1`、`0.1.7-alpha.2`、`0.1.7-rc.1` 与 `0.1.7-rc.2`。后续版本需重新验证。
 
 ## 连接协议与能力范围
 
