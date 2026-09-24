@@ -16,7 +16,7 @@
 安装当前预览版：
 
 ```powershell
-dsh plugin --profile web add dsh-preset-enhance@0.3.3-rc.2
+dsh plugin --profile web add dsh-preset-enhance@0.3.3-rc.3
 ```
 
 安装后重新启动 `dsh web`，侧边栏会出现“预设工作台”，新建对话的模式列表中会出现“预设模式”。
