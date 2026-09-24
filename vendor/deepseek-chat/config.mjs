@@ -5,12 +5,14 @@
  */
 /** Official Chat Completions root. Never the /anthropic Messages base. */
 export const DEEPSEEK_CHAT_BASE_URL = 'https://api.deepseek.com';
-/** Reasoning levels the Chat wire accepts (off is expressed as thinking disabled). */
+/** Reasoning levels the Chat wire accepts (off is expressed as thinking disabled).
+ * The descriptions mirror the host's own wording (DSH 0.1.7-rc.2
+ * packages/llm/llm-deepseek/src/model-info.ts) so both connections describe one choice alike. */
 export const CHAT_REASONING_EFFORTS = [
-    { id: 'off', name: 'Off' },
-    { id: 'low', name: 'Low' },
-    { id: 'high', name: 'High' },
-    { id: 'max', name: 'Max' },
+    { id: 'off', name: 'Off', description: 'Use for simple tasks that do not need reasoning.' },
+    { id: 'low', name: 'Low', description: 'Prefer for routine or latency-sensitive tasks.' },
+    { id: 'high', name: 'High', description: 'The default balance for most tasks.' },
+    { id: 'max', name: 'Max', description: 'Reserve for the hardest quality-first tasks.' },
 ];
 /** Defaults for the plugin Chat connection (model ids and caps are config-overridable). */
 /** Context capacity assumed for an id the plugin does not catalogue. */
@@ -18,9 +20,16 @@ export const DEFAULT_CONTEXT_WINDOW = 1000000;
 export const DEFAULT_CHAT_CONNECTION = {
     baseURL: DEEPSEEK_CHAT_BASE_URL,
     models: [
-        { id: 'deepseek-flash', name: 'DeepSeek Flash', contextWindow: 1000000, maxTokens: 65536, inputModalities: ['text', 'image'] },
-        { id: 'deepseek-chat', name: 'DeepSeek Chat', contextWindow: 1000000, maxTokens: 65536, inputModalities: ['text', 'image'] },
-        { id: 'deepseek-reasoner', name: 'DeepSeek Reasoner', contextWindow: 1000000, maxTokens: 65536, reasoningEffort: 'high', inputModalities: ['text'] },
+        // Mirrors the host's own DeepSeek catalog (DSH 0.1.7-rc.2 packages/llm/llm-deepseek/src/models.ts) so
+        // the model picker offers the same ids and names whichever connection the session is routed to.
+        // Measured against /chat/completions: it serves `deepseek-flash` and `deepseek-v4-pro` directly,
+        // while the two legacy ids this catalog used to advertise are now aliases the endpoint folds back
+        // into `deepseek-flash`.
+        // `toolUpdate` and `systemPromptUpdate` are deliberately NOT mirrored: the host strips developer
+        // tool-update rows and stops re-sending an unchanged system prompt only for a route that declares
+        // none, and both behaviours are what this adapter's prefilling bridge relies on.
+        { id: 'deepseek-flash', name: 'DeepSeek-V41-Flash', contextWindow: 1000000, maxTokens: 65536, inputModalities: ['text', 'image'] },
+        { id: 'deepseek-v4-pro', name: 'DeepSeek-V4-Pro', description: 'Stronger agentic coding, knowledge, and difficult reasoning; suited to complex or quality-critical tasks at higher cost.', contextWindow: 1000000, maxTokens: 65536, inputModalities: ['text'] },
     ],
     thinking: 'enabled',
     reasoningEffort: 'high',

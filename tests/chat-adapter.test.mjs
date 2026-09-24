@@ -318,9 +318,9 @@ test('adapter metadata answers the host catalog questions', async () => {
   const parts = makeAdapter(() => sseResponse(['[DONE]']));
   assert.deepEqual(parts.adapter.providerInfo(DEEPSEEK_CHAT_PROVIDER_ID), { id: DEEPSEEK_CHAT_PROVIDER_ID, name: DEEPSEEK_CHAT_PROVIDER_NAME });
   const models = await parts.adapter.listModels(DEEPSEEK_CHAT_PROVIDER_ID);
-  assert.deepEqual(models.map(model => model.id), ['deepseek-flash', 'deepseek-chat', 'deepseek-reasoner']);
+  assert.deepEqual(models.map(model => model.id), ['deepseek-flash', 'deepseek-v4-pro']);
   const resolved = await parts.adapter.resolveModel(DEEPSEEK_CHAT_PROVIDER_ID, 'deepseek-flash');
-  assert.equal(resolved.name, 'DeepSeek Flash');
+  assert.equal(resolved.name, 'DeepSeek-V41-Flash');
   assert.equal(resolved.context.contextWindow, 1000000);
   assert.equal(resolved.defaultMaxTokens, 65536);
   assert.equal(resolved.reasoning.defaultEffort, 'high');
@@ -367,7 +367,7 @@ test('pricing prices retained, offloaded and text-only occurrences', () => {
   const substituted = deepSeekImageRequestPricing(connection, 'not-a-model').priceImages([{ type: 'image', attachment: ref }])[0];
   assert.deepEqual(substituted, { visualTokens: 0, text: textOnlyImageText(ref) });
   assert.equal(substituted.text.includes('sha256:abcdef'), true);
-  assert.equal(deepSeekImageRequestPricing(connection, 'deepseek-reasoner').priceImages([{ type: 'image', attachment: ref }])[0].visualTokens, 0);
+  assert.equal(deepSeekImageRequestPricing(connection, 'deepseek-v4-pro').priceImages([{ type: 'image', attachment: ref }])[0].visualTokens, 0);
   // The access resolver feeds the same handle text the serializer sends.
   const withPath = deepSeekImageRequestPricing(connection, 'deepseek-flash', () => ({ readonlyPath: '/world/img.png' }));
   assert.equal(withPath.priceImages([{ type: 'image', attachment: ref }])[0].text.includes('/world/img.png'), true);
@@ -379,7 +379,7 @@ test('the adapter exposes real image pricing for image routes', () => {
   assert.equal(typeof pricing.priceImages, 'function');
   const ref = { attachmentId: 'sha256:qwertyuiop', mediaType: 'image/png', width: 640, height: 480 };
   assert.equal(pricing.priceImages([{ type: 'image', attachment: ref }])[0].visualTokens > 0, true);
-  const textOnly = parts.adapter.imageRequestPricing(DEEPSEEK_CHAT_PROVIDER_ID, 'deepseek-reasoner');
+  const textOnly = parts.adapter.imageRequestPricing(DEEPSEEK_CHAT_PROVIDER_ID, 'deepseek-v4-pro');
   assert.equal(textOnly.priceImages([{ type: 'image', attachment: ref }])[0].visualTokens, 0);
 });
 

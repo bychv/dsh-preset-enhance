@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { sessionConnection, writeConnectionProtocol } from '../lib/connection.mjs';
+import { selectConnection, sessionConnection, writeConnectionProtocol } from '../lib/connection.mjs';
 import { installToolRestrictions } from '../lib/tool-restrictions.mjs';
 import { toolPolicySnapshot } from '../lib/tool-presets.mjs';
 
@@ -65,4 +65,43 @@ test('PTC assembly hides disabled tools, restores dynamically and isolates sessi
   await ctx.systemPrompt.assemble({ agent });
   for (const dispose of cleanup.reverse()) dispose();
   assert.ok(agent.ctx.tools.schemas().some(tool => tool.name === 'shell'));
+});
+
+test('switching connections keeps a model the target advertises', async () => {
+  // Both curated connections now advertise the host's own catalog, so toggling must not silently
+  // move the session to another model.
+  const saved = [];
+  const catalogue = {
+    'preset-deepseek-chat': [{ id: 'deepseek-flash' }, { id: 'deepseek-v4-pro' }],
+    'deepseek-official': [{ id: 'deepseek-flash' }, { id: 'deepseek-v4-pro' }],
+  };
+  let current = { provider: 'deepseek-official', model: 'deepseek-v4-pro' };
+  const llm = { listModels: async (provider) => catalogue[provider] ?? [], listProviders: () => [] };
+  const service = {
+    currentSelection: () => current,
+    saveSelection: async (next) => { saved.push(next); current = next; },
+  };
+  const ctx = { llm, get: (name) => (name === 'agentDefaultModel' ? service : name === 'llm' ? llm : undefined) };
+
+  const selection = await selectConnection(ctx, 'preset-deepseek-chat');
+  assert.deepEqual(saved[0], { provider: 'preset-deepseek-chat', model: 'deepseek-v4-pro' });
+  assert.equal(selection.model, 'deepseek-v4-pro');
+
+  // An id the target does not advertise falls back to that connection's own curated default.
+  current = { provider: 'deepseek-official', model: 'not-in-any-catalog' };
+  await selectConnection(ctx, 'preset-deepseek-chat');
+  assert.equal(saved[1].model, 'deepseek-flash');
+
+  // A host that cannot answer discovery also keeps the curated default rather than guessing.
+  const bare = {
+    get: (name) => (name === 'agentDefaultModel'
+      ? { currentSelection: () => ({ provider: 'deepseek-official', model: 'deepseek-v4-pro' }), saveSelection: async (next) => { saved.push(next); } }
+      : undefined),
+  };
+  await selectConnection(bare, 'preset-deepseek-chat');
+  assert.equal(saved[2].model, 'deepseek-flash');
+
+  // An explicit model always wins.
+  await selectConnection(ctx, 'deepseek-official', 'deepseek-flash');
+  assert.equal(saved[3].model, 'deepseek-flash');
 });

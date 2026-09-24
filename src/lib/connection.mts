@@ -167,6 +167,18 @@ export function connectionSelection(ctx: PluginContext): ConnectionSelection {
   };
 }
 
+/** Model ids one provider advertises, or undefined when the host cannot answer. */
+async function advertisedModelIds(ctx: PluginContext, provider: string): Promise<readonly string[] | undefined> {
+  const llm = ctx.get?.('llm') as { listModels?: (provider: string) => Promise<readonly { id?: unknown }[]> } | undefined;
+  if (typeof llm?.listModels !== 'function') return undefined;
+  try {
+    const models = await llm.listModels(provider);
+    return models.map(entry => entry?.id).filter((id): id is string => typeof id === 'string' && id.length > 0);
+  } catch {
+    // Discovery is advisory: a provider that cannot answer keeps the curated default.
+    return undefined;
+  }
+}
 /**
  * Route sessions to one of the offered connections.
  *
@@ -184,9 +196,18 @@ export async function selectConnection(ctx: PluginContext, provider: string, mod
     ?? hostProviderChoices(ctx).find(item => item.provider === provider);
   if (!choice) throw new Error('未知的连接');
   const current = service.currentSelection?.();
+  const requested = model && model.trim() ? model.trim() : undefined;
+  const currentModel = typeof current?.model === 'string' && current.model ? current.model : undefined;
+  // Both curated connections advertise the same catalog, so a toggle must not silently change the
+  // model. Keep the current id when the target provider confirms it advertises it; a host that
+  // cannot answer leaves the curated default in place.
+  const preserved = requested === undefined && currentModel !== undefined
+    && (await advertisedModelIds(ctx, provider))?.includes(currentModel) === true
+    ? currentModel
+    : undefined;
   const next = {
     provider,
-    model: model && model.trim() ? model.trim() : (choice.defaultModel || current?.model || ''),
+    model: requested ?? preserved ?? (choice.defaultModel || currentModel || ''),
     ...(typeof current?.reasoningEffort === 'string' ? { reasoningEffort: current.reasoningEffort } : {}),
   };
   await service.saveSelection(next);
