@@ -422,6 +422,162 @@ test('a preset can remove or retain the DSH system prompt in other modes', async
       ['PRESET\n\nDSH SYSTEM', 'DSH RUNTIME', 'hello']);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+test('system prompt toggle filters durable DSH history in requests and previews without changing the session', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-preset-durable-system-'));
+  try {
+    const file = join(dir, 'state.json'), store = new PresetStore(file), listeners = {}, calls = [];
+    const preset = { prompts: [{ identifier: 'p', role: 'system', content: 'PRESET' }] };
+    await store.transaction(state => {
+      state.presets.push({ id: 'p', preset });
+      for (const id of ['standard', AGENT_PRESET_ID]) state.bindings[id] = { enabled: true, presetId: 'p' };
+    });
+    const owned = (id, role, text, source) => ({ ...msg(id, role, text), source });
+    const history = [
+      owned('old-system', 'system', 'OLD SYSTEM', { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt' }),
+      msg('human', 'user', 'Current runtime context. This is a real user message.'),
+      owned('old-runtime', 'user', 'OLD RUNTIME', { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt', form: 'snapshot' }),
+      msg('answer', 'assistant', 'reply'),
+      owned('new-system', 'system', 'NEW SYSTEM', { kind: 'system-prompt' }),
+      owned('new-runtime', 'user', 'NEW RUNTIME', { kind: 'runtime-context', form: 'snapshot', sections: [] }),
+      owned('cleared', 'user', 'Current runtime context: none. Earlier runtime-context snapshots no longer apply.', { kind: 'runtime-context' }),
+      owned('other-plugin', 'user', 'OTHER', { kind: 'plugin', plugin: 'other-plugin' }),
+    ];
+    const original = structuredClone(history);
+    const sessions = Object.fromEntries(['standard', AGENT_PRESET_ID].map(id => [id, {
+      id, header: { agentPreset: id }, snapshotEvents: () => [], deriveMessages: () => history,
+    }]));
+    let apiHandler;
+    const ctx = {
+      sessions: { get: id => sessions[id] },
+      on: (name, fn) => listeners[name] = fn,
+      effect: fn => fn(),
+      webServer: { register: definition => {
+        if (definition.path === '/preset-enhance/api') apiHandler = definition.handler;
+        return () => {};
+      } },
+      llm: { stream: options => listeners['llm/stream'](options, async function* () {
+        calls.push(options);
+        yield { type: 'finish', reason: { kind: 'completed' } };
+      }) },
+    };
+    await apply(ctx, { dataFile: file, agentPresetRoot: join(dir, '.agent-presets') });
+    // Repeat the disabled request to exercise cached compilation, then re-enable
+    // in the same conversation: filtering must never rewrite durable history.
+    for (const enabled of [true, false, false, true]) {
+      await store.transaction(state => {
+        state.presets[0].preset.dsh_system_prompt_enabled = enabled;
+        state.revision++;
+      });
+      for (const sessionId of ['standard', AGENT_PRESET_ID]) {
+        const stripped = !enabled || sessionId === AGENT_PRESET_ID;
+        const kept = stripped ? [history[1], history[3], history[7]] : history;
+        for await (const _ of ctx.llm.stream({ sessionId, provider: 'mock', model: 'mock', messages: history })) {}
+        const expected = ['PRESET', ...kept.map(m => m.content[0].text)];
+        if (!stripped) expected.splice(0, 2, 'PRESET\n\nOLD SYSTEM');
+        assert.deepEqual(calls.at(-1).messages.map(m => m.content[0].text), expected);
+
+        const req = Readable.from([JSON.stringify({ action: 'preview', sessionId,
+          preset: { ...preset, dsh_system_prompt_enabled: enabled } })]);
+        Object.assign(req, { method: 'POST', url: '/preset-enhance/api',
+          headers: { 'content-type': 'application/json', host: 'localhost' } });
+        let status, preview;
+        await apiHandler(req, { writeHead: value => { status = value; },
+          end: value => { preview = JSON.parse(String(value)); } });
+        assert.equal(status, 200, preview?.error);
+        assert.deepEqual(preview.messages.slice(1), kept);
+        assert.equal(preview.messages[0].content[0].text, 'PRESET');
+        assert.deepEqual(history, original);
+      }
+    }
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('selecting a preset rebinds only the current session and drops the previous preset cache', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-preset-switch-'));
+  try {
+    const file = join(dir, 'state.json'), store = new PresetStore(file), listeners = {}, calls = [];
+    await store.transaction(state => {
+      state.presets = ['A', 'B'].map((id, index) => ({ id, name: id, preset: {
+        prompts: [{ identifier: 'p', role: 'system', content: `${id}:{{incvar::count}}:{{user}}` }],
+        prompt_order: [{ character_id: index + 1, order: [{ identifier: 'p', enabled: true }] }],
+      } }));
+      state.selectedPresetId = state.defaultPresetId = 'A';
+      for (const id of ['s', 'other', 'disabled']) state.bindings[id] = {
+        enabled: id !== 'disabled', presetId: 'A', characterId: 1,
+        values: { user: 'Alice' }, markers: { custom: 'keep' },
+      };
+    });
+    const sessions = Object.fromEntries(['s', 'other', 'disabled', 'fresh'].map(id => [id, {
+      id, header: { agentPreset: AGENT_PRESET_ID }, snapshotEvents: () => [],
+    }]));
+    let apiHandler;
+    const ctx = {
+      sessions: { get: id => sessions[id] }, on: (name, fn) => listeners[name] = fn,
+      effect: fn => fn(), webServer: { register: definition => {
+        if (definition.path === '/preset-enhance/api') apiHandler = definition.handler;
+        return () => {};
+      } },
+      llm: { stream: options => listeners['llm/stream'](options, async function* () {
+        calls.push(options); yield { type: 'finish', reason: { kind: 'completed' } };
+      }) },
+    };
+    await apply(ctx, { dataFile: file, agentPresetRoot: join(dir, '.agent-presets') });
+    const send = async (sessionId = 's') => {
+      for await (const _ of ctx.llm.stream({ sessionId, provider: 'mock', model: 'mock',
+        messages: [msg('u', 'user', 'hello')] })) {}
+      return calls.at(-1).messages[0].content[0].text;
+    };
+    const post = async (body, sessionId = '') => {
+      const req = Readable.from([JSON.stringify({ revision: (await store.read()).revision, ...body })]);
+      Object.assign(req, { method: 'POST', url: '/preset-enhance/api?sessionId=' + encodeURIComponent(sessionId),
+        headers: { 'content-type': 'application/json', host: 'localhost' } });
+      let status, result;
+      await apiHandler(req, { writeHead: value => { status = value; }, end: value => { result = JSON.parse(String(value)); } });
+      assert.equal(status, 200, result?.error);
+      return result;
+    };
+    assert.equal(await send(), 'A:1:Alice');
+    assert.equal(await send(), 'A:1:Alice');
+    await post({ action: 'select-preset', id: 'B', sessionId: 's' });
+    const switched = await store.read();
+    assert.equal(switched.sessions.s, undefined);
+    assert.deepEqual(switched.bindings.s, { enabled: true, presetId: 'B', characterId: null,
+      values: { user: 'Alice' }, markers: { custom: 'keep' } });
+    assert.equal(switched.bindings.other.presetId, 'A');
+    assert.equal(await send(), 'B:1:Alice');
+    assert.equal(await send(), 'B:1:Alice');
+    assert.equal(await send('other'), 'A:1:Alice');
+
+    // A sidebar-only choice changes the default, not an existing conversation.
+    await post({ action: 'select-preset', id: 'A' });
+    assert.equal(await send(), 'B:1:Alice');
+    await post({ action: 'select-preset', id: 'B', sessionId: 'disabled' });
+    assert.equal((await new PresetStore(file).read()).bindings.disabled.enabled, false);
+    assert.equal(await send('disabled'), 'hello');
+    await post({ action: 'select-preset', id: 'B', sessionId: 'fresh' });
+    assert.equal(await send('fresh'), 'B:1:User');
+
+    // Explicit Apply also switches the preset without carrying its old macro cache.
+    await post({ action: 'bind', sessionId: 's', binding: { ...switched.bindings.s, presetId: 'A' } });
+    assert.equal(await send(), 'A:1:Alice');
+    const presetB = (await store.read()).presets.find(record => record.id === 'B').preset;
+    for (const body of [
+      { action: 'set-default', id: 'B' },
+      { action: 'save', id: 'B', name: 'Updated B', preset: presetB },
+      { action: 'import', name: 'Imported B', document: presetB },
+    ]) {
+      // The editor carries session context on the URL for global save/import actions.
+      const result = await post(body, 's');
+      const current = await new PresetStore(file).read();
+      assert.equal(current.selectedPresetId, result.id);
+      assert.equal(current.bindings.s.presetId, result.id);
+      assert.equal(result.binding.presetId, result.id);
+      assert.equal(current.bindings.other.presetId, 'A');
+      assert.match(await send(), /^B:\d+:Alice$/);
+    }
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 test('tool catalogs are resolved independently for every built-in and plugin-provided mode', async () => {
   const mounted = [];
   const ctx = {

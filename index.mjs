@@ -21,7 +21,7 @@ export const AGENT_PRESET_ID = 'st-preset';
 const BASE = '/preset-enhance';
 const DSH_SYSTEM_PROMPT = '@deepseek-ai/dsh-system-prompt';
 const digest = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
-const PRESET_COMPILER_VERSION = 4;
+const PRESET_COMPILER_VERSION = 5;
 const ownGet = (object, key) => key !== undefined && Object.hasOwn(object, key) ? object[key] : undefined;
 const assign = (object, key, value) => {
     Object.defineProperty(object, key, { value, writable: true, enumerable: true, configurable: true });
@@ -700,6 +700,28 @@ export async function apply(ctx, config = {}) {
                 }
                 const result = await store.transaction((state) => {
                     assertRevision(state, body);
+                    // A global preset change made inside a conversation also applies there.
+                    // The sidebar has no session context, and other bindings stay pinned.
+                    const selectPreset = (record) => {
+                        const sessionId = body.sessionId ?? url.searchParams.get('sessionId');
+                        if (sessionId) {
+                            const session = ctx.sessions.get(sessionId);
+                            if (!session)
+                                throw new Error('缺少有效的会话 ID');
+                            const previous = ownGet(state.bindings, sessionId);
+                            validateBinding(state, { sessionId, binding: {
+                                    ...previous,
+                                    enabled: previous?.enabled ?? shouldAutoEnable(state, session),
+                                    presetId: record.id,
+                                    characterId: previous?.presetId === record.id ? previous.characterId : null,
+                                } });
+                        }
+                        state.selectedPresetId = record.id;
+                        state.defaultPresetId = record.id;
+                        state.revision++;
+                        return { id: record.id, revision: state.revision,
+                            ...(sessionId ? { binding: ownGet(state.bindings, sessionId) } : {}) };
+                    };
                     if (body.action === 'save' || body.action === 'import') {
                         const imported = body.action === 'import' ? decodePresetDocument(body.document, String(body.name || '未命名预设')) : null;
                         validatePreset(imported?.preset ?? body.preset);
@@ -715,10 +737,7 @@ export async function apply(ctx, config = {}) {
                             state.presets[state.presets.indexOf(old)] = record;
                         else
                             state.presets.push(record);
-                        state.selectedPresetId = record.id;
-                        state.defaultPresetId = record.id;
-                        state.revision++;
-                        return { id: record.id };
+                        return selectPreset(record);
                     }
                     if (body.action === 'delete-preset') {
                         const index = state.presets.findIndex(preset => preset.id === body.id);
@@ -753,19 +772,13 @@ export async function apply(ctx, config = {}) {
                         const record = state.presets.find(p => p.id === body.id);
                         if (!record)
                             throw new Error('请先保存并选择预设');
-                        state.selectedPresetId = record.id;
-                        state.defaultPresetId = record.id;
-                        state.revision++;
-                        return { id: record.id };
+                        return selectPreset(record);
                     }
                     if (body.action === 'select-preset') {
                         const record = state.presets.find(p => p.id === body.id);
                         if (!record)
                             throw new Error('请选择有效的预设');
-                        state.selectedPresetId = record.id;
-                        state.defaultPresetId = record.id;
-                        state.revision++;
-                        return { id: record.id };
+                        return selectPreset(record);
                     }
                     if (body.action === 'apply-package-prefill') {
                         const record = state.presets.find(preset => preset.id === body.id);
@@ -879,6 +892,8 @@ function validateBinding(state, body) {
             throw new Error('角色变量和标记内容必须是文本映射');
         }
     }
+    if (ownGet(state.bindings, body.sessionId)?.presetId !== record?.id)
+        delete state.sessions[body.sessionId];
     assign(state.bindings, body.sessionId, {
         enabled: body.binding.enabled === true,
         presetId: record?.id ?? '',
@@ -1100,7 +1115,10 @@ function shouldAutoEnable(state, session) {
     return createdAt >= since;
 }
 function presetModeHistory(messages) {
+    // Newer DSH sessions persist prompt/runtime messages with dedicated source kinds.
+    // Remove all historical snapshots and cleared markers, retaining the legacy plugin check.
     return messages.filter(message => message.role !== 'system' &&
+        message.source?.kind !== 'system-prompt' && message.source?.kind !== 'runtime-context' &&
         !(message.source?.kind === 'plugin' && message.source.plugin === DSH_SYSTEM_PROMPT));
 }
 function dshSystemPromptText(messages) {

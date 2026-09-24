@@ -45,6 +45,18 @@ function editor(storage = new Map(), fetch = async () => { throw new Error('offl
     hideImportNotice: () => hidePresetNotice(),
     notice: () => ({ hidden: $('preset-notice').hidden, kind: $('preset-notice').dataset.kind }),
     identifiers: () => order().map(item => item.identifier),
+    selectionSetup(waitForSave = Promise.resolve()) {
+      selectedId = 'A';
+      state.binding = { enabled: true, presetId: 'A' };
+      state.selectedPresetId = 'A';
+      globalConfigAutoSaveChain = waitForSave;
+      renderProtocolNotice = renderPresetLibrary = renderConnectionChoice = syncPrefixToolControls =
+        renderAutoModes = syncDraftsWithState = renderToolModes = updateSessionNote = () => {};
+      loadDraft = id => { selectedId = id; };
+    },
+    choose(id) { $('library').value = id; return $('library').onchange(); },
+    reloadSelection: () => reload(),
+    selected: () => selectedId,
     draft: () => toolDraft,
     save: runAutoSave, flush: flushToolDraftKeepalive,
     };
@@ -159,4 +171,40 @@ test('the auto-inserted extraction prompt is announced to the user', () => {
   assert.equal(ui.notice().kind, 'import-extraction');
   ui.hideImportNotice();
   assert.equal(ui.notice().hidden, true, 'dismissing hides it again');
+});
+
+test('library selection waits for older saves and includes the current session', async () => {
+  const requests = [];
+  let finishSave;
+  const saving = new Promise(resolve => { finishSave = resolve; });
+  const ui = editor(new Map(), async (_url, options) => {
+    if (options?.body) {
+      requests.push(JSON.parse(options.body));
+      return { ok: true, json: async () => ({ id: 'B', revision: 2 }) };
+    }
+    return { ok: true, json: async () => ({ revision: 2, presets: [], selectedPresetId: 'B',
+      binding: { enabled: true, presetId: 'B' } }) };
+  });
+  ui.selectionSetup(saving);
+  const switching = ui.choose('B');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(requests.length, 0);
+  finishSave();
+  await switching;
+  assert.deepEqual(requests, [{ revision: 1, action: 'select-preset', id: 'B', sessionId: 's' }]);
+  assert.equal(ui.selected(), 'B');
+  assert.match(ui.get('status').textContent, /当前会话/);
+});
+
+test('reopening the editor shows the session preset before the global default', async () => {
+  let binding = { enabled: true, presetId: 'A' };
+  const ui = editor(new Map(), async () => ({ ok: true, json: async () => ({
+    revision: 2, presets: [], selectedPresetId: 'B', binding,
+  }) }));
+  ui.selectionSetup();
+  await ui.reloadSelection();
+  assert.equal(ui.selected(), 'A');
+  binding = { enabled: false, presetId: '' };
+  await ui.reloadSelection();
+  assert.equal(ui.selected(), 'B');
 });

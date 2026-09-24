@@ -174,7 +174,7 @@ async function reload(id) {
   renderAutoModes();
   syncDraftsWithState();
   renderToolModes(previousToolMode);
-  loadDraft(id ?? state.selectedPresetId ?? binding.presetId ?? '');
+  loadDraft(id ?? (binding.presetId || state.selectedPresetId) ?? '');
   updateSessionNote();
   status('已加载');
 }
@@ -626,6 +626,7 @@ async function persistPresetDraft({ force = false } = {}) {
   const savedRecord = { ...existing, id: savedId, name: String(name || '未命名预设').slice(0, 200), preset: document };
   if (existingIndex >= 0) state.presets[existingIndex] = savedRecord;
   else state.presets.push(savedRecord);
+  if (result.binding) state.binding = structuredClone(result.binding);
   state.selectedPresetId = savedId;
   state.defaultPresetId = savedId;
   state.modeDefaultPresetId = savedId;
@@ -1869,9 +1870,18 @@ $('library').onchange = guard(async () => {
     loadDraft('');
     return;
   }
-  await api({ action: 'select-preset', id });
+  // Finish older binding writes before selecting, so an in-flight auto-save
+  // cannot reapply the previous preset after this selection.
+  cancelGlobalConfigAutoSave();
+  await globalConfigAutoSaveChain;
+  if (presetAutoSaveIsOn()) {
+    await runGlobalConfigAutoSave();
+    if (bindingDirty) throw new Error('会话设置自动保存失败，请重试切换预设');
+  }
+  const result = await configWrite({ action: 'select-preset', id, sessionId });
+  acceptRevision(result);
   await reload(id);
-  status('已切换全局默认注入预设');
+  status(sessionId ? '已切换当前会话与全局默认预设，下一次请求生效' : '已切换全局默认注入预设');
 });
 $('reload').onclick = guard(async () => {
   // 重新加载只刷新提示词预设草稿；未保存的工具/分组草稿会被保留。
