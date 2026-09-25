@@ -6,7 +6,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createMacroContext } from '../lib/macros.mjs';
+import { createRegexRunner } from '../lib/regex-runner.mjs';
 import { compilePreset } from '../lib/preset.mjs';
+import { decodePresetDocument, encodePresetPackage } from '../lib/preset-package.mjs';
 import {
   PREFILL_DEPTH, applyPromptRegex, buildChatDepths, chatTargetOf, depthInWindow, ensureRegexIds, escapeRegexLiteral,
   planRegexScript, rewriteChatText,
@@ -255,4 +257,95 @@ test('the prefill is only rewritten when asked, and emptying it disables the pre
   }, [], { seed: 's' });
   assert.equal(emptied.assistantPrefix.active, false);
   assert.equal(emptied.messages.some(m => m.role === 'assistant'), false);
+});
+
+/* --------------------------------------------------- plan acceptance cases */
+
+test('a tool continuation keeps one floor and the tool-specific prefix is rewritten last', () => {
+  const history = [
+    { id: 'u1', role: 'user', content: [{ type: 'text', text: 'read the file' }] },
+    { id: 'a1', role: 'assistant', content: [{ type: 'text', text: 'reading' }, { type: 'tool-call', name: 'read' }] },
+    { id: 't1', role: 'tool', content: [{ type: 'text', text: 'file contents' }], source: { kind: 'tool' } },
+  ];
+  const scripts = [
+    rule({ scriptName: '用户侧', findRegex: '/read/', replaceString: 'open', placement: 1 }),
+    rule({ scriptName: '助手侧', findRegex: '/reading/', replaceString: 'looking', placement: 2 }),
+  ];
+  const preset = { ...presetWith(scripts, { enabled: true, includePrefill: true }), assistant_prefill: 'reading' };
+  const compiled = compilePreset(preset, history, { seed: 's', postToolPrefix: 'reading now' });
+  // History text of both channels is rewritten, and the tool call survives untouched.
+  assert.equal(compiled.messages.find(m => m.id === 'u1').content[0].text, 'open the file');
+  const assistant = compiled.messages.find(m => m.id === 'a1');
+  assert.equal(assistant.content[0].text, 'looking');
+  assert.equal(assistant.content[1].type, 'tool-call');
+  // The custom prefix after the tool call is what the rules see, because it is chosen first.
+  assert.equal(compiled.messages.at(-1).content[0].text, 'looking now');
+  assert.equal(compiled.assistantPrefix.active, true);
+  assert.deepEqual(compiled.promptRegex.applied, ['用户侧', '助手侧']);
+});
+
+test('non-text blocks are never rewritten or reordered', () => {
+  const scripts = [rule({ scriptName: '正文', findRegex: '/secret/', replaceString: 'public' })];
+  const history = [{
+    id: 'u1', role: 'user',
+    content: [{ type: 'text', text: 'secret' }, { type: 'image', attachmentId: 'a1' }, { type: 'text', text: 'tail' }],
+  }];
+  const compiled = compilePreset(presetWith(scripts), history, { seed: 's' });
+  const content = compiled.messages.find(m => m.id === 'u1').content;
+  assert.equal(content[0].text, 'public');
+  assert.deepEqual(content[1], { type: 'image', attachmentId: 'a1' });
+  assert.equal(content[2].text, 'tail');
+});
+
+test('the preview and the real preparation agree, and neither touches the history', () => {
+  const history = [
+    { id: 'u1', role: 'user', content: [{ type: 'text', text: 'one two' }] },
+    { id: 'a1', role: 'assistant', content: [{ type: 'text', text: 'three' }] },
+  ];
+  const scripts = [rule({ scriptName: '数字', findRegex: '/one/', replaceString: '1' })];
+  const snapshot = JSON.stringify(history);
+  const preview = compilePreset(presetWith(scripts), history, { seed: 'preview' });
+  const request = compilePreset(presetWith(scripts), history, { seed: 'preview' });
+  assert.deepEqual(preview, request);
+  assert.equal(JSON.stringify(history), snapshot);
+  assert.equal(request.messages.find(m => m.id === 'u1').content[0].text, '1 two');
+});
+
+test('an unusable rule is skipped, and a run-time failure commits nothing', () => {
+  const runner = createRegexRunner({ timeoutMs: 3000, maxReplacements: 0 });
+  const local = {};
+  const global = { keep: 'me' };
+  try {
+    // An uncompilable pattern is classified as unusable, so the preparation skips it rather than
+    // failing the send: the plan wants the rule shown and repaired, not the request broken.
+    const skipped = runner.run({
+      segments: [{ text: 'x', target: 'user', depth: 0 }],
+      scripts: [rule({ scriptName: '坏规则', findRegex: '/[/' })],
+      seed: 's', draws: 0, local, global, values: {},
+    });
+    assert.deepEqual(skipped.texts, ['x']);
+    assert.deepEqual(skipped.applied, []);
+
+    // A rule that really fails mid-run aborts the whole preparation and commits nothing.
+    assert.throws(() => runner.run({
+      segments: [{ text: 'foo', target: 'user', depth: 0 }],
+      scripts: [rule({ scriptName: '超限', findRegex: '/foo/' })],
+      seed: 's', draws: 0, local, global, values: {},
+    }), /超限/);
+    assert.deepEqual(local, {});
+    assert.deepEqual(global, { keep: 'me' });
+  } finally { runner.dispose(); }
+});
+
+test('the share format carries the rules and the switches unchanged', () => {
+  const preset = presetWith([rule({ id: 'keep', scriptName: '清理', findRegex: '/x/', replaceString: 'y' })], { enabled: true, includePrefill: true });
+  preset.extensions.other = { untouched: 1 };
+  const document = encodePresetPackage({ id: 'r1', name: '带正则的预设', preset }, {});
+  const back = decodePresetDocument(JSON.parse(JSON.stringify(document)));
+  assert.deepEqual(back.preset.extensions.regex_scripts, preset.extensions.regex_scripts);
+  assert.deepEqual(back.preset.extensions['dsh-preset-enhance'], { promptRegex: { enabled: true, includePrefill: true } });
+  assert.deepEqual(back.preset.extensions.other, { untouched: 1 });
+  assert.deepEqual(readPromptRegexOptions(back.preset), { enabled: true, includePrefill: true });
+  // A second round trip is stable.
+  assert.deepEqual(decodePresetDocument(JSON.parse(JSON.stringify(encodePresetPackage(back, {})))).preset.extensions.regex_scripts, preset.extensions.regex_scripts);
 });
