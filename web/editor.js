@@ -140,6 +140,7 @@ function loadDraft(id) {
   dirty = false;
   renderList();
   renderEditor();
+  renderRegexPanel();
   updateDefaultButton();
   renderPackageTools(record);
   void refreshPrefillWarning();
@@ -2275,7 +2276,13 @@ function downloadJson(document, filename) {
 $('export').onclick = () => downloadJson(preset, `${$('name').value || 'preset'}.json`);
 
 function show(result) {
-  $('warnings').textContent = result.warnings.join('\n');
+  // 请求预览与测试框展示同一份处理摘要：哪些规则在请求副本上命中了。
+  const regex = result.promptRegex;
+  const regexNote = regex
+    ? '提示词正则：' + (regex.enabled ? '已启用' : '未启用') + ' · 规则 ' + regex.rules + ' 条 · 本次命中：'
+      + (regex.applied.join('、') || '（无）')
+    : '';
+  $('warnings').textContent = [regexNote, ...result.warnings].filter(Boolean).join('\n');
   $('output').replaceChildren();
   for (const message of result.messages) {
     const box = document.createElement('div');
@@ -2302,6 +2309,553 @@ $('last').onclick = guard(async () => {
   if (!latest.last) throw new Error('当前会话还没有实际注入记录');
   show(latest.last.result);
 });
+
+/* ---------- 提示词正则：只改写发送给模型的请求副本 ---------- */
+
+// 规则数据沿用酒馆的 extensions.regex_scripts，执行开关放在 extensions['dsh-preset-enhance'].promptRegex。
+// 这里只做数据读写与展示：正则的解析、匹配、替换和深度判定全部走服务端 regex-test（同一条引擎入口），
+// 客户端不实现第二套正则。聊天正文不会写进服务端日志，也不会出现在状态栏里。
+
+const REGEX_NS = 'dsh-preset-enhance';
+const REGEX_PLACEMENT_USER = 1;
+const REGEX_PLACEMENT_AI = 2;
+const REGEX_PREFILL_DEPTH = -1;
+const REGEX_SUBSTITUTE_CHOICES = [['0', 'NONE（默认）'], ['1', 'RAW（先展开宏）'], ['2', 'ESCAPED（只转义宏展开值）']];
+
+let regexSelected = -1;
+let regexPlan = [];
+let regexTestResult = null;
+let regexPlanTimer = null;
+let regexPlanGeneration = 0;
+
+function regexObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+}
+function regexOptions() {
+  const namespace = regexObject(regexObject(preset.extensions)?.[REGEX_NS]);
+  const raw = regexObject(namespace?.promptRegex);
+  return { enabled: raw?.enabled === true, includePrefill: raw?.includePrefill === true };
+}
+/** 合并写入，保留同一个命名空间和其他扩展字段。 */
+function regexWriteOptions(patch) {
+  const extensions = { ...(regexObject(preset.extensions) ?? {}) };
+  const namespace = { ...(regexObject(extensions[REGEX_NS]) ?? {}) };
+  namespace.promptRegex = { ...(regexObject(namespace.promptRegex) ?? {}), ...patch };
+  extensions[REGEX_NS] = namespace;
+  preset.extensions = extensions;
+}
+function regexScripts() {
+  const list = regexObject(preset.extensions)?.regex_scripts;
+  return Array.isArray(list) ? list : [];
+}
+function regexWriteScripts(list) {
+  const extensions = { ...(regexObject(preset.extensions) ?? {}) };
+  extensions.regex_scripts = list;
+  preset.extensions = extensions;
+}
+function regexRuleName(script, index = 0) {
+  const name = typeof script?.scriptName === 'string' ? script.scriptName.trim() : '';
+  if (name) return name;
+  return typeof script?.id === 'string' && script.id ? script.id : '规则 ' + (index + 1);
+}
+function regexPlacementValues(script) {
+  const raw = script?.placement;
+  return (Array.isArray(raw) ? raw : [raw]).filter(value => typeof value === 'number' && Number.isFinite(value));
+}
+function regexTargets(script) {
+  const values = regexPlacementValues(script);
+  const targets = [];
+  if (values.includes(REGEX_PLACEMENT_USER)) targets.push('user');
+  if (values.includes(REGEX_PLACEMENT_AI)) targets.push('assistant');
+  return targets;
+}
+function regexUnsupportedPlacements(script) {
+  return regexPlacementValues(script).filter(value => value !== REGEX_PLACEMENT_USER && value !== REGEX_PLACEMENT_AI);
+}
+function regexTargetLabel(script) {
+  const labels = regexTargets(script).map(target => target === 'user' ? '用户正文' : '助手正文');
+  const unsupported = regexUnsupportedPlacements(script);
+  const base = labels.length ? labels.join(' + ') : '无可用通道';
+  return unsupported.length ? base + '（另有 placement ' + unsupported.join('/') + ' 本版不执行）' : base;
+}
+function regexDepthLabel(script) {
+  const min = typeof script?.minDepth === 'number' && Number.isFinite(script.minDepth) ? script.minDepth : -1;
+  const max = typeof script?.maxDepth === 'number' && Number.isFinite(script.maxDepth) ? script.maxDepth : -1;
+  if (min < 0 && max < 0) return '全部深度';
+  if (min >= 0 && max >= 0) return '深度 ' + min + '–' + max;
+  return min >= 0 ? '深度 ≥ ' + min : '深度 ≤ ' + max;
+}
+/** 补齐缺失或冲突的 ID：已有 ID 不重新生成，新规则不覆盖老规则。 */
+function regexMintId(scripts) {
+  const taken = new Set(scripts.map(script => (typeof script?.id === 'string' ? script.id : '')).filter(Boolean));
+  let index = taken.size + 1;
+  while (taken.has('regex-' + index)) index++;
+  return 'regex-' + index;
+}
+function regexPlanFor(index) {
+  return regexPlan.find(entry => entry.index === index) ?? null;
+}
+function regexMarkChanged(message) {
+  markDirty();
+  scheduleRegexPlan();
+  if (message) status(message + '，保存预设后下一次请求生效');
+}
+function renderRegexPanel() {
+  const options = regexOptions();
+  const scripts = regexScripts();
+  $('regex-enabled').checked = options.enabled;
+  $('regex-include-prefill').checked = options.includePrefill;
+  $('regex-include-prefill').disabled = !options.enabled;
+  $('regex-summary').textContent = scripts.length
+    ? ' · ' + scripts.length + ' 条规则 · ' + (options.enabled ? '已启用' : '未启用')
+    : ' · 尚无规则';
+  // 载入预设后默认选中第一条，编辑器不会停在空面板上。
+  if (!scripts.length) regexSelected = -1;
+  else if (regexSelected < 0 || regexSelected >= scripts.length) regexSelected = 0;
+  renderRegexList();
+  renderRegexEditor();
+  renderRegexSkipped();
+  scheduleRegexPlan();
+}
+function renderRegexList() {
+  const container = $('regex-list');
+  container.replaceChildren();
+  const scripts = regexScripts();
+  if (!scripts.length) {
+    const empty = document.createElement('p');
+    empty.className = 'muted';
+    empty.textContent = '还没有正则规则。可以新增一条，或导入酒馆导出的独立正则 JSON。';
+    container.append(empty);
+    return;
+  }
+  scripts.forEach((script, index) => {
+    const plan = regexPlanFor(index);
+    const row = document.createElement('div');
+    row.className = 'regex-row' + (index === regexSelected ? ' active' : '') + (script.disabled === true ? ' off' : '');
+    const toggle = document.createElement('input');
+    toggle.type = 'checkbox';
+    toggle.checked = script.disabled !== true;
+    toggle.title = '启用这条规则（酒馆的 disabled 字段，显示侧以后也会读它）';
+    toggle.onchange = () => {
+      script.disabled = !toggle.checked;
+      regexMarkChanged(toggle.checked ? '已启用「' + regexRuleName(script, index) + '」' : '已停用「' + regexRuleName(script, index) + '」');
+      renderRegexPanel();
+    };
+    const pick = document.createElement('button');
+    pick.type = 'button';
+    pick.className = 'regex-pick';
+    pick.textContent = (index + 1) + '. ' + regexRuleName(script, index);
+    pick.onclick = () => { regexSelected = index; renderRegexList(); renderRegexEditor(); };
+    const meta = document.createElement('small');
+    meta.textContent = [regexTargetLabel(script), regexDepthLabel(script), plan && !plan.runs ? plan.reason : '']
+      .filter(Boolean).join(' · ');
+    const actions = document.createElement('span');
+    actions.className = 'regex-actions';
+    const actionList = [
+      ['↑', '上移', () => regexMove(index, -1)],
+      ['↓', '下移', () => regexMove(index, 1)],
+      ['复制', '复制为新规则', () => regexDuplicate(index)],
+      ['删除', '删除这条规则', () => regexRemove(index)],
+    ];
+    for (const [label, title, run] of actionList) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = label;
+      button.title = title;
+      button.onclick = run;
+      actions.append(button);
+    }
+    row.append(toggle, pick, meta, actions);
+    container.append(row);
+  });
+}
+function regexField(labelText, control) {
+  const label = document.createElement('label');
+  const text = document.createElement('span');
+  text.textContent = labelText;
+  label.append(text, control);
+  return label;
+}
+function renderRegexEditor() {
+  const box = $('regex-editor');
+  const script = regexScripts()[regexSelected];
+  box.replaceChildren();
+  if (!script) { box.hidden = true; return; }
+  box.hidden = false;
+  const name = document.createElement('input');
+  name.value = typeof script.scriptName === 'string' ? script.scriptName : '';
+  name.placeholder = '规则名称';
+  name.oninput = () => { script.scriptName = name.value; markDirty(); renderRegexList(); };
+  const targetRow = document.createElement('div');
+  targetRow.className = 'row regex-targets';
+  const userBox = document.createElement('input');
+  userBox.type = 'checkbox';
+  userBox.checked = regexTargets(script).includes('user');
+  const aiBox = document.createElement('input');
+  aiBox.type = 'checkbox';
+  aiBox.checked = regexTargets(script).includes('assistant');
+  const writePlacement = () => {
+    // 不认识的 placement（斜杠命令、世界书等）保持原样，只改 user_input / ai_output 两位。
+    const kept = regexUnsupportedPlacements(script);
+    const next = [...kept];
+    if (userBox.checked) next.push(REGEX_PLACEMENT_USER);
+    if (aiBox.checked) next.push(REGEX_PLACEMENT_AI);
+    script.placement = next.length === 1 ? next[0] : next;
+    regexMarkChanged('已更新「' + regexRuleName(script, regexSelected) + '」的作用对象');
+    renderRegexList();
+  };
+  userBox.onchange = writePlacement;
+  aiBox.onchange = writePlacement;
+  targetRow.append(regexField('用户正文', userBox), regexField('助手正文', aiBox));
+  const minDepth = document.createElement('input');
+  minDepth.type = 'number';
+  minDepth.min = '-1';
+  minDepth.value = String(typeof script.minDepth === 'number' && Number.isFinite(script.minDepth) ? script.minDepth : -1);
+  const maxDepth = document.createElement('input');
+  maxDepth.type = 'number';
+  maxDepth.min = '-1';
+  maxDepth.value = String(typeof script.maxDepth === 'number' && Number.isFinite(script.maxDepth) ? script.maxDepth : -1);
+  const writeDepth = () => {
+    const parse = input => {
+      const value = Number(input.value);
+      return Number.isFinite(value) ? value : -1;
+    };
+    script.minDepth = parse(minDepth);
+    script.maxDepth = parse(maxDepth);
+    markDirty();
+    scheduleRegexPlan();
+  };
+  minDepth.onchange = writeDepth;
+  maxDepth.onchange = writeDepth;
+  const depthRow = document.createElement('div');
+  depthRow.className = 'row regex-depths';
+  depthRow.append(regexField('最小深度（-1 不限）', minDepth), regexField('最大深度（-1 不限）', maxDepth));
+  const find = document.createElement('textarea');
+  find.rows = 2;
+  find.spellcheck = false;
+  find.value = typeof script.findRegex === 'string' ? script.findRegex : '';
+  find.placeholder = '/pattern/flags 或普通模式字符串';
+  find.oninput = () => { script.findRegex = find.value; markDirty(); scheduleRegexPlan(); renderRegexList(); };
+  const replace = document.createElement('textarea');
+  replace.rows = 2;
+  replace.spellcheck = false;
+  replace.value = typeof script.replaceString === 'string' ? script.replaceString : '';
+  replace.placeholder = '支持 {{match}}、$0、$1、$<name>';
+  replace.oninput = () => { script.replaceString = replace.value; markDirty(); renderRegexList(); };
+  const advanced = document.createElement('details');
+  advanced.className = 'regex-advanced';
+  const advancedSummary = document.createElement('summary');
+  advancedSummary.textContent = '高级选项（酒馆字段）';
+  const trim = document.createElement('textarea');
+  trim.rows = 2;
+  trim.spellcheck = false;
+  trim.value = Array.isArray(script.trimStrings) ? script.trimStrings.join('\n') : '';
+  trim.placeholder = '每行一个字面量，插入捕获前剔除；留空表示不剔除';
+  trim.oninput = () => {
+    const parts = trim.value.split('\n').filter(part => part.length > 0);
+    if (parts.length) script.trimStrings = parts;
+    else delete script.trimStrings;
+    markDirty();
+  };
+  const substitute = document.createElement('select');
+  for (const [value, label] of REGEX_SUBSTITUTE_CHOICES) {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = label;
+    substitute.append(option);
+  }
+  const currentSubstitute = typeof script.substituteRegex === 'number' && Number.isFinite(script.substituteRegex)
+    ? String(script.substituteRegex)
+    : String(script.substituteRegex ?? 'NONE').toUpperCase();
+  substitute.value = ['0', '1', '2'].includes(currentSubstitute) ? currentSubstitute
+    : currentSubstitute === 'RAW' ? '1' : currentSubstitute === 'ESCAPED' ? '2' : '0';
+  substitute.onchange = () => { script.substituteRegex = Number(substitute.value); markDirty(); };
+  const runOnEdit = document.createElement('input');
+  runOnEdit.type = 'checkbox';
+  runOnEdit.checked = script.runOnEdit === true;
+  runOnEdit.onchange = () => { script.runOnEdit = runOnEdit.checked; markDirty(); };
+  const markdownOnly = document.createElement('input');
+  markdownOnly.type = 'checkbox';
+  markdownOnly.checked = script.markdownOnly === true;
+  markdownOnly.onchange = () => { script.markdownOnly = markdownOnly.checked; markDirty(); scheduleRegexPlan(); renderRegexList(); };
+  const idField = document.createElement('input');
+  idField.value = typeof script.id === 'string' ? script.id : '';
+  idField.onchange = () => { script.id = idField.value.trim() || regexMintId(regexScripts()); markDirty(); };
+  const raw = document.createElement('pre');
+  raw.className = 'regex-raw';
+  raw.textContent = JSON.stringify(script, null, 2);
+  const advancedNote = document.createElement('p');
+  advancedNote.className = 'muted';
+  advancedNote.textContent = '未在这里列出的字段原样保留，导出时不会丢失。';
+  advanced.append(
+    advancedSummary,
+    regexField('trimStrings（每行一个）', trim),
+    regexField('substituteRegex', substitute),
+    regexField('runOnEdit（原样保存，本版不据此执行）', runOnEdit),
+    regexField('markdownOnly（显示侧提示）', markdownOnly),
+    regexField('规则 ID', idField),
+    advancedNote,
+    raw,
+  );
+  const title = document.createElement('strong');
+  title.textContent = '规则 ' + (regexSelected + 1) + ' · ' + regexRuleName(script, regexSelected);
+  box.append(
+    title,
+    regexField('规则名称', name),
+    targetRow,
+    depthRow,
+    regexField('查找式 findRegex', find),
+    regexField('替换串 replaceString', replace),
+    advanced,
+  );
+  const plan = regexPlanFor(regexSelected);
+  if (plan && !plan.runs && plan.reason) {
+    const why = document.createElement('p');
+    why.className = 'regex-why';
+    why.textContent = '本版不会执行这条规则：' + plan.reason;
+    box.append(why);
+  }
+}
+function renderRegexSkipped() {
+  const body = $('regex-skipped-body');
+  body.replaceChildren();
+  const scripts = regexScripts();
+  const groups = [
+    ['已停用', (script, index) => script.disabled === true || (regexPlanFor(index)?.reason === '已停用')],
+    ['当前不支持', (script, index) => script.disabled !== true && regexPlanFor(index)?.supported === false],
+    ['深度窗口外', (script, index) => script.disabled !== true && regexPlanFor(index)?.supported === true && regexPlanFor(index)?.runs === false],
+  ];
+  let total = 0;
+  for (const [label, match] of groups) {
+    const entries = scripts.map((script, index) => ({ script, index })).filter(({ script, index }) => match(script, index));
+    if (!entries.length) continue;
+    total += entries.length;
+    const head = document.createElement('strong');
+    head.textContent = label + '（' + entries.length + '）';
+    const list = document.createElement('ul');
+    for (const { script, index } of entries) {
+      const item = document.createElement('li');
+      const plan = regexPlanFor(index);
+      item.textContent = (index + 1) + '. ' + regexRuleName(script, index) + '：' + (plan?.reason || '原因未读取到');
+      list.append(item);
+    }
+    body.append(head, list);
+  }
+  $('regex-skipped-count').textContent = total ? ' · ' + total + ' 条' : ' · 无';
+  if (!total) {
+    const none = document.createElement('p');
+    none.className = 'muted';
+    none.textContent = regexPlan.length
+      ? '当前所有规则都可能在请求副本上执行（是否命中取决于正文和深度，请在测试框里验证）。'
+      : '尚未读取到适用性信息，点“刷新适用性”重试。';
+    body.append(none);
+  }
+}
+function renderRegexTest() {
+  const note = $('regex-test-note');
+  const box = $('regex-test-result');
+  box.replaceChildren();
+  if (!regexTestResult) { note.textContent = ''; return; }
+  const data = regexTestResult;
+  note.textContent = '使用深度 ' + data.depth + '（作用对象：' + (data.target === 'prefill' ? '预填充 → assistant' : data.target)
+    + '）' + (data.notes.length ? ' · ' + data.notes.join('；') : '');
+  const result = data.result;
+  if (!result) return;
+  const summary = document.createElement('p');
+  summary.className = 'muted';
+  summary.textContent = result.changed
+    ? '替换前后不同 · 命中 ' + result.applied.length + ' 条规则：' + (result.applied.join('、') || '（无）')
+    : '替换前后相同 · 没有规则命中';
+  const diff = document.createElement('div');
+  diff.className = 'regex-diff';
+  for (const [label, value] of [['替换前', result.before], ['替换后', result.after]]) {
+    const side = document.createElement('div');
+    const head = document.createElement('b');
+    head.textContent = label;
+    const pre = document.createElement('pre');
+    pre.textContent = value;
+    side.append(head, pre);
+    diff.append(side);
+  }
+  const hits = document.createElement('ul');
+  hits.className = 'regex-hits';
+  for (const rule of data.rules) {
+    const item = document.createElement('li');
+    const state = !rule.applicable
+      ? (rule.reason || '本版不执行')
+      : rule.hit ? '命中' : '未命中（规则可执行，但这段文本没有匹配）';
+    item.className = rule.applicable ? (rule.hit ? 'hit' : 'miss') : 'skip';
+    item.textContent = state + '：' + rule.name;
+    hits.append(item);
+  }
+  box.append(summary, diff, hits);
+}
+function scheduleRegexPlan() {
+  if (regexPlanTimer !== null) clearTimeout(regexPlanTimer);
+  regexPlanTimer = setTimeout(() => {
+    regexPlanTimer = null;
+    void refreshRegexPlan();
+  }, 300);
+}
+/** 适用性来自服务端的 planRegexScript：客户端只显示它的结论，不自己判断通道和深度。 */
+async function refreshRegexPlan() {
+  const generation = ++regexPlanGeneration;
+  const scripts = regexScripts();
+  if (!scripts.length) {
+    regexPlan = [];
+    renderRegexSkipped();
+    renderRegexList();
+    return;
+  }
+  const depth = Number($('regex-test-depth').value);
+  try {
+    const result = await api({ action: 'regex-test', preset, text: '', target: 'user',
+      depth: Number.isFinite(depth) ? depth : 0 });
+    if (generation !== regexPlanGeneration) return;
+    regexPlan = Array.isArray(result.rules) ? result.rules : [];
+    renderRegexSkipped();
+    renderRegexList();
+  } catch (error) {
+    if (generation !== regexPlanGeneration) return;
+    $('regex-skipped-count').textContent = ' · 读取失败';
+    status('正则适用性读取失败：' + error.message, true);
+  }
+}
+function regexAdd() {
+  const scripts = regexScripts();
+  const script = {
+    id: regexMintId(scripts),
+    scriptName: '新规则 ' + (scripts.length + 1),
+    findRegex: '',
+    replaceString: '',
+    placement: [REGEX_PLACEMENT_USER, REGEX_PLACEMENT_AI],
+    disabled: false,
+    promptOnly: true,
+    minDepth: -1,
+    maxDepth: -1,
+  };
+  scripts.push(script);
+  regexWriteScripts(scripts);
+  regexSelected = scripts.length - 1;
+  regexMarkChanged('已新增正则规则');
+  renderRegexPanel();
+}
+function regexRemove(index) {
+  const scripts = regexScripts();
+  if (!scripts[index]) return;
+  if (!confirm('删除规则「' + regexRuleName(scripts[index], index) + '」？')) return;
+  scripts.splice(index, 1);
+  regexWriteScripts(scripts);
+  regexSelected = Math.min(regexSelected, scripts.length - 1);
+  regexMarkChanged('已删除正则规则');
+  renderRegexPanel();
+}
+function regexMove(index, delta) {
+  const scripts = regexScripts();
+  const target = index + delta;
+  if (target < 0 || target >= scripts.length) return;
+  const [moved] = scripts.splice(index, 1);
+  scripts.splice(target, 0, moved);
+  regexWriteScripts(scripts);
+  regexSelected = target;
+  regexMarkChanged('已调整规则顺序');
+  renderRegexPanel();
+}
+function regexDuplicate(index) {
+  const scripts = regexScripts();
+  const source = scripts[index];
+  if (!source) return;
+  const copy = structuredClone(source);
+  copy.id = regexMintId(scripts);
+  copy.scriptName = regexRuleName(source, index) + ' 副本';
+  scripts.splice(index + 1, 0, copy);
+  regexWriteScripts(scripts);
+  regexSelected = index + 1;
+  regexMarkChanged('已复制正则规则');
+  renderRegexPanel();
+}
+/** 只导入规则数组：总开关和“同时处理预填充”保持用户原来的状态。 */
+function regexImportRules(parsed) {
+  const list = Array.isArray(parsed) ? parsed
+    : Array.isArray(parsed?.regex_scripts) ? parsed.regex_scripts
+      : Array.isArray(parsed?.scripts) ? parsed.scripts
+        : parsed && typeof parsed === 'object' && (typeof parsed.findRegex === 'string' || typeof parsed.replaceString === 'string') ? [parsed]
+          : null;
+  if (!list) throw new Error('没有找到正则规则数组（支持 ST 导出的数组、regex_scripts 或单条规则对象）');
+  const scripts = regexScripts();
+  let added = 0, updated = 0, skipped = 0;
+  for (const raw of list) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) { skipped++; continue; }
+    const incoming = structuredClone(raw);
+    const id = typeof incoming.id === 'string' ? incoming.id.trim() : '';
+    const existing = id ? scripts.findIndex(script => script.id === id) : -1;
+    if (existing >= 0) {
+      scripts[existing] = incoming;
+      updated++;
+      continue;
+    }
+    const twin = scripts.findIndex(script => script.scriptName === incoming.scriptName
+      && script.findRegex === incoming.findRegex && script.replaceString === incoming.replaceString);
+    if (twin >= 0) { skipped++; continue; }
+    if (!id) incoming.id = regexMintId(scripts);
+    scripts.push(incoming);
+    added++;
+  }
+  regexWriteScripts(scripts);
+  return { added, updated, skipped };
+}
+$('regex-enabled').onchange = () => {
+  regexWriteOptions({ enabled: $('regex-enabled').checked });
+  regexMarkChanged($('regex-enabled').checked ? '已启用提示词正则' : '已停用提示词正则');
+  renderRegexPanel();
+};
+$('regex-include-prefill').onchange = () => {
+  regexWriteOptions({ includePrefill: $('regex-include-prefill').checked });
+  regexMarkChanged($('regex-include-prefill').checked ? '已开启同时处理预填充' : '已关闭同时处理预填充');
+  renderRegexPanel();
+};
+$('regex-add').onclick = () => regexAdd();
+$('regex-refresh').onclick = guard(async () => {
+  await refreshRegexPlan();
+  renderRegexTest();
+  status('已刷新正则适用性');
+});
+$('regex-import').onchange = guard(async () => {
+  const file = $('regex-import').files?.[0];
+  try {
+    if (!file) return;
+    const parsed = JSON.parse(await file.text());
+    // 规则数据原样进入预设：不补 promptOnly、不打开总开关，显示侧规则不会因此开始改写请求。
+    const result = regexImportRules(parsed);
+    regexMarkChanged('已导入正则规则：新增 ' + result.added + ' 条，更新 ' + result.updated + ' 条，跳过 ' + result.skipped + ' 条（总开关保持原状态）');
+    renderRegexPanel();
+  } finally {
+    $('regex-import').value = '';
+  }
+});
+$('regex-test-run').onclick = guard(async () => {
+  const depth = Number($('regex-test-depth').value);
+  const result = await api({
+    action: 'regex-test',
+    preset,
+    text: $('regex-test-text').value,
+    target: $('regex-test-target').value,
+    depth: Number.isFinite(depth) ? depth : 0,
+  });
+  regexTestResult = result;
+  regexPlan = Array.isArray(result.rules) ? result.rules : regexPlan;
+  renderRegexSkipped();
+  renderRegexList();
+  renderRegexTest();
+  status('正则测试完成：命中 ' + (result.result?.applied.length ?? 0) + ' 条规则');
+});
+$('regex-test-clear').onclick = () => {
+  regexTestResult = null;
+  renderRegexTest();
+};
+$('regex-test-target').onchange = () => {
+  if ($('regex-test-target').value === 'prefill') $('regex-test-depth').value = String(REGEX_PREFILL_DEPTH);
+};
 
 $('preset-auto-save').checked = storageGet(PRESET_AUTO_SAVE_KEY, '0') === '1';
 $('tool-auto-save').checked = storageGet(TOOL_AUTO_SAVE_KEY, '0') === '1';

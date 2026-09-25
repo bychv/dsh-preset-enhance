@@ -52,5 +52,37 @@
 .protocol-help:hover .protocol-help-body,.protocol-help:focus-visible .protocol-help-body,.protocol-help:focus-within .protocol-help-body{display:block}
 #protocol-notice.warning{border-color:#665535;background:#251f16}#protocol-notice ul{margin:5px 0;padding-left:20px}#protocol-notice li{margin:2px 0}
 
+.regex-card{margin-top:18px}
+.regex-toolbar{flex-wrap:wrap;margin:10px 0}
+.regex-list{max-height:340px;overflow:auto;border:1px solid #293a43;border-radius:8px;padding:6px;background:#16212a}
+.regex-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:5px 6px;border-radius:7px;margin:2px 0}
+.regex-row.active{background:#25423f}
+.regex-row.off .regex-pick{opacity:.55;text-decoration:line-through}
+.regex-row input[type=checkbox]{accent-color:#9edfc7;margin:0}
+.regex-pick{flex:1 1 180px;text-align:left;border:0;background:transparent;padding:2px 4px}
+.regex-row small{flex:1 1 100%;color:#8da2ae;font-size:11px;overflow-wrap:anywhere}
+.regex-actions{display:flex;gap:4px;margin-left:auto}
+.regex-actions button{padding:2px 8px;font-size:12px}
+.regex-editor{border:1px solid #293a43;border-radius:8px;padding:10px;margin:10px 0;background:#131d24}
+.regex-editor>strong{display:block;margin-bottom:6px;color:#b9d9d2}
+.regex-targets,.regex-depths{flex-wrap:wrap}
+.regex-targets label,.regex-depths label{flex-direction:row;align-items:center;gap:6px}
+.regex-depths input{width:110px}
+.regex-advanced{margin-top:8px;border-top:1px dashed #2a3942;padding-top:8px}
+.regex-advanced>summary{cursor:pointer;color:#a6bac6;font-size:12px}
+.regex-raw{max-height:200px;overflow:auto;font-size:11px;background:#10171d;border:1px solid #293a43;border-radius:6px;padding:6px}
+.regex-why{border:1px solid #665535;border-radius:7px;background:#251f16;color:#edcf8d;padding:6px 9px;font-size:12px;margin:8px 0 0}
+.regex-skipped,.regex-tester{margin-top:10px;border-top:1px dashed #2a3942;padding-top:8px}
+.regex-skipped>summary,.regex-tester>summary{cursor:pointer;color:#b9d9d2;font-weight:650}
+.regex-skipped strong{display:block;margin-top:8px;color:#b9d9d2}
+.regex-skipped ul,.regex-hits{margin:4px 0;padding-left:18px}
+.regex-skipped li{color:#c9a86a;font-size:12px}
+.regex-tester textarea{font-family:ui-monospace,Consolas,monospace}
+.regex-diff{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px;margin:8px 0}
+.regex-diff pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#10171d;border:1px solid #293a43;border-radius:6px;padding:6px;margin:4px 0 0;max-height:220px;overflow:auto}
+.regex-hits li{font-size:12px}
+.regex-hits li.hit{color:#a9dfcc}
+.regex-hits li.miss{color:#8da2ae}
+.regex-hits li.skip{color:#c9a86a}
 #prefill-settings { border: 0; padding: 0; margin: 0; min-width: 0; }
 #prefill-settings:disabled { opacity: .55; }

@@ -10,7 +10,7 @@ import { createProtocolObserver } from './lib/protocol.mjs';
 import { connectionSelection, selectConnection, sessionConnection, writeConnectionProtocol } from './lib/connection.mjs';
 import type { ConnectionProtocol, ConnectionProtocolInfo } from './lib/connection.mjs';
 import { installToolRestrictions } from './lib/tool-restrictions.mjs';
-import { disposeRegexRunner } from './lib/regex-runner.mjs';
+import { disposeRegexRunner, getRegexRunner } from './lib/regex-runner.mjs';
 import { createPresetModeController, modeCapability, readModeToolCatalog } from './lib/modes.mjs';
 import {
   attributionHeaders, createDeepSeekChatAdapter, DEEPSEEK_CHAT_PROVIDER_ID, DeepSeekFileStore,
@@ -1298,11 +1298,11 @@ export async function ensurePresetAgentMode(root: string, standard: string | und
 /**
  * Plan and run the preset's prompt-side regex over one text for the workbench test box.
  *
- * The request path runs lib/prompt-regex.mjs through compilePreset; a standalone text box has no
- * history to compile, so this entry calls the same engine functions (planRegexScript /
- * applyPromptRegex) with the same macro engine and the depth the user asked for. It is deliberately
- * the only extra regex entry: nothing here re-implements matching, replacement or depth windows,
- * and the text is never written to a log - only returned to the caller that supplied it.
+ * The request path runs the same engine through compilePreset; a standalone text box has no history
+ * to compile, so this entry hands one segment to the shared worker at the depth the user asked for.
+ * That keeps the box inside the same timeout, cancellation and size limits a real request has, and it
+ * is deliberately the only extra regex entry: nothing here re-implements matching, replacement or
+ * depth windows, and the text is never written to a log - only returned to the caller that supplied it.
  */
 function regexTestResult(body: Record<string, any>): Record<string, unknown> {
   const preset = validatePreset(body.preset);
@@ -1317,7 +1317,8 @@ function regexTestResult(body: Record<string, any>): Record<string, unknown> {
   // Same macro context compilePreset builds for a one-message view of the session's values.
   const ctx = createMacroContext({
     local: body.options?.local, global: body.options?.global,
-    random: seededRandom('regex-test'),
+    // Seeded rather than a captured closure, so the worker can replay the macro stream exactly.
+    seed: 'regex-test',
     values: {
       user: 'User', char: 'Assistant',
       lastusermessage: requested === 'user' ? text : '',
@@ -1344,7 +1345,16 @@ function regexTestResult(body: Record<string, any>): Record<string, unknown> {
   if (requested === 'prefill' && !options.includePrefill) notes.push('未开启“同时处理预填充”：真实请求不会处理预填充');
   // The box always runs the rules so a user can author them; the notes above say whether a real
   // request would run them (the switches are reported, not silently applied).
-  const ran = applyPromptRegex(text, scripts, ctx, { target, depth });
+  const prepared = getRegexRunner().run({
+    segments: [{ text, target, depth }],
+    scripts,
+    seed: ctx.seed,
+    draws: ctx.draws,
+    local: { ...ctx.local },
+    global: { ...ctx.global },
+    values: { ...ctx.values },
+  });
+  const ran = { text: prepared.texts[0] ?? text, applied: prepared.applied };
   const rules = plan.map(entry => ({ ...entry, applicable: entry.runs && entry.targets.includes(target),
     hit: ran.applied.includes(entry.name) }));
   return {
