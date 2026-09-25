@@ -157,6 +157,39 @@
 
 `tools.version` 为未知整数（例如未来插件写出的 `2`）时，包仍可正常导入、编辑和再次导出，内容原样保留；只有应用会被拒绝，并显示“分享文件的工具子版本 N 暂不支持应用”。
 
+## 提示词正则
+
+预设可以携带酒馆格式的正则脚本，由工作台编辑，并随预设一起保存、导出和分享。
+
+```json
+{
+  "extensions": {
+    "regex_scripts": [
+      {
+        "id": "r1",
+        "scriptName": "清理括号",
+        "findRegex": "/【(.+?)】/g",
+        "replaceString": "$1",
+        "placement": 1,
+        "promptOnly": true,
+        "markdownOnly": false,
+        "disabled": false,
+        "trimStrings": [],
+        "substituteRegex": 0
+      }
+    ],
+    "dsh-preset-enhance": {
+      "promptRegex": { "enabled": false, "includePrefill": false }
+    }
+  }
+}
+```
+
+- 规则按 `regex_scripts` 的数组顺序执行，`id` 是稳定标识；本插件不使用的酒馆字段原样保留。
+- `dsh-preset-enhance.promptRegex` 是本插件的执行开关：两个字段缺省都是关闭，字段缺失同样按关闭处理，因此升级不会让已有预设突然改写请求。
+- 本版本只执行同时满足以下条件的规则：`promptOnly` 为真、`placement` 含 `1`（用户输入）或 `2`（助手输出）、`disabled` 非真且查找式非空。显示侧、斜杠命令、世界书与推理位置的规则会保留并说明原因，但不执行。
+- 规则只作用于发送给模型的请求副本：聊天显示、会话记录与原始预设都不会被改写。
+- 导入导出要求语义无损：JSON 的空白、缩进与键顺序不保证逐字节相同，未知字段与未执行的规则一并保留。
 ## 工作台导入、编辑与导出
 
 1. “导入 JSON”自动识别 ST JSON 和本格式。导入分享文件后，将原预设保存为当前默认，并保存附带配置（包括包内工具预设和分组）。附带接口配置和工具配置都不会自动应用。
