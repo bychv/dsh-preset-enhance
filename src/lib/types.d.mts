@@ -121,6 +121,13 @@ export interface AssistantPrefix {
   messageId?: string;
 }
 
+/** What one compilation did with the preset's prompt-side regex rules. */
+export interface PromptRegexSummary {
+  enabled: boolean;
+  includePrefill: boolean;
+  rules: number;
+  applied: string[];
+}
 export interface CompiledPreset {
   messages: HostMessage[];
   entries: CompiledEntry[];
@@ -128,6 +135,8 @@ export interface CompiledPreset {
   local: Record<string, string>;
   global: Record<string, string>;
   warnings: string[];
+  /** Present on every compilation so the workbench can show rule state. */
+  promptRegex?: PromptRegexSummary;
 }
 
 export interface CompilePresetOptions {

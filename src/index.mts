@@ -41,7 +41,7 @@ export const AGENT_PRESET_ID = 'st-preset';
 const BASE = '/preset-enhance';
 const DSH_SYSTEM_PROMPT = '@deepseek-ai/dsh-system-prompt';
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
-const PRESET_COMPILER_VERSION = 5;
+const PRESET_COMPILER_VERSION = 6;
 const ownGet = <T,>(object: Record<string, T>, key: string | undefined): T | undefined =>
   key !== undefined && Object.hasOwn(object, key) ? object[key] : undefined;
 const assign = <T,>(object: Record<string, T>, key: string, value: T): void => {

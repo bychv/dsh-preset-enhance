@@ -9,7 +9,8 @@
  */
 import { renderMacros } from './macros.mjs';
 import type {
-  MacroContext, PromptRegexOptions, PromptRegexTarget, RegexScript, RegexScriptPlan, SillyTavernPreset,
+  ContentBlock, HostMessage, MacroContext, PromptRegexOptions, PromptRegexTarget, RegexScript,
+  RegexScriptPlan, SillyTavernPreset,
 } from './types.mjs';
 
 /** Extension namespace this plugin owns inside one preset. */
@@ -245,10 +246,16 @@ export function renderReplacement(template: string, match: RegexMatch, trim: rea
   return out;
 }
 
+export interface RegexRunResult {
+  text: string;
+  /** True when the pattern matched: the workbench lists hit rules, not merely enabled ones. */
+  matched: boolean;
+}
+
 /** Run one rule over one text. Macro expansion happens last, over the replacement result. */
-export function runRegexScript(text: string, script: RegexScript, ctx: MacroContext): string {
+export function runRegexScriptDetailed(text: string, script: RegexScript, ctx: MacroContext): RegexRunResult {
   const find = typeof script.findRegex === 'string' ? script.findRegex : '';
-  if (script.disabled === true || !find || text === '') return text;
+  if (script.disabled === true || !find || text === '') return { text, matched: false };
   const pattern = expandPattern(find, script.substituteRegex, ctx);
   let regex: RegExp;
   try { regex = compilePattern(pattern); }
@@ -261,7 +268,12 @@ export function runRegexScript(text: string, script: RegexScript, ctx: MacroCont
   const replaced = text.replace(regex, (...args: unknown[]) => { matched = true; return renderReplacement(template, matchOf(args), trim); });
   // Only a real replacement pulls in the macro pass: expanding macros inside untouched chat text
   // is not what the request copy is for.
-  return matched ? renderMacros(replaced, ctx) : text;
+  return { text: matched ? renderMacros(replaced, ctx) : text, matched };
+}
+
+/** Same run, for callers that only need the text. */
+export function runRegexScript(text: string, script: RegexScript, ctx: MacroContext): string {
+  return runRegexScriptDetailed(text, script, ctx).text;
 }
 
 export interface PromptRegexResult {
@@ -284,8 +296,91 @@ export function applyPromptRegex(
   for (const script of scripts) {
     const plan = planRegexScript(script, options.depth);
     if (!plan.runs || !plan.targets.includes(options.target)) continue;
-    out = runRegexScript(out, script, ctx);
-    applied.push(regexName(script));
+    const run = runRegexScriptDetailed(out, script, ctx);
+    out = run.text;
+    if (run.matched) applied.push(regexName(script));
   }
   return { text: out, applied };
+}
+
+/* ------------------------------------------------------- request integration */
+
+/** Host rows that are never chat text: tool plumbing plus prompt/runtime snapshots. */
+const NON_CHAT_SOURCES = new Set(['tool', 'system-prompt', 'runtime-context']);
+
+/**
+ * Chat role one history row contributes, or undefined when it is not chat text.
+ * A user-role tool result and a host runtime snapshot are not user input.
+ */
+export function chatTargetOf(message: HostMessage): PromptRegexTarget | undefined {
+  if (message.role !== 'user' && message.role !== 'assistant') return undefined;
+  if (typeof message.source?.kind === 'string' && NON_CHAT_SOURCES.has(message.source.kind)) return undefined;
+  const blocks = message.content ?? [];
+  if (blocks.some(block => block.type === 'tool-result')) return undefined;
+  if (!blocks.some(block => block.type === 'text' && (block.text ?? '').length > 0)) return undefined;
+  return message.role === 'user' ? 'user' : 'assistant';
+}
+
+/**
+ * Chat floors counted from the newest real chat message upwards, keyed by message id.
+ *
+ * This message view carries no host turn field, so floors are derived structurally rather than
+ * from array positions: tool plumbing, prompt and runtime rows are transparent, and the text
+ * segments of one assistant turn that tool execution split apart share a floor.
+ * Rows without an id cannot be looked up later and are skipped.
+ */
+export function buildChatDepths(history: readonly HostMessage[]): Map<string, number> {
+  const depths = new Map<string, number>();
+  let depth = -1;
+  let previousWasAssistant = false;
+  for (let index = history.length - 1; index >= 0; index--) {
+    const message = history[index];
+    if (message === undefined || chatTargetOf(message) === undefined) continue;
+    if (message.role === 'assistant') {
+      if (!previousWasAssistant) depth += 1;
+      previousWasAssistant = true;
+    } else {
+      depth += 1;
+      previousWasAssistant = false;
+    }
+    if (typeof message.id === 'string' && message.id) depths.set(message.id, depth);
+  }
+  return depths;
+}
+
+export interface ChatTextRewrite {
+  message: HostMessage;
+  applied: string[];
+  /** True when nothing but empty text is left, so a pure-text row can be omitted. */
+  empty: boolean;
+}
+
+/**
+ * Rewrite one message's own text. Adjacent text blocks form one matchable segment, and matching
+ * never continues across an image, reasoning or tool block, or across messages.
+ */
+export function rewriteChatText(
+  message: HostMessage,
+  scripts: readonly RegexScript[],
+  ctx: MacroContext,
+  options: { target: PromptRegexTarget; depth: number },
+): ChatTextRewrite {
+  const content: ContentBlock[] = [];
+  const applied: string[] = [];
+  let buffer: string[] = [];
+  const flush = (): void => {
+    if (buffer.length === 0) return;
+    const joined = buffer.join('\n');
+    const result = applyPromptRegex(joined, scripts, ctx, options);
+    for (const name of result.applied) if (!applied.includes(name)) applied.push(name);
+    content.push({ type: 'text', text: result.text });
+    buffer = [];
+  };
+  for (const block of message.content ?? []) {
+    if (block.type === 'text') buffer.push(block.text ?? '');
+    else { flush(); content.push(block); }
+  }
+  flush();
+  const empty = content.every(block => block.type === 'text' && (block.text ?? '').length === 0);
+  return { message: { ...message, content }, applied, empty };
 }

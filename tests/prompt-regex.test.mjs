@@ -6,8 +6,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createMacroContext } from '../lib/macros.mjs';
+import { compilePreset } from '../lib/preset.mjs';
 import {
-  PREFILL_DEPTH, applyPromptRegex, depthInWindow, ensureRegexIds, escapeRegexLiteral, planRegexScript,
+  PREFILL_DEPTH, applyPromptRegex, buildChatDepths, chatTargetOf, depthInWindow, ensureRegexIds, escapeRegexLiteral,
+  planRegexScript, rewriteChatText,
   readPromptRegexOptions, readRegexScripts, regexPlacement, runRegexScript, writePromptRegexOptions,
 } from '../lib/prompt-regex.mjs';
 
@@ -145,4 +147,112 @@ test('a rule outside its depth window is reported as skipped, not unsupported', 
   assert.equal(plan.runs, false);
   assert.equal(plan.supported, true);
   assert.match(plan.reason, /深度/);
+});
+
+/* ------------------------------------------------------------ integration */
+
+const presetWith = (scripts, switches = { enabled: true }) => ({
+  prompts: [{ identifier: 'main', name: '主提示', content: '系统提示' }],
+  prompt_order: [{ character_id: '100001', order: [{ identifier: 'main', enabled: true }, { identifier: 'chatHistory', enabled: true }] }],
+  extensions: { regex_scripts: scripts, 'dsh-preset-enhance': { promptRegex: switches } },
+});
+
+test('chat floors ignore tool plumbing and share one floor across a split assistant turn', () => {
+  const history = [
+    { id: 'sys', role: 'system', content: [{ type: 'text', text: 'host snapshot' }], source: { kind: 'runtime-context' } },
+    { id: 'u1', role: 'user', content: [{ type: 'text', text: 'first' }] },
+    { id: 'a1', role: 'assistant', content: [{ type: 'text', text: 'thinking' }, { type: 'tool-call', name: 'read' }] },
+    { id: 't1', role: 'tool', content: [{ type: 'text', text: 'tool output' }], source: { kind: 'tool' } },
+    { id: 'a2', role: 'assistant', content: [{ type: 'text', text: 'answer' }] },
+    { id: 'u2', role: 'user', content: [{ type: 'text', text: 'second' }] },
+  ];
+  const depths = buildChatDepths(history);
+  assert.equal(depths.get('u2'), 0);
+  assert.equal(depths.get('a2'), 1);
+  // The same turn, split by a tool call, keeps one floor.
+  assert.equal(depths.get('a1'), 1);
+  assert.equal(depths.get('u1'), 2);
+  assert.equal(depths.has('sys'), false);
+  assert.equal(depths.has('t1'), false);
+});
+
+test('only real chat text is a regex target', () => {
+  assert.equal(chatTargetOf({ role: 'user', content: [{ type: 'text', text: 'hi' }] }), 'user');
+  assert.equal(chatTargetOf({ role: 'assistant', content: [{ type: 'text', text: 'hi' }, { type: 'tool-call', name: 'read' }] }), 'assistant');
+  assert.equal(chatTargetOf({ role: 'user', content: [{ type: 'tool-result', toolCallId: 'c1', content: [] }] }), undefined);
+  assert.equal(chatTargetOf({ role: 'tool', content: [{ type: 'text', text: 'out' }], source: { kind: 'tool' } }), undefined);
+  assert.equal(chatTargetOf({ role: 'developer', content: [{ type: 'text', text: 'note' }] }), undefined);
+  assert.equal(chatTargetOf({ role: 'user', content: [{ type: 'text', text: 'x' }], source: { kind: 'system-prompt' } }), undefined);
+  assert.equal(chatTargetOf({ role: 'assistant', content: [{ type: 'image', attachmentId: 'a' }] }), undefined);
+});
+
+test('adjacent text blocks match as one segment and never across an image', () => {
+  // The join is a newline, so only a joined pair can match this pattern.
+  const scripts = [rule({ findRegex: '/aaa\nbbb/', replaceString: 'MATCH', placement: 1 })];
+  const joined = rewriteChatText(
+    { id: 'm1', role: 'user', content: [{ type: 'text', text: 'aaa' }, { type: 'text', text: 'bbb' }] },
+    scripts, ctx(), { target: 'user', depth: 0 });
+  assert.equal(joined.message.content.length, 1);
+  assert.equal(joined.message.content[0].text, 'MATCH');
+  const split = rewriteChatText(
+    { id: 'm2', role: 'user', content: [{ type: 'text', text: 'aaa' }, { type: 'image', attachmentId: 'a' }, { type: 'text', text: 'bbb' }] },
+    scripts, ctx(), { target: 'user', depth: 0 });
+  assert.equal(split.message.content[0].text, 'aaa');
+  assert.equal(split.message.content[1].type, 'image');
+  assert.equal(split.message.content[2].text, 'bbb');
+});
+
+test('compilePreset rewrites a request copy only when the switch is on', () => {
+  const history = [
+    { id: 'u1', role: 'user', content: [{ type: 'text', text: 'Hello world' }] },
+    { id: 'a1', role: 'assistant', content: [{ type: 'text', text: 'Hello back' }] },
+  ];
+  const scripts = [
+    rule({ scriptName: '用户侧', findRegex: '/Hello/', replaceString: 'Goodbye', placement: 1 }),
+    rule({ scriptName: '助手侧', findRegex: '/Hello/', replaceString: 'Cheers', placement: 2 }),
+  ];
+  const off = compilePreset(presetWith(scripts, { enabled: false }), history, { seed: 's' });
+  assert.equal(off.messages.find(m => m.id === 'u1').content[0].text, 'Hello world');
+  assert.deepEqual(off.promptRegex, { enabled: false, includePrefill: false, rules: 0, applied: [] });
+
+  const on = compilePreset(presetWith(scripts), history, { seed: 's' });
+  assert.equal(on.messages.find(m => m.id === 'u1').content[0].text, 'Goodbye world');
+  assert.equal(on.messages.find(m => m.id === 'a1').content[0].text, 'Cheers back');
+  assert.deepEqual(on.promptRegex.applied, ['用户侧', '助手侧']);
+  // The caller's history is untouched: the next request starts from the original text again.
+  assert.equal(history[0].content[0].text, 'Hello world');
+});
+
+test('depth windows reach the right floors inside a compilation', () => {
+  const history = [
+    { id: 'u1', role: 'user', content: [{ type: 'text', text: 'older' }] },
+    { id: 'a1', role: 'assistant', content: [{ type: 'text', text: 'reply' }] },
+    { id: 'u2', role: 'user', content: [{ type: 'text', text: 'older2' }] },
+  ];
+  // u2 is floor 0, u1 is floor 2 (one assistant turn in between).
+  const scripts = [rule({ scriptName: '仅最近', findRegex: '/older/', replaceString: 'recent', placement: 1, maxDepth: 0 })];
+  const compiled = compilePreset(presetWith(scripts), history, { seed: 's' });
+  assert.equal(compiled.messages.find(m => m.id === 'u2').content[0].text, 'recent2');
+  assert.equal(compiled.messages.find(m => m.id === 'u1').content[0].text, 'older');
+  assert.deepEqual(compiled.promptRegex.applied, ['仅最近']);
+});
+
+test('the prefill is only rewritten when asked, and emptying it disables the prefix', () => {
+  const scripts = [rule({ scriptName: '前缀', findRegex: '/PRE/', replaceString: 'POST', placement: 2 })];
+  const preset = { ...presetWith(scripts, { enabled: true, includePrefill: false }), assistant_prefill: 'PRE fill' };
+
+  const kept = compilePreset(preset, [], { seed: 's' });
+  assert.equal(kept.messages.at(-1).content[0].text, 'PRE fill');
+  assert.equal(kept.assistantPrefix.active, true);
+
+  const rewritten = compilePreset({ ...preset, extensions: { ...preset.extensions, 'dsh-preset-enhance': { promptRegex: { enabled: true, includePrefill: true } } } }, [], { seed: 's' });
+  assert.equal(rewritten.messages.at(-1).content[0].text, 'POST fill');
+  assert.equal(rewritten.assistantPrefix.active, true);
+
+  const emptied = compilePreset({
+    ...presetWith([rule({ scriptName: '清空', findRegex: '/^PRE fill$/', replaceString: '', placement: 2 })], { enabled: true, includePrefill: true }),
+    assistant_prefill: 'PRE fill',
+  }, [], { seed: 's' });
+  assert.equal(emptied.assistantPrefix.active, false);
+  assert.equal(emptied.messages.some(m => m.role === 'assistant'), false);
 });

@@ -1,4 +1,5 @@
 import { createMacroContext, renderMacros, seededRandom } from './macros.mjs';
+import { PREFILL_DEPTH, buildChatDepths, chatTargetOf, readPromptRegexOptions, readRegexScripts, regexName, rewriteChatText } from './prompt-regex.mjs';
 import type {
   AssistantPrefix, CompiledEntry, CompiledPreset, CompilePresetOptions, HostMessage,
   PresetPrompt, PromptOrderEntry, SillyTavernPreset,
@@ -127,6 +128,37 @@ export function compilePreset(preset: SillyTavernPreset, history: HostMessage[] 
       messages[messages.length - 1] = prefixed;
     }
   }
+  // Prompt-side regex runs last, over this request copy only: history text by chat floor, and the
+  // final prefix when the preset asks for it. Everything above stayed on the original text, and the
+  // session history is never written back.
+  const promptRegex = readPromptRegexOptions(preset);
+  const regexScripts = promptRegex.enabled ? readRegexScripts(preset) : [];
+  const regexApplied = new Set<string>();
+  if (regexScripts.length > 0) {
+    const depths = buildChatDepths(history);
+    for (let index = messages.length - 1; index >= 0; index--) {
+      const message = messages[index] as HostMessage | undefined;
+      const depth = message === undefined ? undefined : depths.get(message.id ?? '');
+      const target = message === undefined || depth === undefined ? undefined : chatTargetOf(message);
+      if (message === undefined || depth === undefined || target === undefined) continue;
+      const rewritten = rewriteChatText(message, regexScripts, ctx, { target, depth });
+      for (const name of rewritten.applied) regexApplied.add(name);
+      // A pure-text row the rules emptied leaves the request copy; its floor was already mapped.
+      if (rewritten.empty) { messages.splice(index, 1); continue; }
+      messages[index] = rewritten.message;
+    }
+    const prefix = messages.at(-1);
+    if (promptRegex.includePrefill && prefix !== undefined && prefix.role === 'assistant' &&
+        prefix.source?.kind === 'plugin' && prefix.source.plugin === 'dsh-preset-enhance') {
+      const rewritten = rewriteChatText(prefix, regexScripts, ctx, { target: 'assistant', depth: PREFILL_DEPTH });
+      for (const name of rewritten.applied) regexApplied.add(name);
+      if (rewritten.empty) messages.splice(messages.length - 1, 1);
+      else messages[messages.length - 1] = rewritten.message;
+    }
+    // An emptied prefix must not leave a paid assistant turn behind, and the tail decides both the
+    // prefix flag and the activation key below.
+    tail = messages.at(-1);
+  }
   const assistantPrefix: AssistantPrefix = tail?.role === 'assistant' && tail.source?.kind === 'plugin' &&
     tail.source.plugin === 'dsh-preset-enhance' && textOf(tail).length > 0 ? {
       active: true,
@@ -136,5 +168,6 @@ export function compilePreset(preset: SillyTavernPreset, history: HostMessage[] 
   if (assistantPrefix.active) {
     ctx.warnings.push('最终注入消息是 assistant 预填充；请使用支持 assistant prefix 续写的接口');
   }
-  return { messages, entries, assistantPrefix, local: { ...ctx.local }, global: { ...ctx.global }, warnings: [...new Set(ctx.warnings)] };
+  return { messages, entries, assistantPrefix, local: { ...ctx.local }, global: { ...ctx.global }, warnings: [...new Set(ctx.warnings)],
+    promptRegex: { enabled: promptRegex.enabled, includePrefill: promptRegex.includePrefill, rules: regexScripts.length, applied: regexScripts.map(script => regexName(script)).filter((name, index, all) => regexApplied.has(name) && all.indexOf(name) === index) } };
 }
