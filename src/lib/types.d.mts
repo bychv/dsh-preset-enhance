@@ -18,6 +18,10 @@ export interface MacroContext {
   values: Record<string, string>;
   warnings: string[];
   random: () => number;
+  /** Present when the stream is seeded; a worker replays its draws to continue it. */
+  seed?: string;
+  /** Macro random draws consumed so far. */
+  draws: number;
   remaining: number;
   /** Applied to every macro-resolved value at the outermost level only (regex ESCAPED mode). */
   valueTransform?: (value: string) => string;
@@ -28,7 +32,81 @@ export interface MacroContextOptions {
   global?: Record<string, string>;
   values?: Record<string, unknown>;
   random?: () => number;
+  /** Seeded stream; omit only when the caller supplies its own random function. */
+  seed?: string | number;
   valueTransform?: (value: string) => string;
+}
+
+/** One matchable text run, with the channel and floor it belongs to. */
+export interface RegexSegment {
+  text: string;
+  target: PromptRegexTarget;
+  depth: number;
+}
+
+/** Bounds enforced around one worker task. */
+export interface RegexLimits {
+  timeoutMs: number;
+  maxRules: number;
+  maxSegmentChars: number;
+  maxTotalChars: number;
+  maxOutputChars: number;
+  maxReplacements: number;
+}
+
+/** One preparation handed to the worker: every segment of a single compilation. */
+export interface RegexPreparation {
+  segments: RegexSegment[];
+  scripts: readonly RegexScript[];
+  seed?: string;
+  draws: number;
+  local: Record<string, string>;
+  global: Record<string, string>;
+  values: Record<string, string>;
+}
+
+export interface RegexPreparationResult {
+  texts: string[];
+  applied: string[];
+  local: Record<string, string>;
+  global: Record<string, string>;
+  draws: number;
+  warnings: string[];
+  replacements: number;
+}
+
+export interface RegexWorkerTask extends RegexPreparation {
+  limits: RegexLimits;
+  /** Two int32 slots: 0 signals completion, 1 carries the running rule index. */
+  control: SharedArrayBuffer;
+}
+
+export interface RegexWorkerReply {
+  ok: boolean;
+  error?: string;
+  rule?: string;
+  texts?: string[];
+  applied?: string[];
+  local?: Record<string, string>;
+  global?: Record<string, string>;
+  draws?: number;
+  warnings?: string[];
+  replacements?: number;
+}
+
+export interface RegexRunnerOptions {
+  timeoutMs?: number;
+  maxRules?: number;
+  maxSegmentChars?: number;
+  maxTotalChars?: number;
+  maxOutputChars?: number;
+  maxReplacements?: number;
+}
+
+/** Synchronous, terminable regex execution. */
+export interface RegexRunner {
+  run(preparation: RegexPreparation): RegexPreparationResult;
+  dispose(): void;
 }
 
 /* ---------------------------------------------------------- prompt regex */

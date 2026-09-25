@@ -10,6 +10,7 @@ import { createProtocolObserver } from './lib/protocol.mjs';
 import { connectionSelection, selectConnection, sessionConnection, writeConnectionProtocol } from './lib/connection.mjs';
 import type { ConnectionProtocol, ConnectionProtocolInfo } from './lib/connection.mjs';
 import { installToolRestrictions } from './lib/tool-restrictions.mjs';
+import { disposeRegexRunner } from './lib/regex-runner.mjs';
 import { createPresetModeController, modeCapability, readModeToolCatalog } from './lib/modes.mjs';
 import {
   attributionHeaders, createDeepSeekChatAdapter, DEEPSEEK_CHAT_PROVIDER_ID, DeepSeekFileStore,
@@ -17,6 +18,8 @@ import {
 } from './vendor/deepseek-chat/index.mjs';
 import type { LlmErrorFactory, RequestImageAttachment } from './vendor/deepseek-chat/index.mjs';
 import { adaptPresetForMessages } from './lib/messages.mjs';
+import { applyPromptRegex, planRegexScript, PREFILL_DEPTH, readPromptRegexOptions, readRegexScripts, regexName } from './lib/prompt-regex.mjs';
+import { createMacroContext, seededRandom } from './lib/macros.mjs';
 import {
   clearPresetEnhanceUnavailableReason, markPresetEnhanceActive, setPresetEnhanceUnavailableReason,
 } from './lib/availability.mjs';
@@ -32,7 +35,7 @@ import type {
 } from './host-types.mjs';
 import type {
   CompiledPreset, PresetBinding, PresetRecord, PresetState, SessionCompilation,
-  ToolCatalogMap, ToolCatalogRow, ToolPolicy, ToolPreset, ToolPresetDraft, ToolSelection,
+  PromptRegexTarget, ToolCatalogMap, ToolCatalogRow, ToolPolicy, ToolPreset, ToolPresetDraft, ToolSelection,
 } from './lib/types.mjs';
 
 export const name = 'preset-enhance';
@@ -157,6 +160,8 @@ export async function apply(ctx: PluginContext, config: PluginConfig = {}) {
   // never be mounted against a plugin that is not actually injecting.
   const releaseAvailability = markPresetEnhanceActive();
   ctx.effect(() => () => releaseAvailability(), 'preset-enhance: mode availability');
+  // Regex rules run in a worker; stopping the plugin must not leave it running.
+  ctx.effect(() => () => disposeRegexRunner(), 'preset-enhance: prompt regex runner');
 
   const lifecycle = createPluginLifecycle();
   const routed = new WeakSet();
@@ -497,6 +502,10 @@ export async function apply(ctx: PluginContext, config: PluginConfig = {}) {
             ...body.options, seed: 'preview',
           }));
         }
+
+        // The workbench test box. Regular expressions, the placement/depth plan and the macro engine
+        // all come from the same modules a request uses; nothing returns or logs the chat text.
+        if (body.action === 'regex-test') return respond(res, 200, regexTestResult(body));
 
         if (body.action === 'export-package') {
           const state = (await store.read()) as PresetState;
@@ -1284,6 +1293,70 @@ export async function ensurePresetAgentMode(root: string, standard: string | und
   await writeManagedFile(join(destination, 'preset.yml'), template);
   await writeManagedFile(join(destination, 'agent.cordis.yml'), composition);
   return destination;
+}
+
+/**
+ * Plan and run the preset's prompt-side regex over one text for the workbench test box.
+ *
+ * The request path runs lib/prompt-regex.mjs through compilePreset; a standalone text box has no
+ * history to compile, so this entry calls the same engine functions (planRegexScript /
+ * applyPromptRegex) with the same macro engine and the depth the user asked for. It is deliberately
+ * the only extra regex entry: nothing here re-implements matching, replacement or depth windows,
+ * and the text is never written to a log - only returned to the caller that supplied it.
+ */
+function regexTestResult(body: Record<string, any>): Record<string, unknown> {
+  const preset = validatePreset(body.preset);
+  const options = readPromptRegexOptions(preset);
+  const scripts = readRegexScripts(preset);
+  const requested: 'user' | 'assistant' | 'prefill' =
+    body.target === 'assistant' || body.target === 'prefill' ? body.target : 'user';
+  const target: PromptRegexTarget = requested === 'prefill' ? 'assistant' : requested;
+  const text = typeof body.text === 'string' ? body.text : '';
+  const depth = Number.isInteger(body.depth) ? body.depth
+    : requested === 'prefill' ? PREFILL_DEPTH : 0;
+  // Same macro context compilePreset builds for a one-message view of the session's values.
+  const ctx = createMacroContext({
+    local: body.options?.local, global: body.options?.global,
+    random: seededRandom('regex-test'),
+    values: {
+      user: 'User', char: 'Assistant',
+      lastusermessage: requested === 'user' ? text : '',
+      lastcharmessage: requested === 'user' ? '' : text,
+      lastmessage: text,
+      ...body.options?.values,
+    },
+  });
+  const plan = scripts.map((script, index) => {
+    const entry = planRegexScript(script, depth);
+    return {
+      index,
+      id: typeof script.id === 'string' ? script.id : '',
+      name: regexName(script),
+      runs: entry.runs,
+      supported: entry.supported,
+      targets: entry.targets,
+      unsupportedPlacements: entry.unsupportedPlacements,
+      reason: entry.reason,
+    };
+  });
+  const notes: string[] = [];
+  if (!options.enabled) notes.push('总开关未开启：真实请求不会执行任何规则，下面是规则本身的效果');
+  if (requested === 'prefill' && !options.includePrefill) notes.push('未开启“同时处理预填充”：真实请求不会处理预填充');
+  // The box always runs the rules so a user can author them; the notes above say whether a real
+  // request would run them (the switches are reported, not silently applied).
+  const ran = applyPromptRegex(text, scripts, ctx, { target, depth });
+  const rules = plan.map(entry => ({ ...entry, applicable: entry.runs && entry.targets.includes(target),
+    hit: ran.applied.includes(entry.name) }));
+  return {
+    enabled: options.enabled,
+    includePrefill: options.includePrefill,
+    target: requested,
+    depth,
+    appliedTarget: target,
+    rules,
+    notes,
+    result: { before: text, after: ran.text, applied: ran.applied, changed: ran.text !== text },
+  };
 }
 
 function previewHistory(ctx: PluginContext, body: Record<string, any>): HostMessage[] {

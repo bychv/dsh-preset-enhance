@@ -10,7 +10,7 @@
 import { renderMacros } from './macros.mjs';
 import type {
   ContentBlock, HostMessage, MacroContext, PromptRegexOptions, PromptRegexTarget, RegexScript,
-  RegexScriptPlan, SillyTavernPreset,
+  RegexScriptPlan, RegexSegment, SillyTavernPreset,
 } from './types.mjs';
 
 /** Extension namespace this plugin owns inside one preset. */
@@ -250,12 +250,14 @@ export interface RegexRunResult {
   text: string;
   /** True when the pattern matched: the workbench lists hit rules, not merely enabled ones. */
   matched: boolean;
+  /** Number of matches replaced, so a caller can bound replacements. */
+  replacements: number;
 }
 
 /** Run one rule over one text. Macro expansion happens last, over the replacement result. */
 export function runRegexScriptDetailed(text: string, script: RegexScript, ctx: MacroContext): RegexRunResult {
   const find = typeof script.findRegex === 'string' ? script.findRegex : '';
-  if (script.disabled === true || !find || text === '') return { text, matched: false };
+  if (script.disabled === true || !find || text === '') return { text, matched: false, replacements: 0 };
   const pattern = expandPattern(find, script.substituteRegex, ctx);
   let regex: RegExp;
   try { regex = compilePattern(pattern); }
@@ -265,10 +267,11 @@ export function runRegexScriptDetailed(text: string, script: RegexScript, ctx: M
   // Global and sticky regexes carry lastIndex between calls; every run starts from the beginning.
   if (regex.global || regex.sticky) regex.lastIndex = 0;
   let matched = false;
-  const replaced = text.replace(regex, (...args: unknown[]) => { matched = true; return renderReplacement(template, matchOf(args), trim); });
+  let replacements = 0;
+  const replaced = text.replace(regex, (...args: unknown[]) => { matched = true; replacements += 1; return renderReplacement(template, matchOf(args), trim); });
   // Only a real replacement pulls in the macro pass: expanding macros inside untouched chat text
   // is not what the request copy is for.
-  return { text: matched ? renderMacros(replaced, ctx) : text, matched };
+  return { text: matched ? renderMacros(replaced, ctx) : text, matched, replacements };
 }
 
 /** Same run, for callers that only need the text. */
@@ -354,10 +357,49 @@ export interface ChatTextRewrite {
   /** True when nothing but empty text is left, so a pure-text row can be omitted. */
   empty: boolean;
 }
+/** One matchable piece of a message: a run of adjacent text blocks, or a passthrough block. */
+type ChatPiece = { run: number } | { block: ContentBlock };
+
+/** A message split for matching: its runs in order, plus how to rebuild it. */
+export interface ChatMessagePlan {
+  message: HostMessage;
+  segments: RegexSegment[];
+  pieces: ChatPiece[];
+}
 
 /**
- * Rewrite one message's own text. Adjacent text blocks form one matchable segment, and matching
- * never continues across an image, reasoning or tool block, or across messages.
+ * Split one message into matchable runs. Adjacent text blocks form one run, and a run never
+ * continues across an image, reasoning or tool block, or across messages.
+ */
+export function planChatMessage(message: HostMessage, target: PromptRegexTarget, depth: number): ChatMessagePlan {
+  const segments: RegexSegment[] = [];
+  const pieces: ChatPiece[] = [];
+  let buffer: string[] = [];
+  const flush = (): void => {
+    if (buffer.length === 0) return;
+    pieces.push({ run: segments.length });
+    segments.push({ text: buffer.join(String.fromCharCode(10)), target, depth });
+    buffer = [];
+  };
+  for (const block of message.content ?? []) {
+    if (block.type === 'text') buffer.push(block.text ?? '');
+    else { flush(); pieces.push({ block }); }
+  }
+  flush();
+  return { message, segments, pieces };
+}
+
+/** Put rewritten run texts back into a message. */
+export function applyChatSegments(plan: ChatMessagePlan, texts: readonly string[]): { message: HostMessage; empty: boolean } {
+  const content: ContentBlock[] = plan.pieces.map(piece =>
+    'block' in piece ? piece.block : { type: 'text' as const, text: texts[piece.run] ?? '' });
+  const empty = content.every(block => block.type === 'text' && (block.text ?? '').length === 0);
+  return { message: { ...plan.message, content }, empty };
+}
+
+/**
+ * Rewrite one message in process. The compile path instead plans every message of one request,
+ * sends all runs to the worker in a single task, and applies the returned texts.
  */
 export function rewriteChatText(
   message: HostMessage,
@@ -365,22 +407,12 @@ export function rewriteChatText(
   ctx: MacroContext,
   options: { target: PromptRegexTarget; depth: number },
 ): ChatTextRewrite {
-  const content: ContentBlock[] = [];
+  const plan = planChatMessage(message, options.target, options.depth);
   const applied: string[] = [];
-  let buffer: string[] = [];
-  const flush = (): void => {
-    if (buffer.length === 0) return;
-    const joined = buffer.join('\n');
-    const result = applyPromptRegex(joined, scripts, ctx, options);
+  const texts = plan.segments.map(segment => {
+    const result = applyPromptRegex(segment.text, scripts, ctx, options);
     for (const name of result.applied) if (!applied.includes(name)) applied.push(name);
-    content.push({ type: 'text', text: result.text });
-    buffer = [];
-  };
-  for (const block of message.content ?? []) {
-    if (block.type === 'text') buffer.push(block.text ?? '');
-    else { flush(); content.push(block); }
-  }
-  flush();
-  const empty = content.every(block => block.type === 'text' && (block.text ?? '').length === 0);
-  return { message: { ...message, content }, applied, empty };
+    return result.text;
+  });
+  return { ...applyChatSegments(plan, texts), applied };
 }

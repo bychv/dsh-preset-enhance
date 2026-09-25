@@ -2,13 +2,19 @@
 import type { MacroContext, MacroContextOptions } from './types.mjs';
 
 export function createMacroContext(options: MacroContextOptions = {}): MacroContext {
-  return {
+  const seed = options.seed === undefined ? undefined : String(options.seed);
+  const source = options.random ?? (seed === undefined ? Math.random : seededRandom(seed));
+  const ctx: MacroContext = {
     local: Object.assign(Object.create(null) as Record<string, string>, options.local),
     global: Object.assign(Object.create(null) as Record<string, string>, options.global),
     values: Object.fromEntries(Object.entries(options.values ?? {}).map(([key, value]) => [key.toLowerCase(), String(value)])),
-    warnings: [], random: options.random ?? Math.random, remaining: 10000,
+    warnings: [], remaining: 10000, draws: 0,
+    // Counted so a worker can rebuild this exact stream before it continues the run.
+    random: () => { ctx.draws += 1; return source(); },
+    ...seed === undefined ? {} : { seed },
     ...options.valueTransform === undefined ? {} : { valueTransform: options.valueTransform },
   };
+  return ctx;
 }
 
 export function renderMacros(input: string, ctx: MacroContext = createMacroContext(), level = 0): string {

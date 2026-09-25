@@ -1,5 +1,7 @@
-import { createMacroContext, renderMacros, seededRandom } from './macros.mjs';
-import { PREFILL_DEPTH, buildChatDepths, chatTargetOf, readPromptRegexOptions, readRegexScripts, regexName, rewriteChatText } from './prompt-regex.mjs';
+import { createMacroContext, renderMacros } from './macros.mjs';
+import { PREFILL_DEPTH, applyChatSegments, buildChatDepths, chatTargetOf, planChatMessage, readPromptRegexOptions, readRegexScripts, regexName } from './prompt-regex.mjs';
+import type { ChatMessagePlan } from './prompt-regex.mjs';
+import { getRegexRunner } from './regex-runner.mjs';
 import type {
   AssistantPrefix, CompiledEntry, CompiledPreset, CompilePresetOptions, HostMessage,
   PresetPrompt, PromptOrderEntry, SillyTavernPreset,
@@ -66,8 +68,7 @@ function textOf(message: HostMessage | undefined): string {
 export function compilePreset(preset: SillyTavernPreset, history: HostMessage[] = [], options: CompilePresetOptions = {}): CompiledPreset {
   validatePreset(preset);
   const last = (role: 'user' | 'assistant') => textOf(history.findLast(m => m.role === role && (role !== 'user' || m.source?.kind !== 'tool')));
-  const ctx = createMacroContext({ local: options.local, global: options.global,
-    random: seededRandom(options.seed ?? 'preview'), values: {
+  const ctx = createMacroContext({ local: options.local, global: options.global, seed: options.seed ?? 'preview', values: {
       user: 'User', char: 'Assistant', lastusermessage: last('user'), lastcharmessage: last('assistant'),
       lastmessage: textOf(history.at(-1)), ...options.values,
     } });
@@ -129,35 +130,62 @@ export function compilePreset(preset: SillyTavernPreset, history: HostMessage[] 
     }
   }
   // Prompt-side regex runs last, over this request copy only: history text by chat floor, and the
-  // final prefix when the preset asks for it. Everything above stayed on the original text, and the
-  // session history is never written back.
+  // final prefix when the preset asks for it. The whole preparation goes to one worker task, so a
+  // runaway rule is terminated instead of freezing the harness, and the session history above is
+  // never written back.
   const promptRegex = readPromptRegexOptions(preset);
   const regexScripts = promptRegex.enabled ? readRegexScripts(preset) : [];
   const regexApplied = new Set<string>();
   if (regexScripts.length > 0) {
     const depths = buildChatDepths(history);
-    for (let index = messages.length - 1; index >= 0; index--) {
+    const planned: { plan: ChatMessagePlan; index: number }[] = [];
+    for (let index = 0; index < messages.length; index++) {
       const message = messages[index] as HostMessage | undefined;
       const depth = message === undefined ? undefined : depths.get(message.id ?? '');
       const target = message === undefined || depth === undefined ? undefined : chatTargetOf(message);
       if (message === undefined || depth === undefined || target === undefined) continue;
-      const rewritten = rewriteChatText(message, regexScripts, ctx, { target, depth });
-      for (const name of rewritten.applied) regexApplied.add(name);
-      // A pure-text row the rules emptied leaves the request copy; its floor was already mapped.
-      if (rewritten.empty) { messages.splice(index, 1); continue; }
-      messages[index] = rewritten.message;
+      planned.push({ plan: planChatMessage(message, target, depth), index });
     }
     const prefix = messages.at(-1);
-    if (promptRegex.includePrefill && prefix !== undefined && prefix.role === 'assistant' &&
-        prefix.source?.kind === 'plugin' && prefix.source.plugin === 'dsh-preset-enhance') {
-      const rewritten = rewriteChatText(prefix, regexScripts, ctx, { target: 'assistant', depth: PREFILL_DEPTH });
-      for (const name of rewritten.applied) regexApplied.add(name);
-      if (rewritten.empty) messages.splice(messages.length - 1, 1);
-      else messages[messages.length - 1] = rewritten.message;
+    const prefill = promptRegex.includePrefill && prefix !== undefined && prefix.role === 'assistant' &&
+      prefix.source?.kind === 'plugin' && prefix.source.plugin === 'dsh-preset-enhance'
+      ? planChatMessage(prefix, 'assistant', PREFILL_DEPTH)
+      : undefined;
+    if (planned.length > 0 || prefill !== undefined) {
+      const segments = [...planned.flatMap(entry => entry.plan.segments), ...(prefill?.segments ?? [])];
+      const result = getRegexRunner().run({ segments, scripts: regexScripts, seed: ctx.seed, draws: ctx.draws,
+        local: { ...ctx.local }, global: { ...ctx.global }, values: { ...ctx.values } });
+      // Rules and their macros ran in the worker: adopt its variable state before returning, so a
+      // variable a replacement set is visible to the next compilation.
+      ctx.local = { ...result.local };
+      ctx.global = { ...result.global };
+      ctx.draws = result.draws;
+      for (const warning of result.warnings) ctx.warnings.push(warning);
+      for (const name of result.applied) regexApplied.add(name);
+      let cursor = 0;
+      const rebuilt: { index: number; message: HostMessage; empty: boolean }[] = [];
+      for (const entry of planned) {
+        const count = entry.plan.segments.length;
+        const texts = result.texts.slice(cursor, cursor + count);
+        cursor += count;
+        const out = applyChatSegments(entry.plan, texts);
+        rebuilt.push({ index: entry.index, message: out.message, empty: out.empty });
+      }
+      // Highest index first, so the remaining indices stay valid.
+      for (const entry of rebuilt.sort((left, right) => right.index - left.index)) {
+        if (entry.empty) messages.splice(entry.index, 1);
+        else messages[entry.index] = entry.message;
+      }
+      if (prefill !== undefined) {
+        const texts = result.texts.slice(cursor, cursor + prefill.segments.length);
+        const out = applyChatSegments(prefill, texts);
+        if (out.empty) messages.splice(messages.length - 1, 1);
+        else messages[messages.length - 1] = out.message;
+      }
+      // An emptied prefix must not leave a paid assistant turn behind, and the tail decides both
+      // the prefix flag and the activation key below.
+      tail = messages.at(-1);
     }
-    // An emptied prefix must not leave a paid assistant turn behind, and the tail decides both the
-    // prefix flag and the activation key below.
-    tail = messages.at(-1);
   }
   const assistantPrefix: AssistantPrefix = tail?.role === 'assistant' && tail.source?.kind === 'plugin' &&
     tail.source.plugin === 'dsh-preset-enhance' && textOf(tail).length > 0 ? {
