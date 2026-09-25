@@ -7,6 +7,7 @@ export function createMacroContext(options: MacroContextOptions = {}): MacroCont
     global: Object.assign(Object.create(null) as Record<string, string>, options.global),
     values: Object.fromEntries(Object.entries(options.values ?? {}).map(([key, value]) => [key.toLowerCase(), String(value)])),
     warnings: [], random: options.random ?? Math.random, remaining: 10000,
+    ...options.valueTransform === undefined ? {} : { valueTransform: options.valueTransform },
   };
 }
 
@@ -85,7 +86,9 @@ export function renderMacros(input: string, ctx: MacroContext = createMacroConte
     } else if (name === 'newline') value = '\n';
     else if (name === 'reverse') value = [...(args[0] ?? '')].reverse().join('');
     else if (name !== 'noop') value = ctx.values[name] ?? '';
-    out += value;
+    // Only the outermost level transforms: nested expansions keep their own text, so an escaped
+    // value is escaped once instead of once per nesting level.
+    out += ctx.valueTransform && level === 0 ? ctx.valueTransform(value) : value;
     if (out.length > 2_000_000) throw new Error('宏展开结果超过 2 MB');
   }
   return out;

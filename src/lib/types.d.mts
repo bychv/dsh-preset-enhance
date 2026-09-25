@@ -19,6 +19,8 @@ export interface MacroContext {
   warnings: string[];
   random: () => number;
   remaining: number;
+  /** Applied to every macro-resolved value at the outermost level only (regex ESCAPED mode). */
+  valueTransform?: (value: string) => string;
 }
 
 export interface MacroContextOptions {
@@ -26,6 +28,47 @@ export interface MacroContextOptions {
   global?: Record<string, string>;
   values?: Record<string, unknown>;
   random?: () => number;
+  valueTransform?: (value: string) => string;
+}
+
+/* ---------------------------------------------------------- prompt regex */
+
+/** One Tavern regex script as stored in a preset; unknown fields survive a round trip. */
+export interface RegexScript {
+  id?: string;
+  scriptName?: string;
+  findRegex?: string;
+  replaceString?: string;
+  trimStrings?: string[];
+  /** Tavern placement set: 1 = user_input, 2 = ai_output; other values are kept but not run. */
+  placement?: number | number[];
+  markdownOnly?: boolean;
+  promptOnly?: boolean;
+  runOnEdit?: boolean;
+  /** 0/NONE keeps the pattern as written, 1/RAW expands macros, 2/ESCAPED escapes expanded values. */
+  substituteRegex?: number | string;
+  minDepth?: number;
+  maxDepth?: number;
+  disabled?: boolean;
+  [key: string]: unknown;
+}
+
+/** This plugin's own execution switches, stored beside the rules. */
+export interface PromptRegexOptions {
+  enabled: boolean;
+  includePrefill: boolean;
+}
+
+/** Chat text a rule can target in this version. */
+export type PromptRegexTarget = 'user' | 'assistant';
+
+/** Why one rule runs or does not, for the workbench to display. */
+export interface RegexScriptPlan {
+  runs: boolean;
+  supported: boolean;
+  targets: PromptRegexTarget[];
+  unsupportedPlacements: number[];
+  reason: string;
 }
 
 /* ------------------------------------------------------------------ preset */
