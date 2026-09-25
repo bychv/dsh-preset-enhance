@@ -172,7 +172,15 @@ export async function apply(ctx: PluginContext, config: PluginConfig = {}) {
   // 0.1.7 removed the official Chat Completions protocol and routes plain requests through
   // pi-ai, which rewrites system prompts; the plugin ships its own adapter so preset
   // ordering, the prefill bridge, DSML conversion and extraction keep a Chat wire format.
-  const chatConnection = () => resolveChatConnection({});
+  /**
+ * The public Chat root, unless the deployment points it elsewhere. This honours the same
+ * $DEEPSEEK_BASE_URL the official adapter documents, so a full host request can be aimed at a
+ * capture endpoint during verification; leaving it unset keeps the public API.
+ */
+const chatConnection = () => {
+  const baseURL = process.env.DEEPSEEK_BASE_URL?.trim();
+  return resolveChatConnection(baseURL ? { baseURL } : {});
+};
   // The upload cache is owner-private and lives next to the plugin's own state file; the
   // index is keyed by a hash of the endpoint and key, so no credential reaches disk.
   const chatFiles = new DeepSeekFileStore({ indexPath: deepSeekFilesIndexPath(store.file) });
