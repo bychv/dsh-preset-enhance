@@ -2857,6 +2857,11 @@ $('regex-test-target').onchange = () => {
   if ($('regex-test-target').value === 'prefill') $('regex-test-depth').value = String(REGEX_PREFILL_DEPTH);
 };
 
+// SPreset 编辑器：独立页面，带当前会话 id 打开，工作台本身不受影响。
+$('spreset-open').onclick = () => {
+  const url = '/preset-enhance/editor' + (sessionId ? '?sessionId=' + encodeURIComponent(sessionId) : '');
+  window.open(url, '_blank', 'noopener');
+};
 $('preset-auto-save').checked = storageGet(PRESET_AUTO_SAVE_KEY, '0') === '1';
 $('tool-auto-save').checked = storageGet(TOOL_AUTO_SAVE_KEY, '0') === '1';
 $('tool-auto-save').disabled = presetAutoSaveIsOn();

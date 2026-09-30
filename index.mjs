@@ -5,6 +5,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { PresetStore } from './lib/store.mjs';
 import { compilePreset, validatePreset, getOrder, dshSystemPromptEnabled } from './lib/preset.mjs';
 import { decodePresetDocument, encodePresetPackage, attachPrefillSettings, applyPackagePrefill } from './lib/preset-package.mjs';
+import { deleteLibraryEntry, restoreDefaultTemplates, saveLibraryEntry, summarizeSPreset, syncSPresetMirror, } from './lib/s-preset-library.mjs';
 import { installDeepSeekBetaBridge } from './lib/deepseek-beta.mjs';
 import { createProtocolObserver } from './lib/protocol.mjs';
 import { connectionSelection, selectConnection, sessionConnection, writeConnectionProtocol } from './lib/connection.mjs';
@@ -413,6 +414,11 @@ export async function apply(ctx, config = {}) {
         [`${BASE}/editor.js`, ['web/editor.js', 'text/javascript']],
         [`${BASE}/tool-labels.js`, ['web/tool-labels.js', 'text/javascript']],
         [`${BASE}/editor.css`, ['web/editor.css', 'text/css']],
+        // SPreset editor: its own page, script and stylesheet. The page URL stays /editor
+        // because the workbench's own script already owns /editor.js.
+        [`${BASE}/editor`, ['web/spreset.html', 'text/html']],
+        [`${BASE}/spreset.js`, ['web/spreset.js', 'text/javascript']],
+        [`${BASE}/spreset.css`, ['web/spreset.css', 'text/css']],
     ]);
     for (const [path, [file, mime]] of assets)
         ctx.effect(() => ctx.webServer.register({
@@ -484,6 +490,8 @@ export async function apply(ctx, config = {}) {
                         sessionToolPolicy: sessionId ? ownGet(state.sessionToolPolicies, sessionId) ?? null : null,
                         toolGroups: state.toolGroups,
                         toolPresets: state.toolPresets,
+                        // SPreset editor library: the editor's own collection, unrelated to presets.
+                        sPresetLibrary: state.sPresetLibrary,
                         modeToolSelections: state.modeToolSelections,
                         sessionToolSelection: sessionId ? ownGet(state.sessionToolSelections, sessionId) ?? null : null,
                         toolPresetRefCounts: presetReferenceCounts(state),
@@ -518,6 +526,42 @@ export async function apply(ctx, config = {}) {
                 // all come from the same modules a request uses; nothing returns or logs the chat text.
                 if (body.action === 'regex-test')
                     return respond(res, 200, regexTestResult(body));
+                // SPreset editor library: its own collection in the state file, never inside a preset.
+                if (body.action === 'library-save') {
+                    return respond(res, 200, await store.transaction((current) => {
+                        assertRevision(current, body);
+                        const result = saveLibraryEntry(current.sPresetLibrary, body.entry);
+                        current.sPresetLibrary = result.library;
+                        current.revision++;
+                        return { revision: current.revision, entry: result.entry, created: result.created, entries: result.library.entries };
+                    }));
+                }
+                if (body.action === 'library-delete') {
+                    return respond(res, 200, await store.transaction((current) => {
+                        assertRevision(current, body);
+                        const result = deleteLibraryEntry(current.sPresetLibrary, body.id);
+                        if (!result.removed)
+                            throw new Error('资源库条目不存在');
+                        current.sPresetLibrary = result.library;
+                        current.revision++;
+                        return { revision: current.revision, entries: result.library.entries };
+                    }));
+                }
+                if (body.action === 'library-restore-templates') {
+                    return respond(res, 200, await store.transaction((current) => {
+                        assertRevision(current, body);
+                        current.sPresetLibrary = restoreDefaultTemplates(current.sPresetLibrary);
+                        current.revision++;
+                        return { revision: current.revision, entries: current.sPresetLibrary.entries };
+                    }));
+                }
+                // Read-only view of one draft preset's extensions.SPreset block; regex verdicts come from
+                // the shared prompt-regex engine, so the editor never re-implements channel/depth rules.
+                if (body.action === 's-preset-plan') {
+                    const preset = validatePreset(body.preset);
+                    const depth = Number.isInteger(body.depth) ? body.depth : 0;
+                    return respond(res, 200, summarizeSPreset(preset, depth));
+                }
                 if (body.action === 'export-package') {
                     const state = (await store.read());
                     if (body.revision !== state.revision)
@@ -742,13 +786,16 @@ export async function apply(ctx, config = {}) {
                     if (body.action === 'save' || body.action === 'import') {
                         const imported = body.action === 'import' ? decodePresetDocument(body.document, String(body.name || '未命名预设')) : null;
                         validatePreset(imported?.preset ?? body.preset);
+                        // The SPreset editor asks for the settings mirror; every other caller saves verbatim.
+                        const source = imported?.preset ?? body.preset;
+                        const mirrored = body.mirrorSPreset === true ? syncSPresetMirror(source) : { preset: source, changed: false };
                         const old = body.action === 'save' ? state.presets.find(p => p.id === body.id) : undefined;
                         const record = {
                             ...old,
                             ...imported,
                             id: old?.id ?? randomUUID(),
                             name: String(imported?.name || body.name || '未命名预设').slice(0, 200),
-                            preset: imported?.preset ?? body.preset,
+                            preset: mirrored.preset,
                         };
                         if (old)
                             state.presets[state.presets.indexOf(old)] = record;

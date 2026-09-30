@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SPreset Editor</title><link rel="stylesheet" href="/preset-enhance/spreset.css"></head>
+<body>
+<header class="top">
+<div class="brand"><small>DSH · PRESET ENHANCE</small><h1>SPreset Editor</h1></div>
+<nav class="tabs" role="tablist"><button id="tab-prompt" class="tab active" role="tab" aria-selected="true">提示词</button><button id="tab-extras" class="tab" role="tab" aria-selected="false">附加功能</button></nav>
+<div class="top-actions">
+<select id="preset-select" aria-label="当前预设"></select>
+<button id="save-preset" class="primary">保存预设</button>
+<span id="state" class="state" role="status">正在加载</span>
+<a class="back" href="/preset-enhance">返回工作台</a>
+</div>
+</header>
+
+<main id="prompt-view" class="columns">
+<section class="col library">
+<div class="col-head"><h2>资源库</h2><span class="en">LIBRARY</span><button id="library-add" class="icon" title="新建模板">＋</button></div>
+<div class="segmented" role="tablist">
+<button id="seg-unused" class="seg active" role="tab" aria-selected="true">未使用 <span id="count-unused">0</span></button>
+<button id="seg-templates" class="seg" role="tab" aria-selected="false">模板 <span id="count-templates">0</span></button>
+</div>
+<div class="filters">
+<input id="library-search" placeholder="搜索标题、正文或 ID" aria-label="搜索资源库">
+<select id="library-role" aria-label="按角色筛选"><option value="">全部角色</option><option value="system">System</option><option value="user">User</option><option value="assistant">Assistant</option></select>
+</div>
+<div id="library-list" class="list"></div>
+</section>
+
+<section class="col chain">
+<div class="col-head"><h2>提示词链</h2><span class="en">PROMPT CHAIN</span><span id="chain-count" class="count">0/0 启用</span></div>
+<div class="sub-head"><strong>顺序流程</strong><span class="muted">按列表顺序进入上下文</span><select id="chain-group" aria-label="顺序表分组"></select><button id="chain-add" class="icon" title="新增条目">＋</button></div>
+<div id="chain-list" class="chain"></div>
+</section>
+
+<aside class="col inspector">
+<div class="col-head"><h2 id="inspector-title">INSPECTOR</h2><span class="en">详情</span></div>
+<div id="inspector-body" class="inspector-body"></div>
+</aside>
+</main>
+
+<section id="extras-view" class="extras" hidden>
+<div class="col-head"><h2>附加功能</h2><span class="muted">extensions.SPreset（只读汇总，正则适用性来自插件正则引擎）</span>
+<label class="inline">规划深度<input id="extras-depth" type="number" value="0" step="1"></label>
+<button id="extras-refresh">刷新</button></div>
+<div id="extras-body"></div>
+</section>
+
+<div id="menu-layer" class="menu-layer" hidden></div>
+<script type="module" src="/preset-enhance/spreset.js"></script>
+</body></html>

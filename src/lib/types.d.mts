@@ -338,6 +338,43 @@ export interface SessionCompilation {
 /** Wire protocol the plugin adapts the preset injection to. */
 export type PresetProtocol = 'chat-completions' | 'messages';
 
+/* ------------------------------------------------------------ SPreset editor */
+
+/**
+ * One reusable entry in the SPreset editor's own library.
+ *
+ * The library lives in the plugin state file, never inside a preset document, so
+ * browsing or editing templates can never change what a preset contains or exports.
+ */
+export interface SPresetLibraryEntry {
+  id: string;
+  title: string;
+  role: string;
+  content: string;
+  /** 'template' entries are the seeded starting points; 'snippet' entries are the user's own. */
+  kind: 'template' | 'snippet';
+  /** True for the templates the plugin seeds, so the editor can offer to restore them. */
+  builtin: boolean;
+  /**
+   * Insertion shape carried into the preset when the template joins the chain. Only fields the
+   * compiler reads: injection_position, injection_depth, injection_order, injection_trigger.
+   */
+  injectionPosition?: 0 | 1;
+  injectionDepth?: number;
+  injectionOrder?: number;
+  injectionTrigger?: string[];
+  /** Reference-editor flags kept for round-tripping; this plugin does not read them. */
+  hideFromList?: boolean;
+  forbidOverrides?: boolean;
+  createdAt: number;
+  updatedAt: number;
+  [key: string]: unknown;
+}
+
+export interface SPresetLibrary {
+  entries: SPresetLibraryEntry[];
+}
+
 export interface PresetState {
   version: number;
   revision: number;
@@ -364,6 +401,8 @@ export interface PresetState {
   modeToolSelections: Record<string, ToolSelection>;
   sessionToolSelections: Record<string, ToolSelection>;
   presets: PresetRecord[];
+  /** SPreset editor library: its own collection, deliberately unrelated to preset documents. */
+  sPresetLibrary: SPresetLibrary;
   bindings: Record<string, PresetBinding>;
   global: Record<string, string>;
   sessions: Record<string, SessionCompilation>;
