@@ -238,6 +238,17 @@ function renderChainRow(item, index) {
     + (item.enabled === false ? ' disabled' : ''));
   row.dataset.id = item.identifier;
   row.draggable = true;
+  // Selecting the row is what opens the INSPECTOR. The row actions below stop propagation, so
+  // copy/edit/power/… keep their own behaviour and a click anywhere else in the row selects.
+  const select = () => { selection = { kind: 'chain', id: item.identifier }; renderAll(); };
+  row.onclick = select;
+  row.title = '点击在 INSPECTOR 中查看';
+  row.tabIndex = 0;
+  row.onkeydown = event => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    select();
+  };
   row.ondragstart = event => { dragIndex = index; row.classList.add('dragging'); if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move'; };
   row.ondragend = () => { dragIndex = -1; row.classList.remove('dragging'); };
   row.ondragover = event => { event.preventDefault(); if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'; };
