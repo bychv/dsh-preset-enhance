@@ -375,6 +375,18 @@ export interface SPresetLibrary {
   entries: SPresetLibraryEntry[];
 }
 
+/**
+ * SPreset editor state that belongs to the editor, not to any preset document.
+ *
+ * Entry locks live here rather than being derived from a preset field: the Tavern field
+ * (forbid_overrides) already exists in imported presets with its own meaning, so reading it as
+ * "locked in this editor" would lock most entries of a normal preset the first time it is opened.
+ */
+export interface SPresetEditorState {
+  /** presetId -> identifiers whose body is locked against editing in this editor. */
+  locks: Record<string, string[]>;
+}
+
 export interface PresetState {
   version: number;
   revision: number;
@@ -403,6 +415,8 @@ export interface PresetState {
   presets: PresetRecord[];
   /** SPreset editor library: its own collection, deliberately unrelated to preset documents. */
   sPresetLibrary: SPresetLibrary;
+  /** SPreset editor entry locks, keyed by preset id. */
+  sPresetEditor: SPresetEditorState;
   bindings: Record<string, PresetBinding>;
   global: Record<string, string>;
   sessions: Record<string, SessionCompilation>;

@@ -7,9 +7,9 @@ import { Readable } from 'node:stream';
 import { PresetStore } from '../lib/store.mjs';
 import { apply } from '../index.mjs';
 import {
-  createDefaultSPresetLibrary, deleteLibraryEntry, normalizeSPresetData, normalizeSPresetLibrary,
-  restoreDefaultTemplates, saveLibraryEntry, SPRESET_DEFAULTS, SPRESET_MIRROR_ID, SPRESET_MIRROR_NAME,
-  summarizeSPreset, syncSPresetMirror,
+  createDefaultSPresetLibrary, deleteLibraryEntry, normalizeSPresetData, normalizeSPresetEditor,
+  normalizeSPresetLibrary, presetLocks, restoreDefaultTemplates, saveLibraryEntry, setPresetLock,
+  SPRESET_DEFAULTS, SPRESET_MIRROR_ID, SPRESET_MIRROR_NAME, summarizeSPreset, syncSPresetMirror,
 } from '../lib/s-preset-library.mjs';
 
 /* ------------------------------------------------------------- unit: library */
@@ -160,6 +160,22 @@ test('syncSPresetMirror projects the settings into the SPresetSettings prompt', 
   assert.equal(syncSPresetMirror(plain).changed, false, 'a preset without SPreset is never given one');
 });
 
+test('editor locks are per preset, structural and removable', () => {
+  assert.deepEqual(normalizeSPresetEditor(undefined), { locks: {} });
+  assert.deepEqual(normalizeSPresetEditor({ locks: { a: ['x', 'x', ''], b: 'nope', c: [] } }), { locks: { a: ['x'] } });
+  let editor = { locks: {} };
+  editor = setPresetLock(editor, 'p1', 'main', true);
+  editor = setPresetLock(editor, 'p1', 'other', true);
+  editor = setPresetLock(editor, 'p2', 'main', true);
+  assert.deepEqual(presetLocks(editor, 'p1'), ['main', 'other']);
+  assert.deepEqual(presetLocks(editor, 'p2'), ['main'], 'locks are keyed by preset');
+  assert.deepEqual(presetLocks(editor, 'p3'), []);
+  editor = setPresetLock(editor, 'p1', 'main', false);
+  assert.deepEqual(presetLocks(editor, 'p1'), ['other']);
+  editor = setPresetLock(editor, 'p1', 'other', false);
+  assert.equal('p1' in editor.locks, false, 'an empty lock list is dropped');
+});
+
 /* ----------------------------------------------------------------- api side */
 
 async function createHarness() {
@@ -289,6 +305,38 @@ test('saving from the SPreset editor writes the mirror only when asked', async (
     assert.equal(stored.prompt_order[0].order.some(item => item.identifier === 'SPresetSettings'), false,
       'the mirror never joins the order flow');
     assert.deepEqual(stored.extensions.unknown_extension, { keep: [1, 2, 3] }, 'unknown extensions survive the mirror save');
+  } finally { await harness.cleanup(); }
+});
+
+test('s-preset-lock stores the guard outside the preset and survives a reload', async () => {
+  const harness = await createHarness();
+  try {
+    const saved = await harness.post({ action: 'save', id: null, name: 'A', preset: samplePreset() });
+    assert.equal(saved.statusCode, 200, saved.payload?.error);
+    const presetId = saved.payload.id;
+
+    const before = await harness.get();
+    assert.deepEqual(before.payload.sPresetEditor, { locks: {} });
+
+    const locked = await harness.post({ action: 's-preset-lock', presetId, identifier: 'sys', locked: true });
+    assert.equal(locked.statusCode, 200, locked.payload?.error);
+    assert.deepEqual(locked.payload.locks, ['sys']);
+
+    // A reload (a fresh GET) still reports the lock, and the preset itself is untouched.
+    const after = await harness.get();
+    assert.deepEqual(after.payload.sPresetEditor.locks[presetId], ['sys'], 'the lock survives a reload');
+    const stored = after.payload.presets.find(record => record.id === presetId).preset;
+    assert.equal(JSON.stringify(stored).includes('sPresetEditor'), false, 'locks never enter a preset');
+    assert.equal(stored.prompts.find(prompt => prompt.identifier === 'sys').forbid_overrides, true,
+      'the preset keeps the reference field the editor mirrored');
+
+    const unlocked = await harness.post({ action: 's-preset-lock', presetId, identifier: 'sys', locked: false });
+    assert.deepEqual(unlocked.payload.locks, []);
+    assert.equal('locks' in (await harness.get()).payload.sPresetEditor
+      && Boolean((await harness.get()).payload.sPresetEditor.locks[presetId]), false, 'unlocking clears it');
+
+    const missing = await harness.post({ action: 's-preset-lock', presetId, identifier: '', locked: true });
+    assert.equal(missing.statusCode >= 400, true, 'an empty identifier is refused');
   } finally { await harness.cleanup(); }
 });
 

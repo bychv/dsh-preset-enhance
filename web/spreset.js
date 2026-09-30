@@ -11,7 +11,7 @@ const NOT_IMPLEMENTED = '本插件未实现（数据原样保留）';
 const ST_ONLY = '酒馆/SPreset 侧功能，本插件不读取，仅原样保存';
 const ST_ONLY_SHORT = '本插件不读取该字段';
 // 参考编辑器暴露、但本插件编译器不读取的条目字段。
-const ST_ONLY_PROMPT_FIELDS = ['hide_from_list', 'forbid_overrides', 'system_prompt', 'spreset_condition_script'];
+const ST_ONLY_PROMPT_FIELDS = ['hide_from_list', 'system_prompt', 'spreset_condition_script'];
 // 根据条件自动启用 写入的初始表达式（酒馆/SPreset 侧求值；本插件不执行）。
 const DEFAULT_CONDITION_SCRIPT = '({ model, provider, entry, chat }) => true';
 // extensions.SPreset 里本插件不执行的子对象（RegexBinding 另有只读展示）。
@@ -37,6 +37,9 @@ let selection = null;
 let inspectorTab = '内容';
 let plans = null;
 let dragIndex = -1;
+// Editor-side entry locks, keyed by preset id (state.sPresetEditor). Never written into a preset:
+// the preset field forbid_overrides is mirrored for round-tripping, but the guard reads this.
+let editorLocks = { locks: {} };
 
 function el(tag, cls, text) {
   const node = document.createElement(tag);
@@ -94,6 +97,44 @@ function chainGroups() { return preset?.prompt_order ?? []; }
 function currentGroup() { return chainGroups().find(group => String(group.character_id) === groupId) ?? chainGroups()[0]; }
 function chainOrder() { return currentGroup()?.order ?? []; }
 function promptOf(identifier) { return (preset?.prompts ?? []).find(prompt => prompt.identifier === identifier); }
+function lockedIds() {
+  const list = editorLocks?.locks?.[presetId];
+  return new Set(Array.isArray(list) ? list : []);
+}
+/** True when this entry's body is locked against editing in the editor (editor guard only). */
+function isBodyLocked(source, isTemplate) {
+  if (!source) return false;
+  if (isTemplate) return source.forbidOverrides === true;
+  return lockedIds().has(source.identifier);
+}
+async function setLock(source, isTemplate, locked) {
+  if (isTemplate) {
+    source.forbidOverrides = locked;
+    templateDirty = true;
+    status(locked ? '已锁定，防止误编辑；解锁后可编辑' : '已解锁，可以编辑正文', 'dirty');
+    renderInspector();
+    return;
+  }
+  // The plugin store owns the guard; the preset field is kept in sync for round-tripping.
+  source.forbid_overrides = locked;
+  markPreset();
+  const result = await api({ action: 's-preset-lock', presetId, identifier: source.identifier, locked });
+  state.revision = Number.isInteger(result.revision) ? result.revision : state.revision + 1;
+  editorLocks = { locks: { ...(editorLocks.locks ?? {}), [presetId]: result.locks ?? [] } };
+  if (!(result.locks ?? []).length) delete editorLocks.locks[presetId];
+  status(locked ? '已锁定，防止误编辑；解锁后可编辑' : '已解锁，可以编辑正文');
+  renderAll();
+}
+/** Open an entry for editing; a locked entry is refused with a visible reason. */
+function openForEdit(identifier) {
+  const prompt = promptOf(identifier);
+  if (prompt && isBodyLocked(prompt, false)) {
+    status('「' + (prompt.name || identifier) + '」的正文已锁定，先在 INSPECTOR 里解锁再编辑', 'error');
+    return;
+  }
+  selection = { kind: 'chain', id: identifier };
+  renderAll();
+}
 function chainIdentifiers() { return new Set(chainOrder().map(item => item.identifier)); }
 function markPreset() { presetDirty = true; status('未保存修改', 'dirty'); }
 function markSaved(text) { presetDirty = false; templateDirty = false; status(text || '已保存'); }
@@ -271,7 +312,7 @@ function renderChainRow(item, index) {
   const actions = el('span', 'row-actions');
   actions.append(
     button('复制', '复制条目', () => copyChainItem(index)),
-    button('编辑', '在检视器中编辑', () => { selection = { kind: 'chain', id: item.identifier }; renderAll(); }),
+    button('编辑', '在检视器中编辑（正文锁定时会被拒绝）', () => openForEdit(item.identifier)),
     button('⏻', item.enabled === false ? '启用' : '停用', () => { item.enabled = item.enabled === false; markPreset(); renderChain(); }),
     button('…', '更多', event => openMenu(event.currentTarget, chainMenu(index))),
   );
@@ -373,6 +414,12 @@ function flaggedCount(source) {
   return ST_ONLY_PROMPT_FIELDS.filter(key => source[key] !== undefined).length;
 }
 
+/** True when another prompt_order group enables this identifier (never shown as 已启用 here). */
+function enabledInOtherGroups(identifier) {
+  return chainGroups().some(group => String(group.character_id) !== groupId
+    && (group.order ?? []).some(item => item.identifier === identifier && item.enabled !== false));
+}
+
 function inspectorTarget() {
   if (!selection) return null;
   if (selection.kind === 'library') {
@@ -432,7 +479,11 @@ function renderInspector() {
     else { source.name = name.value; markPreset(); const row = $('chain-list').querySelector('[data-id="' + CSS.escape(selection.id) + '"] .name'); if (row) row.textContent = name.value; }
   };
   nameRow.append(name);
-  if (!isTemplate && target.item?.enabled !== false) nameRow.append(el('span', 'badge', '已启用'));
+  // 已启用 is decided by the CURRENTLY selected order group alone; another group's state is named.
+  if (!isTemplate) {
+    if (target.item && target.item.enabled !== false) nameRow.append(el('span', 'badge', '已启用'));
+    else if (enabledInOtherGroups(source.identifier)) nameRow.append(el('span', 'badge builtin', '已在其他顺序组启用'));
+  }
   if (isTemplate) nameRow.append(el('span', 'badge builtin', '模板'));
   if (!isTemplate && source.marker === true) nameRow.append(el('span', 'badge marker', '占位符'));
   if (!isTemplate && BUILTIN_IDS.has(source.identifier)) nameRow.append(el('span', 'badge builtin', '内置'));
@@ -482,7 +533,8 @@ function renderInspector() {
     else markPreset();
     renderInspector();
   };
-  // 在酒馆原生列表中隐藏 / 锁定正文：参考编辑器的字段，本插件不读取，但仍可编辑并原样保存。
+  // 在酒馆原生列表中隐藏：参考编辑器的字段，本插件不读取，但仍可编辑并原样保存。
+  // 锁定正文（forbid_overrides）：编辑器侧的防误编辑开关，见 setLock。
   const hidden = el('input');
   hidden.type = 'checkbox';
   hidden.checked = isTemplate ? source.hideFromList === true : source.hide_from_list === true;
@@ -490,17 +542,17 @@ function renderInspector() {
     if (isTemplate) { source.hideFromList = hidden.checked; templateDirty = true; status('模板未保存', 'dirty'); }
     else { source.hide_from_list = hidden.checked; markPreset(); renderInspector(); }
   };
+  const bodyLocked = isBodyLocked(source, isTemplate);
   const locked = el('input');
   locked.type = 'checkbox';
-  locked.checked = isTemplate ? source.forbidOverrides === true : source.forbid_overrides === true;
-  locked.onchange = () => {
-    if (isTemplate) { source.forbidOverrides = locked.checked; templateDirty = true; status('模板未保存', 'dirty'); }
-    else { source.forbid_overrides = locked.checked; markPreset(); renderInspector(); }
-  };
+  locked.checked = bodyLocked;
+  locked.onchange = () => { void setLock(source, isTemplate, locked.checked); };
   for (const [label, control, hint] of [
     ['根据条件自动启用', conditional, 'spreset_condition_script：酒馆/SPreset 侧按条目求值的函数表达式，本插件不执行，仅原样保存'],
     ['在酒馆原生列表中隐藏', hidden, ST_ONLY_SHORT],
-    ['锁定正文', locked, ST_ONLY_SHORT],
+    ['锁定正文', locked, bodyLocked
+      ? '已锁定，防止误编辑；解锁后可编辑'
+      : '开启后本条正文在本编辑器里只读（防止误编辑）'],
   ]) {
     const row = el('label', 'toggle-row');
     row.append(el('span', '', label), control);
@@ -526,7 +578,8 @@ function renderInspector() {
   textarea.value = source.content ?? '';
   textarea.spellcheck = false;
   const marker = !isTemplate && source.marker === true;
-  textarea.disabled = marker;
+  // 锁定正文：编辑器侧防误编辑。锁定后正文只读，粘贴/输入/程序化写入都不生效。
+  textarea.disabled = marker || bodyLocked;
   const refreshCounter = () => {
     const value = textarea.value;
     counter.textContent = fmtCount(value.length) + ' 字符 · ' + fmtCount(value ? value.split('\n').length : 0) + ' 行';
@@ -536,9 +589,25 @@ function renderInspector() {
     else { source.content = textarea.value; markPreset(); renderChainRowInPlace(selection.id); }
     refreshCounter();
   };
+  if (bodyLocked) {
+    // Belt and braces: the field is disabled, and any write that still reaches here is reverted.
+    textarea.oninput = () => {
+      textarea.value = source.content ?? '';
+      refreshCounter();
+      status('本条正文已锁定，先解锁再编辑', 'error');
+    };
+  }
   refreshCounter();
   const contentField = field('提示词正文', textarea);
   if (marker) contentField.append(el('span', 'muted', '占位符条目的正文由酒馆按标记填充，这里不可编辑。'));
+  if (bodyLocked) {
+    const lockRow = el('div', 'lock-row');
+    lockRow.append(
+      el('span', 'hint', '已锁定，防止误编辑；解锁后可编辑'),
+      button('解锁', '解除本条正文的编辑锁', () => { void setLock(source, isTemplate, false); }, 'primary'),
+    );
+    contentField.append(lockRow);
+  }
 
   const tabRow = el('div', 'tabs2');
   for (const tab of TABS) {
@@ -622,7 +691,7 @@ function readOnlyBlock(title, value) {
 }
 function structuredTab(target, isTemplate, source) {
   const wrap = el('div', 'field');
-  wrap.append(el('p', 'muted', '原始字段：保存时原样写回，未在本插件中实现的字段（例如 forbid_overrides）不会被改写。'));
+  wrap.append(el('p', 'muted', '原始字段：保存时原样写回，未在本插件中实现的字段（例如 hide_from_list）不会被改写。锁定正文是编辑器侧的防误编辑开关，不影响发送内容。'));
   wrap.append(el('pre', 'json', JSON.stringify(isTemplate ? source : promptToLibraryShape(source), null, 2)));
   return wrap;
 }
@@ -941,6 +1010,7 @@ async function boot() {
   try {
     state = await api();
     library = state.sPresetLibrary ?? { entries: [] };
+    editorLocks = state.sPresetEditor ?? { locks: {} };
     renderPresetSelect();
     const binding = state.binding ?? {};
     const initial = (state.presets ?? []).find(record => record.id === (binding.presetId || state.selectedPresetId))
