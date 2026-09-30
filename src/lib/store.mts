@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { normalizeToolState } from './tool-presets.mjs';
-import { createDefaultSPresetLibrary, normalizeSPresetLibrary } from './s-preset-library.mjs';
+import { createDefaultSPresetLibrary, normalizeSPresetEditor, normalizeSPresetLibrary } from './s-preset-library.mjs';
 import type { PresetState, ToolCatalogRow, ToolPolicy } from './types.mjs';
 
 const initialState = (): PresetState => ({
@@ -30,6 +30,7 @@ const initialState = (): PresetState => ({
   // The SPreset editor library is additive and unrelated to preset documents; a fresh
   // state starts with the seeded templates so the editor is usable immediately.
   sPresetLibrary: createDefaultSPresetLibrary(),
+  sPresetEditor: { locks: {} },
   bindings: {},
   global: {},
   sessions: {},
@@ -75,6 +76,7 @@ function normalize(state: PresetState): PresetState {
   // A state file written before the SPreset library existed gets the seeded templates once;
   // a library the user emptied stays empty, because the field is then present with zero entries.
   state.sPresetLibrary = normalizeSPresetLibrary(state.sPresetLibrary);
+  state.sPresetEditor = normalizeSPresetEditor(state.sPresetEditor);
   return state;
 }
 

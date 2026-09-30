@@ -6,7 +6,8 @@ import { PresetStore } from './lib/store.mjs';
 import { compilePreset, validatePreset, getOrder, dshSystemPromptEnabled } from './lib/preset.mjs';
 import { decodePresetDocument, encodePresetPackage, attachPrefillSettings, applyPackagePrefill } from './lib/preset-package.mjs';
 import {
-  deleteLibraryEntry, restoreDefaultTemplates, saveLibraryEntry, summarizeSPreset, syncSPresetMirror,
+  deleteLibraryEntry, presetLocks, restoreDefaultTemplates, saveLibraryEntry, setPresetLock,
+  summarizeSPreset, syncSPresetMirror,
 } from './lib/s-preset-library.mjs';
 import { installDeepSeekBetaBridge } from './lib/deepseek-beta.mjs';
 import { createProtocolObserver } from './lib/protocol.mjs';
@@ -493,6 +494,8 @@ const chatConnection = () => {
             toolPresets: state.toolPresets,
             // SPreset editor library: the editor's own collection, unrelated to presets.
             sPresetLibrary: state.sPresetLibrary,
+            // Editor-side entry locks, keyed by preset id.
+            sPresetEditor: state.sPresetEditor,
             modeToolSelections: state.modeToolSelections,
             sessionToolSelection: sessionId ? ownGet(state.sessionToolSelections, sessionId) ?? null : null,
             toolPresetRefCounts: presetReferenceCounts(state),
@@ -553,6 +556,21 @@ const chatConnection = () => {
             return { revision: current.revision, entries: current.sPresetLibrary.entries };
           }));
         }
+        // SPreset editor entry locks. They live in the plugin state (never in the preset) and are
+        // an editor-side guard only: the request path neither reads nor acts on them.
+        if (body.action === 's-preset-lock') {
+          const lockPresetId = typeof body.presetId === 'string' ? body.presetId : '';
+          const identifier = typeof body.identifier === 'string' ? body.identifier : '';
+          if (!lockPresetId) throw new Error('缺少预设 ID');
+          if (!identifier) throw new Error('缺少条目 ID');
+          return respond(res, 200, await store.transaction((current: PresetState) => {
+            assertRevision(current, body);
+            current.sPresetEditor = setPresetLock(current.sPresetEditor, lockPresetId, identifier, body.locked === true);
+            current.revision++;
+            return { revision: current.revision, locks: presetLocks(current.sPresetEditor, lockPresetId) };
+          }));
+        }
+
         // Read-only view of one draft preset's extensions.SPreset block; regex verdicts come from
         // the shared prompt-regex engine, so the editor never re-implements channel/depth rules.
         if (body.action === 's-preset-plan') {

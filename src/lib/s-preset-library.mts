@@ -11,7 +11,9 @@
  */
 import { randomUUID } from 'node:crypto';
 import { planRegexScript, regexName } from './prompt-regex.mjs';
-import type { RegexScript, SillyTavernPreset, SPresetLibrary, SPresetLibraryEntry } from './types.mjs';
+import type {
+  RegexScript, SillyTavernPreset, SPresetEditorState, SPresetLibrary, SPresetLibraryEntry,
+} from './types.mjs';
 
 /** Upper bounds so an imported or hand-edited state file cannot grow without limit. */
 export const LIBRARY_ENTRY_LIMIT = 500;
@@ -206,6 +208,38 @@ export function restoreDefaultTemplates(library: SPresetLibrary, now: number = T
   const defaults = createDefaultSPresetLibrary(now).entries;
   const kept = library.entries.filter(entry => !(entry.builtin && defaults.some(item => item.id === entry.id)));
   return { entries: dedupe([...defaults, ...kept]).slice(0, LIBRARY_ENTRY_LIMIT) };
+}
+
+/* ------------------------------------------------ editor-side entry locks */
+
+/** Structural normalization for the lock table; the caller persists the result. */
+export function normalizeSPresetEditor(raw: unknown): SPresetEditorState {
+  const source = isRecord(raw) && isRecord(raw.locks) ? raw.locks : {};
+  const locks: Record<string, string[]> = {};
+  for (const [presetId, value] of Object.entries(source)) {
+    if (!presetId || !Array.isArray(value)) continue;
+    const ids = value.filter((item): item is string => typeof item === 'string' && item.length > 0)
+      .slice(0, LIBRARY_ENTRY_LIMIT);
+    if (ids.length) locks[presetId] = [...new Set(ids)];
+  }
+  return { locks };
+}
+
+export function presetLocks(editor: SPresetEditorState | undefined, presetId: string): string[] {
+  return Array.isArray(editor?.locks?.[presetId]) ? editor.locks[presetId] : [];
+}
+
+/** Add or remove one entry lock. Returns a new state; the caller persists it. */
+export function setPresetLock(
+  editor: SPresetEditorState | undefined, presetId: string, identifier: string, locked: boolean,
+): SPresetEditorState {
+  const current = normalizeSPresetEditor(editor);
+  const existing = presetLocks(current, presetId);
+  const next = locked ? [...new Set([...existing, identifier])] : existing.filter(id => id !== identifier);
+  const locks = { ...current.locks };
+  if (next.length) locks[presetId] = next;
+  else delete locks[presetId];
+  return { locks };
 }
 
 /* ------------------------------------- extensions.SPreset data (spec §2 / §3) */
