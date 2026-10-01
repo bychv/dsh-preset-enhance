@@ -293,11 +293,11 @@ function renderConnectionChoice() {
   if (!rows.length) {
     $('connection-note').textContent = selection.canSwitch === true
       ? '未能从宿主读取连接信息：宿主没有返回任何可选连接，无法切换。'
-      : '未能从宿主读取连接信息：当前 DSH 未提供 agentDefaultModel 服务，无法切换会话连接。';
+      : '当前 DSH 不支持切换会话模型。';
     return;
   }
   if (selection.canSwitch !== true) {
-    $('connection-note').textContent = '未能从宿主读取连接信息：当前 DSH 未提供 agentDefaultModel 服务，无法切换会话连接。';
+    $('connection-note').textContent = '当前 DSH 不支持切换会话模型。';
     return;
   }
   if (connectionSwitchSaving) {
@@ -309,11 +309,11 @@ function renderConnectionChoice() {
     ? '协议未知（无法确认该连接是否支持对话补全兼容路径）'
     : connectionProtocolLabel(protocol);
   $('connection-note').textContent = current
-    ? `当前连接：${current.label || current.provider} · ${protocolText}。切换会改变会话被路由到的连接，立即生效，不需要重启。`
-    : '未读取到当前连接。切换会改变会话被路由到的连接，立即生效，不需要重启。';
+    ? `${protocolText} · ${selection.model ?? "未选择模型"}`
+    : '未选择连接。';
 }
 /**
- * 选中即切换：走宿主自己的 provider/model 选择（agentDefaultModel），请求记录、模型能力与
+ * 选中即切换：走宿主自己的 provider/model 选择（sessionController），请求记录、模型能力与
  * 真正执行的适配器因此保持一致。切换中禁用选择器；失败时按服务端已确认的选择回退。
  */
 async function selectConnectionChoice(provider) {

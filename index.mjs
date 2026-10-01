@@ -2,6 +2,8 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { homedir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
+export { Config } from './lib/plugin-config.mjs';
+import { createChatModelCatalog } from './lib/chat-models.mjs';
 import { PresetStore } from './lib/store.mjs';
 import { compilePreset, validatePreset, getOrder, dshSystemPromptEnabled } from './lib/preset.mjs';
 import { decodePresetDocument, encodePresetPackage, attachPrefillSettings, applyPackagePrefill } from './lib/preset-package.mjs';
@@ -154,9 +156,10 @@ export async function apply(ctx, config = {}) {
    * $DEEPSEEK_BASE_URL the official adapter documents, so a full host request can be aimed at a
    * capture endpoint during verification; leaving it unset keeps the public API.
    */
+    const chatModels = createChatModelCatalog(ctx, config);
     const chatConnection = () => {
         const baseURL = process.env.DEEPSEEK_BASE_URL?.trim();
-        return resolveChatConnection(baseURL ? { baseURL } : {});
+        return resolveChatConnection({ ...(baseURL ? { baseURL } : {}), models: chatModels.models() });
     };
     // The upload cache is owner-private and lives next to the plugin's own state file; the
     // index is keyed by a hash of the endpoint and key, so no credential reaches disk.
@@ -165,6 +168,7 @@ export async function apply(ctx, config = {}) {
     const chatAttribution = await resolveHostAttribution();
     const chatAdapter = createDeepSeekChatAdapter({
         connection: chatConnection,
+        refreshModels: chatModels.refresh,
         resolveFiles: () => chatFiles,
         ...(chatErrorFactory ? { createError: chatErrorFactory } : {}),
         ...(chatAttribution ? { attributionHeaders: chatAttribution } : {}),
@@ -506,7 +510,7 @@ export async function apply(ctx, config = {}) {
                         protocolMode: state.protocolMode,
                         connection: connectionInfo,
                         // 0.1.7: which connection sessions are routed to, and the ones we can route to.
-                        connectionChoice: connectionSelection(ctx),
+                        connectionChoice: connectionSelection(ctx, sessionId),
                         protocolNotes: ownGet(state.sessions, sessionId)?.protocolNotes ?? [],
                         protocolSwitched: Boolean(sessionId && protocolObserver.last(sessionId)?.switchedFrom),
                         protocolMismatch: presetProtocolMismatch(state, sessionId, session, protocolObserver, connectionInfo),
@@ -603,7 +607,7 @@ export async function apply(ctx, config = {}) {
                     if (typeof provider !== 'string' || !provider)
                         throw new Error('缺少连接标识');
                     const model = typeof body.model === 'string' && body.model.trim() ? body.model.trim() : undefined;
-                    const choice = await selectConnection(ctx, provider, model);
+                    const choice = await selectConnection(ctx, provider, model, url.searchParams.get('sessionId') ?? '');
                     return respond(res, 200, { connectionChoice: choice });
                 }
                 if (body.action === 'save-connection-protocol') {

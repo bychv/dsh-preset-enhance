@@ -103,7 +103,7 @@ export async function writeConnectionProtocol(
 /** Live agent options win over the persisted header when the user changes models. */
 export function sessionConnection(ctx: PluginContext, sessionId: string, provider?: string): ConnectionProtocolInfo | null {
   const session = sessionId ? ctx.sessions.get(sessionId) : undefined;
-  const route = provider || ctx.agents?.get(sessionId)?.options?.provider || session?.requestHeader?.()?.config?.provider;
+  const route = provider || sessionSelection(ctx, sessionId)?.provider || ctx.agents?.get(sessionId)?.options?.provider || session?.requestHeader?.()?.config?.provider;
   // A session with an unresolved route must not change another provider's settings.
   if (sessionId && !route) return null;
   return readConnectionProtocol(ctx, undefined, route);
@@ -153,17 +153,26 @@ interface DefaultModelService {
 const defaultModelService = (ctx: PluginContext): DefaultModelService | undefined =>
   ctx.get?.('agentDefaultModel') as DefaultModelService | undefined;
 
-/** The connection a new session is routed to, read from the host's default-model service. */
-export function connectionSelection(ctx: PluginContext): ConnectionSelection {
+type ModelSelection = { provider?: string; model?: string; reasoningEffort?: string };
+function sessionSelection(ctx: PluginContext, sessionId: string): ModelSelection | undefined {
+  if (!sessionId) return undefined;
+  const session = ctx.sessions?.get(sessionId);
+  if (!session) return undefined;
+  const projections = ctx.get?.('sessionProjections') as { stateOf?(session: unknown, key: string): { pending?: ModelSelection | null; lastUsed?: ModelSelection | null } | undefined } | undefined;
+  const state = projections?.stateOf?.(session, 'modelSelection');
+  return state?.pending ?? state?.lastUsed ?? undefined;
+}
+/** Current conversation selection; a workbench without a session edits the default. */
+export function connectionSelection(ctx: PluginContext, sessionId = ''): ConnectionSelection {
   const service = defaultModelService(ctx);
-  const current = service?.currentSelection?.() ?? undefined;
+  const current = sessionSelection(ctx, sessionId) ?? (sessionId ? ctx.sessions?.get(sessionId)?.requestHeader?.()?.config : undefined) ?? service?.currentSelection?.();
   return {
     provider: typeof current?.provider === 'string' && current.provider ? current.provider : null,
     model: typeof current?.model === 'string' && current.model ? current.model : null,
     reasoningEffort: typeof current?.reasoningEffort === 'string' ? current.reasoningEffort : null,
     choices: [...CONNECTION_CHOICES.map(choice => ({ ...choice })),
       ...hostProviderChoices(ctx).filter(extra => !CONNECTION_CHOICES.some(known => known.provider === extra.provider))],
-    canSwitch: typeof service?.saveSelection === 'function',
+    canSwitch: sessionId ? typeof ctx.get?.('sessionController')?.selectModel === 'function' : typeof service?.saveSelection === 'function',
   };
 }
 
@@ -187,29 +196,35 @@ async function advertisedModelIds(ctx: PluginContext, provider: string): Promise
  * route. Rewriting the wire later (at the fetch stage) is exactly what the 0.1.7 plan
  * rules out, and nothing here writes a `protocol` field - 0.1.7 rejects it.
  */
-export async function selectConnection(ctx: PluginContext, provider: string, model?: string): Promise<ConnectionSelection> {
+export async function selectConnection(ctx: PluginContext, provider: string, model?: string, sessionId = ''): Promise<ConnectionSelection> {
   const service = defaultModelService(ctx);
-  if (typeof service?.saveSelection !== 'function') {
-    throw new Error('当前 DSH 未提供 agentDefaultModel 服务，无法切换连接');
+  const controller = ctx.get?.('sessionController') as { selectModel?(request: { sessionId: string; provider: string; model: string; reasoningEffort?: string }): Promise<{ selected: { provider: string; model: string; reasoningEffort?: string } }> } | undefined;
+  if (sessionId ? typeof controller?.selectModel !== 'function' : typeof service?.saveSelection !== 'function') {
+    throw new Error('当前 DSH 未提供模型切换服务');
   }
   const choice = CONNECTION_CHOICES.find(item => item.provider === provider)
     ?? hostProviderChoices(ctx).find(item => item.provider === provider);
   if (!choice) throw new Error('未知的连接');
-  const current = service.currentSelection?.();
+  const current = connectionSelection(ctx, sessionId);
   const requested = model && model.trim() ? model.trim() : undefined;
   const currentModel = typeof current?.model === 'string' && current.model ? current.model : undefined;
   // Both curated connections advertise the same catalog, so a toggle must not silently change the
   // model. Keep the current id when the target provider confirms it advertises it; a host that
   // cannot answer leaves the curated default in place.
+  const models = await advertisedModelIds(ctx, provider);
   const preserved = requested === undefined && currentModel !== undefined
-    && (await advertisedModelIds(ctx, provider))?.includes(currentModel) === true
+    && models?.includes(currentModel) === true
     ? currentModel
     : undefined;
   const next = {
     provider,
-    model: requested ?? preserved ?? (choice.defaultModel || currentModel || ''),
+    model: requested ?? preserved ?? (models?.includes(choice.defaultModel) ? choice.defaultModel : models?.[0] ?? (choice.defaultModel || currentModel || '')),
     ...(typeof current?.reasoningEffort === 'string' ? { reasoningEffort: current.reasoningEffort } : {}),
   };
-  await service.saveSelection(next);
+  if (sessionId) {
+    const result = await controller!.selectModel!({ sessionId, ...next });
+    return { ...connectionSelection(ctx, sessionId), ...result.selected, reasoningEffort: result.selected.reasoningEffort ?? null };
+  }
+  await service!.saveSelection!(next);
   return connectionSelection(ctx);
 }

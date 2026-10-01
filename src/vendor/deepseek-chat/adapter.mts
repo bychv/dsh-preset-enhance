@@ -32,6 +32,7 @@ const STREAM_IDLE_TIMEOUT_CODE = 'LLM_STREAM_IDLE_TIMEOUT';
 export interface DeepSeekChatDependencies {
   /** Connection facts, re-resolved for every stream call. */
   connection: () => ChatConnectionConfig;
+  refreshModels?: () => Promise<void>;
   /** Resolve the provider API key for one request; never cache or copy it. */
   resolveApiKey: (connection: ChatConnectionConfig, options: GenerateOptions) => Promise<string>;
   /** Anonymous user id sent as x-deepseek-harness-user-id. */
@@ -121,15 +122,18 @@ export class DeepSeekChatAdapter {
     return deepSeekImageRequestPricing(this.dependencies.connection(), model, this.dependencies.resolveImageAccess);
   }
 
-  listModels(provider: string): Promise<readonly LlmModelInfo[]> {
+  async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
+    await this.dependencies.refreshModels?.();
     return Promise.resolve(this.dependencies.connection().models.map(model => catalogModelInfo(provider, model)));
   }
 
-  resolveModel(provider: string, model: string, _signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
+  async resolveModel(provider: string, model: string, _signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
+    await this.dependencies.refreshModels?.();
     return Promise.resolve(modelInfo(this.dependencies.connection(), provider, model));
   }
 
-  prepareCall(provider: string, model: string, _signal?: AbortSignal): Promise<PreparedAdapterCall> {
+  async prepareCall(provider: string, model: string, _signal?: AbortSignal): Promise<PreparedAdapterCall> {
+    await this.dependencies.refreshModels?.();
     const connection = this.dependencies.connection();
     return Promise.resolve({
       model: modelInfo(connection, provider, model),

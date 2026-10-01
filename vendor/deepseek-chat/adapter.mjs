@@ -66,13 +66,16 @@ export class DeepSeekChatAdapter {
     imageRequestPricing(_provider, model) {
         return deepSeekImageRequestPricing(this.dependencies.connection(), model, this.dependencies.resolveImageAccess);
     }
-    listModels(provider) {
+    async listModels(provider) {
+        await this.dependencies.refreshModels?.();
         return Promise.resolve(this.dependencies.connection().models.map(model => catalogModelInfo(provider, model)));
     }
-    resolveModel(provider, model, _signal) {
+    async resolveModel(provider, model, _signal) {
+        await this.dependencies.refreshModels?.();
         return Promise.resolve(modelInfo(this.dependencies.connection(), provider, model));
     }
-    prepareCall(provider, model, _signal) {
+    async prepareCall(provider, model, _signal) {
+        await this.dependencies.refreshModels?.();
         const connection = this.dependencies.connection();
         return Promise.resolve({
             model: modelInfo(connection, provider, model),

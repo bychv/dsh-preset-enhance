@@ -9,6 +9,7 @@
  */
 
 export interface PluginConfig {
+  chatModels?: import('./vendor/deepseek-chat/config.mjs').ChatModelConfig[] | { get(): import('./vendor/deepseek-chat/config.mjs').ChatModelConfig[] };
   dataFile?: string;
   agentPresetRoot?: string;
   standardComposition?: string;
@@ -72,7 +73,7 @@ export interface AgentPresetEvent {
 }
 
 export interface SessionLike {
-  requestHeader?: () => { config?: { provider?: string } } | undefined;
+  requestHeader?: () => { config?: { provider?: string; model?: string; reasoningEffort?: string } } | undefined;
   id?: string;
   header?: { agentPreset?: string; createdAt?: number | string; [key: string]: unknown };
   snapshotEvents?: () => AgentPresetEvent[] | undefined;
@@ -212,6 +213,7 @@ export interface AgentPresetRegistryLike {
 }
 
 export interface PluginContext {
+  fiber?: { entry?: { options: { config?: Record<string, unknown> } } };
   /** Run a callback once the named services are available (host's own optional-dependency pattern). */
   inject?(names: string[], callback: (scoped: any) => void): unknown;
   /** 0.1.7 loader entry tree: every row's full config, readable synchronously after options are assigned. */

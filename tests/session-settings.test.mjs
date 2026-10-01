@@ -105,3 +105,26 @@ test('switching connections keeps a model the target advertises', async () => {
   await selectConnection(ctx, 'deepseek-official', 'deepseek-flash');
   assert.equal(saved[3].model, 'deepseek-flash');
 });
+
+
+test('protocol switch updates the current conversation through the host selector, keeping its own model', async () => {
+  const initial = { provider: 'deepseek-official', model: 'session-model', reasoningEffort: 'low' };
+  const other = { provider: 'deepseek-official', model: 'other-model' };
+  const states = { s: { pending: initial }, other: { pending: other } };
+  const calls = [];
+  const services = {
+    agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-official', model: 'global-model' }), saveSelection: () => { throw new Error('must use session controller'); } },
+    sessionProjections: { stateOf: session => states[session.id] },
+    sessionController: { selectModel: async ({ sessionId, ...selected }) => { calls.push({ sessionId, ...selected }); states[sessionId].pending = selected; return { selected }; } },
+    llm: { listModels: async () => [{ id: 'session-model' }], listProviders: () => [] },
+  };
+  const ctx = { get: name => services[name], llm: services.llm, sessions: { get: id => ({ id }) } };
+  const selected = await selectConnection(ctx, 'preset-deepseek-chat', undefined, 's');
+  assert.deepEqual(calls, [{ sessionId: 's', provider: 'preset-deepseek-chat', model: 'session-model', reasoningEffort: 'low' }]);
+  assert.equal(selected.provider, 'preset-deepseek-chat');
+  assert.equal(states.other.pending, other);
+  await selectConnection(ctx, 'deepseek-official', undefined, 's');
+  assert.equal(states.s.pending.model, 'session-model');
+  delete services.sessionController;
+  await assert.rejects(selectConnection(ctx, 'preset-deepseek-chat', undefined, 's'), /模型切换服务/);
+});
