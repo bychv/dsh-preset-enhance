@@ -15,6 +15,10 @@
     ".": "./index.mjs",
     "./mode": "./mode.mjs",
     "./client": "./client.js",
+    "./templates": {
+      "types": "./templates.d.mts",
+      "default": "./templates.mjs"
+    },
     "./package.json": "./package.json",
     "./locale/*": "./locale/*"
   },
@@ -22,6 +26,8 @@
     "index.mjs",
     "mode.mjs",
     "client.js",
+    "templates.mjs",
+    "templates.d.mts",
     "agent-mode",
     "lib",
     "vendor",
@@ -29,7 +35,8 @@
     "cordis.patch.yml",
     "README.md",
     "PRESET_FORMAT.md",
-    "locale"
+    "locale",
+    "TEMPLATE_API.md"
   ],
   "dsh": {
     "bundle": {

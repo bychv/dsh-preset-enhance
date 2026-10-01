@@ -218,6 +218,7 @@ export interface CompiledPreset {
 }
 
 export interface CompilePresetOptions {
+  templateCatalog?: import('../template-api.mjs').TemplateCatalogSnapshot;
   seed?: string;
   local?: Record<string, string>;
   global?: Record<string, string>;

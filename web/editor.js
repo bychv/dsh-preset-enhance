@@ -4,6 +4,8 @@ const $ = id => document.getElementById(id);
 const sessionId = new URLSearchParams(location.search).get('sessionId') ?? '';
 let state = { presets: [], revision: 0 }, selectedId = '', selectedPrompt = '', dirty = false;
 let preset = blank();
+let pluginTemplatePanel = null;
+const isLinkedTemplate = id => globalThis.PresetPluginTemplates?.linked(preset, id) === true;
 const DSH_SYSTEM_PROMPT_TEMPLATE_ID = 'dsh-preset-enhance:dsh-system-prompt';
 const PRESET_AUTO_SAVE_KEY = 'dsh-preset-enhance.preset-auto-save';
 const PRESET_AUTO_SAVE_DELAY = 600;
@@ -1671,6 +1673,7 @@ function removeFromOrder(id) {
   }
 }
 function renderEditor() {
+  pluginTemplatePanel?.render();
   const prompt = current();
   $('editor').hidden = !prompt;
   $('empty').hidden = !!prompt;
@@ -1686,7 +1689,8 @@ function renderEditor() {
   const chatHistory = prompt.identifier === 'chatHistory';
   $('content').value = chatHistory ? '此内容从当前聊天记录读取' : prompt.content ?? '';
   for (const id of ['prompt-name', 'role', 'position', 'depth', 'priority']) $(id).disabled = fixed;
-  $('content').disabled = fixed || !!prompt.marker;
+  $('content').disabled = fixed || !!prompt.marker || isLinkedTemplate(prompt.identifier);
+  $('role').disabled = fixed || isLinkedTemplate(prompt.identifier);
   $('prompt-enabled').checked = fixed ? preset.dsh_system_prompt_enabled !== false : item?.enabled ?? false;
   $('prompt-enabled').disabled = !used;
   $('up').disabled = fixed || !used;
@@ -1694,7 +1698,7 @@ function renderEditor() {
   $('marker-note').textContent = fixed ?
     '内置模板：控制其他 DSH 模式启用此预设时是否保留该模式的系统提示词；正文从当前模式动态读取，只可开关。' : prompt.marker ?
     `标记 ${prompt.identifier}：chatHistory 展开真实会话；其他标记在下方 JSON 中填写。` :
-    `${prompt.identifier}${used ? '' : ' · 当前为闲置条目，加入顺序表后才会参与注入'}`;
+    `${prompt.identifier}${used ? '' : ' · 当前为闲置条目，加入顺序表后才会参与注入'}${isLinkedTemplate(prompt.identifier) ? ' · 插件关联正文只读；请在插件模板区更新版本或转为本地副本' : ''}`;
 }
 
 for (const [id, key, numeric] of [
@@ -1703,6 +1707,7 @@ for (const [id, key, numeric] of [
 ]) {
   $(id).oninput = () => {
     if (!current() || isDshSystemPromptTemplate(selectedPrompt)) return;
+    if (isLinkedTemplate(selectedPrompt) && (key === 'content' || key === 'role')) return;
     current()[key] = numeric ? Number($(id).value) : $(id).value;
     markDirty();
     if (id === 'prompt-name' || id === 'role') renderList();
@@ -2891,4 +2896,10 @@ async function refreshConnectionState() {
   } catch { /* keep the last confirmed state while disconnected */ }
 }
 window.addEventListener('focus', () => { void refreshConnectionState(); });
+pluginTemplatePanel = globalThis.PresetPluginTemplates?.mount($('plugin-template-panel'), {
+  api, getPreset: () => preset, getPresetId: () => selectedId, getCharacterId: () => $('order').value,
+  getOrder: order, isLocked: id => (state.sPresetEditor?.locks?.[selectedId] ?? []).includes(id),
+  onSelect: id => { selectedPrompt = id; renderList(); renderEditor(); },
+  onChange: (draft, id) => { preset = draft; ensureGroups(); selectedPrompt = id; markDirty(); renderList(); renderEditor(); },
+});
 await guard(() => reload())();

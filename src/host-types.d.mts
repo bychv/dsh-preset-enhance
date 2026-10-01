@@ -214,6 +214,8 @@ export interface AgentPresetRegistryLike {
 
 export interface PluginContext {
   fiber?: { entry?: { options: { config?: Record<string, unknown> } } };
+  /** Publish a service for this plugin scope; Cordis withdraws it on disposal. */
+  provide?(name: string, value: unknown): unknown;
   /** Run a callback once the named services are available (host's own optional-dependency pattern). */
   inject?(names: string[], callback: (scoped: any) => void): unknown;
   /** 0.1.7 loader entry tree: every row's full config, readable synchronously after options are assigned. */

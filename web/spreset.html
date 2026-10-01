@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SPreset Editor</title><link rel="stylesheet" href="/preset-enhance/spreset.css"></head>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SPreset Editor</title><link rel="stylesheet" href="/preset-enhance/spreset.css"><link rel="stylesheet" href="/preset-enhance/plugin-templates.css"></head>
 <body>
 <header class="top">
 <div class="brand"><small>DSH · PRESET ENHANCE</small><h1>SPreset Editor</h1></div>
@@ -24,6 +24,7 @@
 <select id="library-role" aria-label="按角色筛选"><option value="">全部角色</option><option value="system">System</option><option value="user">User</option><option value="assistant">Assistant</option></select>
 </div>
 <div id="library-list" class="list"></div>
+<details id="plugin-template-panel" class="plugin-template-panel"><summary>插件模板</summary></details>
 </section>
 
 <section class="col chain">
@@ -46,5 +47,6 @@
 </section>
 
 <div id="menu-layer" class="menu-layer" hidden></div>
+<script src="/preset-enhance/plugin-templates.js"></script>
 <script type="module" src="/preset-enhance/spreset.js"></script>
 </body></html>

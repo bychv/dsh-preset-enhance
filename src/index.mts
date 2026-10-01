@@ -5,6 +5,9 @@ import { createHash, randomUUID } from 'node:crypto';
 export { Config } from './lib/plugin-config.mjs';
 import { createChatModelCatalog } from './lib/chat-models.mjs';
 import { PresetStore } from './lib/store.mjs';
+import { createTemplateRegistry } from './lib/template-registry.mjs';
+import { resolveTemplateBindings, selectTemplate, templateCatalogWithFingerprints } from './lib/template-bindings.mjs';
+import { PRESET_TEMPLATES_SERVICE } from './templates.mjs';
 import { compilePreset, validatePreset, getOrder, dshSystemPromptEnabled } from './lib/preset.mjs';
 import { decodePresetDocument, encodePresetPackage, attachPrefillSettings, applyPackagePrefill } from './lib/preset-package.mjs';
 import {
@@ -288,6 +291,10 @@ const chatConnection = () => {
     clearPresetEnhanceUnavailableReason();
   }
   const refreshPolicies = (state: PresetState) => { policySnapshot = toolPolicySnapshot(state); };
+  const templateRegistry = createTemplateRegistry(error => console.warn('preset-enhance: template catalog listener failed', error));
+  ctx.effect(() => () => templateRegistry.close(), 'preset-enhance: template registry');
+  const templateServiceAvailable = !startupError && typeof ctx.provide === 'function';
+  if (templateServiceAvailable) ctx.provide!(PRESET_TEMPLATES_SERVICE, templateRegistry.service);
   if (!startupError) installToolRestrictions(ctx, () => policySnapshot, sessionModeId);
   const tools = ctx.tools;
   if (tools?.guard && !startupError) {
@@ -311,6 +318,7 @@ const chatConnection = () => {
     const sessionId = options.sessionId;
     const session = sessionId ? ctx.sessions.get(sessionId) : undefined;
     if (routed.has(options) || options.purpose || !session || !sessionId) { yield* next(); return; }
+    const templateCatalog = templateRegistry.service.list();
 
     const connectionInfo = sessionConnection(ctx, sessionId, options.provider);
     const modeId = sessionModeId(session);
@@ -349,11 +357,14 @@ const chatConnection = () => {
           ? presetModeHistory(history) : history;
         const postToolPrefix = current.deepseekBetaPrefix && current.postToolPrefixMode === 'custom'
           ? current.postToolPrefixText : undefined;
-        const key = digest({ compiler: PRESET_COMPILER_VERSION, messages: presetHistory, preset: record, binding, postToolPrefix, protocol: connectionProtocolFor(current, connectionInfo) });
+        const templateReferences = resolveTemplateBindings(record.preset, templateCatalog,
+          new Set(getOrder(record.preset, binding.characterId).filter(item => item.enabled).map(item => item.identifier))).references;
+        const key = digest({ compiler: PRESET_COMPILER_VERSION, messages: presetHistory, preset: record, binding, postToolPrefix,
+          templateReferences, protocol: connectionProtocolFor(current, connectionInfo) });
         const prior = ownGet(current.sessions, sessionId);
         if (prior?.key === key) return prior.result;
         const compiledResult = compilePreset(record.preset, presetHistory, {
-          ...binding, seed: key, local: prior?.result.local, global: current.global, postToolPrefix,
+          ...binding, seed: key, local: prior?.result.local, global: current.global, postToolPrefix, templateCatalog,
         });
         options.signal?.throwIfAborted();
         // The host serializes the request with whichever protocol its connection uses, and
@@ -428,7 +439,18 @@ const chatConnection = () => {
     [`${BASE}/editor`, ['web/spreset.html', 'text/html']],
     [`${BASE}/spreset.js`, ['web/spreset.js', 'text/javascript']],
     [`${BASE}/spreset.css`, ['web/spreset.css', 'text/css']],
+    [`${BASE}/plugin-templates.js`, ['web/plugin-templates.js', 'text/javascript']],
+    [`${BASE}/plugin-templates.css`, ['web/plugin-templates.css', 'text/css']],
   ]);
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact', path: `${BASE}/api/templates`, handler: async (req: HostRequest, res: HostResponse) => {
+      if (req.method !== 'GET') return respond(res, 405, { error: 'Method not allowed' });
+      if (lifecycle.closing || !templateServiceAvailable) return respond(res, 503, {
+        error: startupError ?? (lifecycle.closing ? '插件正在停用，请稍后重试' : '宿主未提供模板服务注册能力'),
+      });
+      return respond(res, 200, templateCatalogWithFingerprints(templateRegistry.service.list()));
+    },
+  }), 'preset-enhance: template catalog route');
   for (const [path, [file, mime]] of assets) ctx.effect(() => ctx.webServer.register({
     kind: 'exact', path,
     handler: async (req: HostRequest, res: HostResponse) => {
@@ -522,9 +544,17 @@ const chatConnection = () => {
         if (!String(req.headers['content-type'] ?? '').startsWith('application/json')) throw new Error('需要 application/json');
         if (req.headers.origin && new URL(String(req.headers.origin)).host !== req.headers.host) throw new Error('拒绝跨来源写入');
         const body = await readJson(req);
+        if (body.action === 'template-select') {
+          const draft = validatePreset(body.preset);
+          const current = await store.read();
+          const locks = presetLocks(current.sPresetEditor, String(body.presetId ?? ''));
+          const result = selectTemplate(draft, templateRegistry.service.list(), body.selection ?? {}, locks);
+          validatePreset(result.preset);
+          return respond(res, 200, result);
+        }
         if (body.action === 'preview') {
           return respond(res, 200, compilePreset(body.preset, previewHistory(ctx, body), {
-            ...body.options, seed: 'preview',
+            ...body.options, seed: 'preview', templateCatalog: templateRegistry.service.list(),
           }));
         }
 

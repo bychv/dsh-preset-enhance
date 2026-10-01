@@ -1,4 +1,5 @@
 import { createMacroContext, renderMacros } from './macros.mjs';
+import { resolveTemplateBindings, templateBindings } from './template-bindings.mjs';
 import { PREFILL_DEPTH, applyChatSegments, buildChatDepths, chatTargetOf, planChatMessage, readPromptRegexOptions, readRegexScripts, regexName } from './prompt-regex.mjs';
 import type { ChatMessagePlan } from './prompt-regex.mjs';
 import { getRegexRunner } from './regex-runner.mjs';
@@ -23,6 +24,7 @@ export function validatePreset(preset: unknown): SillyTavernPreset {
     throw new Error('dsh_system_prompt_enabled 必须是布尔值');
   }
   const ids = new Set<string>();
+  templateBindings(preset as unknown as SillyTavernPreset);
   for (const p of preset.prompts as unknown[]) {
     if (!isRecord(p) || typeof p.identifier !== 'string' || !p.identifier || ids.has(p.identifier)) throw new Error('提示词 identifier 缺失或重复');
     ids.add(p.identifier);
@@ -67,12 +69,15 @@ function textOf(message: HostMessage | undefined): string {
 /** Compile only preset text; history, attachments and tool blocks pass through intact. */
 export function compilePreset(preset: SillyTavernPreset, history: HostMessage[] = [], options: CompilePresetOptions = {}): CompiledPreset {
   validatePreset(preset);
+  const resolved = resolveTemplateBindings(preset, options.templateCatalog, new Set(getOrder(preset, options.characterId).filter(item => item.enabled).map(item => item.identifier)));
+  preset = resolved.preset;
   const last = (role: 'user' | 'assistant') => textOf(history.findLast(m => m.role === role && (role !== 'user' || m.source?.kind !== 'tool')));
   const ctx = createMacroContext({ local: options.local, global: options.global, seed: options.seed ?? 'preview', values: {
       user: 'User', char: 'Assistant', lastusermessage: last('user'), lastcharmessage: last('assistant'),
       lastmessage: textOf(history.at(-1)), ...options.values,
     } });
   const before: HostMessage[] = [], after: HostMessage[] = [], depthEntries: DepthEntry[] = [], entries: CompiledEntry[] = [];
+  ctx.warnings.push(...resolved.warnings);
   let hasHistory = false;
   const byId = new Map<string, PresetPrompt>(preset.prompts.map(p => [p.identifier, p] as [string, PresetPrompt]));
   for (const item of getOrder(preset, options.characterId)) {

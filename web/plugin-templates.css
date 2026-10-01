@@ -1,0 +1,8 @@
+.plugin-template-panel { margin: 12px 0; padding: 12px; border: 1px solid #8793a655; border-radius: 8px; min-width: 0; }
+.plugin-template-panel summary { cursor: pointer; font-weight: 600; }
+.plugin-template-panel p { font-size: 12px; overflow-wrap: anywhere; }
+.plugin-template-panel select { width: 100%; margin: 8px 0; }
+.plugin-template-panel button { margin: 4px 6px 4px 0; }
+.plugin-template-text { max-height: 180px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; padding: 8px; background: #8793a610; }
+.plugin-template-binding { padding: 10px 0; border-top: 1px solid #8793a644; }
+.library > .plugin-template-panel { flex: 0 0 auto; max-height: 45vh; overflow: auto; margin: 10px; }

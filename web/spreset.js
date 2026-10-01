@@ -29,6 +29,8 @@ let presetName = '';
 let presetDirty = false;
 let templateDirty = false;
 let library = { entries: [] };
+let pluginTemplatePanel = null;
+const isLinkedTemplate = id => globalThis.PresetPluginTemplates?.linked(preset, id) === true;
 let segment = 'unused';
 let search = '';
 let roleFilter = '';
@@ -542,6 +544,8 @@ function renderInspector() {
   }
   const isTemplate = target.kind === 'library';
   const source = isTemplate ? target.entry : target.prompt;
+  const linked = !isTemplate && isLinkedTemplate(source.identifier);
+  if (linked) body.append(el('p', 'honesty', '插件模板：正文与角色只读。可更新版本或转为本地副本。'));
   $('inspector-title').textContent = isTemplate ? 'INSPECTOR · 模板' : 'INSPECTOR · 条目';
   const stOnly = flaggedCount(source);
   if (stOnly > 0) {
@@ -580,10 +584,12 @@ function renderInspector() {
   }
   role.value = ROLE_NAME[source.role] ? source.role : 'system';
   role.onchange = () => {
+    if (linked) return;
     if (isTemplate) { source.role = role.value; templateDirty = true; status('模板未保存', 'dirty'); }
     else { source.role = role.value; markPreset(); renderChainRowInPlace(selection.id); }
   };
   body.append(field('角色', role));
+  role.disabled = linked;
 
   const position = isTemplate ? (source.injectionPosition === 1 ? 1 : 0) : (source.injection_position === 1 ? 1 : 0);
   const segmentRow = el('div', 'segment');
@@ -657,12 +663,13 @@ function renderInspector() {
   textarea.spellcheck = false;
   const marker = !isTemplate && source.marker === true;
   // 锁定正文：编辑器侧防误编辑。锁定后正文只读，粘贴/输入/程序化写入都不生效。
-  textarea.disabled = marker || bodyLocked;
+  textarea.disabled = marker || bodyLocked || linked;
   const refreshCounter = () => {
     const value = textarea.value;
     counter.textContent = fmtCount(value.length) + ' 字符 · ' + fmtCount(value ? value.split('\n').length : 0) + ' 行';
   };
   textarea.oninput = () => {
+    if (linked) { textarea.value = source.content ?? ''; return; }
     if (isTemplate) { source.content = textarea.value; templateDirty = true; status('模板未保存', 'dirty'); }
     else { source.content = textarea.value; markPreset(); renderChainRowInPlace(selection.id); }
     refreshCounter();
@@ -1034,6 +1041,7 @@ async function removeLibraryEntry(id) {
 /* ----------------------------------------------------------------- render */
 
 function renderAll() {
+  pluginTemplatePanel?.render();
   renderLibrary();
   renderChain();
   renderInspector();
@@ -1101,4 +1109,10 @@ async function boot() {
     status('加载失败：' + error.message, 'error');
   }
 }
+pluginTemplatePanel = globalThis.PresetPluginTemplates?.mount($('plugin-template-panel'), {
+  api, getPreset: () => preset, getPresetId: () => presetId, getCharacterId: () => groupId,
+  getOrder: chainOrder, isLocked: id => lockedIds().has(id),
+  onSelect: id => { selection = { kind: 'chain', id }; renderAll(); },
+  onChange: (draft, id) => { preset = draft; selection = { kind: 'chain', id }; markPreset(); renderAll(); },
+});
 boot();

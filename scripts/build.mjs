@@ -65,6 +65,8 @@ try {
       await emit(join(dist, entry.name), join(root, entry.name));
     }
   }
+  // The public template contract is self-contained: consumers need no host/internal types.
+  await emit(join(root, 'src', 'template-api.d.mts'), join(root, 'templates.d.mts'));
   for (const entry of await readdir(join(dist, 'lib'), { withFileTypes: true })) {
     if (entry.isFile() && entry.name.endsWith('.mjs')) {
       await emit(join(dist, 'lib', entry.name), join(root, 'lib', entry.name));
