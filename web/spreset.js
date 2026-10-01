@@ -36,7 +36,7 @@ let groupId = '';
 let selection = null;
 let inspectorTab = '内容';
 let plans = null;
-let dragIndex = -1;
+let cancelChainDrag = null;
 // Editor-side entry locks, keyed by preset id (state.sPresetEditor). Never written into a preset:
 // the preset field forbid_overrides is mirrored for round-tripping, but the guard reads this.
 let editorLocks = { locks: {} };
@@ -257,6 +257,7 @@ function duplicateRow(row) {
 /* ------------------------------------------------------------------- chain */
 
 function renderChain() {
+  cancelChainDrag?.();
   const list = $('chain-list');
   list.replaceChildren();
   const order = chainOrder();
@@ -278,7 +279,7 @@ function renderChainRow(item, index) {
   const row = el('div', 'chain-row' + (selection && selection.kind === 'chain' && selection.id === item.identifier ? ' selected' : '')
     + (item.enabled === false ? ' disabled' : ''));
   row.dataset.id = item.identifier;
-  row.draggable = true;
+  row.draggable = false;
   // Selecting the row is what opens the INSPECTOR. The row actions below stop propagation, so
   // copy/edit/power/… keep their own behaviour and a click anywhere else in the row selects.
   const select = () => { selection = { kind: 'chain', id: item.identifier }; renderAll(); };
@@ -290,10 +291,7 @@ function renderChainRow(item, index) {
     event.preventDefault();
     select();
   };
-  row.ondragstart = event => { dragIndex = index; row.classList.add('dragging'); if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move'; };
-  row.ondragend = () => { dragIndex = -1; row.classList.remove('dragging'); };
-  row.ondragover = event => { event.preventDefault(); if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'; };
-  row.ondrop = event => { event.preventDefault(); moveChain(dragIndex, index); };
+  row.onpointerdown = event => beginChainDrag(event, row, item.identifier);
   row.append(el('span', 'handle', '⠿'));
   const main = el('div', 'chain-main');
   const top = el('div', 'chain-top');
@@ -319,6 +317,86 @@ function renderChainRow(item, index) {
   row.append(main, toggle, actions);
   return row;
 }
+/** Pointer sorting keeps the lifted row opaque and moves its gap immediately. */
+function beginChainDrag(event, row, identifier) {
+  if (event.button !== 0 || event.target.closest('button,input,label,a,select,textarea')) return;
+  if (event.pointerType === 'touch' && !event.target.closest('.handle')) return;
+  cancelChainDrag?.();
+  const list = $('chain-list'), order = chainOrder(), original = [...order];
+  const startY = event.clientY, startX = event.clientX;
+  let pointerY = startY, pointerX = startX, lifted = false, gap, bounds, frame;
+  const rows = () => [...list.children].filter(node => node.classList.contains('chain-row'));
+  const update = () => {
+    row.style.top = (bounds.top + pointerY - startY) + 'px';
+    row.style.left = (bounds.left + pointerX - startX) + 'px';
+    const siblings = rows();
+    const before = siblings.find(node => pointerY < node.getBoundingClientRect().top + node.getBoundingClientRect().height / 2);
+    const to = before ? order.findIndex(item => item.identifier === before.dataset.id) : order.length;
+    const from = order.findIndex(item => item.identifier === identifier);
+    const target = to > from ? to - 1 : to;
+    if (target === from) return;
+    const positions = new Map(siblings.map(node => [node, node.getBoundingClientRect().top]));
+    const [moved] = order.splice(from, 1); order.splice(target, 0, moved);
+    list.insertBefore(gap, before ?? null);
+    if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      for (const node of siblings) {
+        const delta = positions.get(node) - node.getBoundingClientRect().top;
+        if (delta) node.animate?.([{ transform: 'translateY(' + delta + 'px)' }, { transform: 'translateY(0)' }], { duration: 140, easing: 'ease-out' });
+      }
+    }
+  };
+  const scroll = () => {
+    if (!lifted) return;
+    const viewport = list.getBoundingClientRect();
+    const direction = pointerY < viewport.top + 36 ? -1 : pointerY > viewport.bottom - 36 ? 1 : 0;
+    if (direction) { list.scrollTop += direction * 9; update(); }
+    frame = requestAnimationFrame(scroll);
+  };
+  const move = e => {
+    if (e.pointerId !== event.pointerId) return;
+    pointerY = e.clientY; pointerX = e.clientX;
+    if (!lifted && Math.hypot(pointerY - startY, pointerX - startX) < 6) return;
+    e.preventDefault();
+    if (!lifted) {
+      lifted = true; bounds = row.getBoundingClientRect();
+      gap = el('div', 'chain-placeholder'); gap.style.height = bounds.height + 'px';
+      list.insertBefore(gap, row); document.body.append(row);
+      row.classList.add('dragging'); row.style.width = bounds.width + 'px'; row.style.height = bounds.height + 'px';
+      row.setPointerCapture?.(event.pointerId);
+      frame = requestAnimationFrame(scroll);
+    }
+    update();
+  };
+  const finish = (cancelled, rerender = true) => {
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', up);
+    window.removeEventListener('pointercancel', cancel);
+    window.removeEventListener('blur', cancel);
+    window.removeEventListener('keydown', key);
+    cancelChainDrag = null;
+    if (!lifted) return;
+    cancelAnimationFrame(frame);
+    if (cancelled) order.splice(0, order.length, ...original);
+    else if (order.some((item, index) => item !== original[index])) markPreset();
+    row.releasePointerCapture?.(event.pointerId);
+    gap.replaceWith(row); row.classList.remove('dragging'); row.removeAttribute('style');
+    // Suppress only the click generated by this drag release.
+    const suppress = e => { e.preventDefault(); e.stopPropagation(); };
+    window.addEventListener('click', suppress, { capture: true, once: true });
+    setTimeout(() => window.removeEventListener('click', suppress, true), 0);
+    if (rerender) renderChain();
+  };
+  const up = e => { if (e.pointerId === event.pointerId) finish(false); };
+  const cancel = e => { if (e.pointerId === undefined || e.pointerId === event.pointerId) finish(true); };
+  const key = e => { if (e.key === 'Escape') { e.preventDefault(); finish(true); } };
+  cancelChainDrag = () => finish(true, false);
+  window.addEventListener('pointermove', move, { passive: false });
+  window.addEventListener('pointerup', up);
+  window.addEventListener('pointercancel', cancel);
+  window.addEventListener('blur', cancel);
+  window.addEventListener('keydown', key);
+}
+
 function chainMenu(index) {
   const item = chainOrder()[index];
   const prompt = promptOf(item?.identifier) ?? {};
@@ -964,6 +1042,7 @@ function renderAll() {
 
 /* ------------------------------------------------------------------- init */
 
+$('back-workbench').href = '/preset-enhance' + (sessionId ? '?sessionId=' + encodeURIComponent(sessionId) : '');
 $('save-preset').onclick = guard(savePreset);
 $('preset-select').onchange = guard(async () => {
   if (presetDirty && !confirm('放弃尚未保存的预设修改？')) { $('preset-select').value = presetId; return; }

@@ -40,9 +40,10 @@ a.back{color:#9edfc7;font-size:12px;text-decoration:none}
 .chain-row{display:flex;align-items:center;gap:8px;border:1px solid #293a43;border-radius:8px;background:#131d24;padding:6px 8px;cursor:pointer}
 .chain-row:focus-visible{outline:2px solid #a9dfcc;outline-offset:1px}
 .chain-row.selected{border-color:#48907e;background:#1b2b31}
-.chain-row.dragging{opacity:.45}
+.chain-row.dragging{position:fixed;z-index:1000;pointer-events:none;opacity:1;box-shadow:0 12px 28px #0008;cursor:grabbing;user-select:none;box-sizing:border-box}
+.chain-placeholder{flex:none;border:1px dashed #48907e;border-radius:8px;box-sizing:border-box;background:#1b2b3144}
 .chain-row.disabled .chain-main{opacity:.5}
-.handle{cursor:grab;color:#5c7d88;user-select:none}
+.handle{touch-action:none;cursor:grab;color:#5c7d88;user-select:none}
 .chain-main{min-width:0;flex:1}
 .chain-top{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
 .row-actions{display:flex;gap:3px}

@@ -13,7 +13,7 @@ import { FileResolutionFailure, RequestFiles } from './request-files.mjs';
 /** Provider route id the plugin registers. */
 export const DEEPSEEK_CHAT_PROVIDER_ID = 'preset-deepseek-chat';
 /** Display name shown by the host selectors. */
-export const DEEPSEEK_CHAT_PROVIDER_NAME = 'DeepSeek Chat（预设增强）';
+export const DEEPSEEK_CHAT_PROVIDER_NAME = 'DeepSeek-预设增强';
 const STREAM_IDLE_TIMEOUT_CODE = 'LLM_STREAM_IDLE_TIMEOUT';
 /**
  * Idle guard as a stream transform: every received byte re-arms the timer and a stall

@@ -101,7 +101,7 @@ test('plugin Chat connection defaults to the official Chat root, never the Messa
   assert.equal(DEEPSEEK_CHAT_BASE_URL, 'https://api.deepseek.com');
   assert.equal(connection.baseURL.includes('anthropic'), false);
   assert.equal(DEEPSEEK_CHAT_PROVIDER_ID, 'preset-deepseek-chat');
-  assert.equal(DEEPSEEK_CHAT_PROVIDER_NAME, 'DeepSeek Chat（预设增强）');
+  assert.equal(DEEPSEEK_CHAT_PROVIDER_NAME, 'DeepSeek-预设增强');
 });
 
 test('one plain-text request completes end to end and carries attribution', async () => {

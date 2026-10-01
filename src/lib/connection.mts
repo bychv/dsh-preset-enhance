@@ -141,7 +141,7 @@ const hostProviderChoices = (ctx: PluginContext): ConnectionChoice[] => {
 };
 
 const CONNECTION_CHOICES: ConnectionChoice[] = [
-  { provider: 'preset-deepseek-chat', label: '插件 DeepSeek Chat（预设增强）', protocol: 'chat-completions', defaultModel: 'deepseek-flash' },
+  { provider: 'preset-deepseek-chat', label: 'DeepSeek-预设增强', protocol: 'chat-completions', defaultModel: 'deepseek-flash' },
   { provider: 'deepseek-official', label: 'DSH 官方连接（Messages）', protocol: 'messages', defaultModel: 'deepseek-v4-pro' },
 ];
 

@@ -25,7 +25,10 @@ function element(tag) {
       remove(name) { node.className = String(node.className || '').split(/\s+/).filter(token => token && token !== name).join(' '); },
       contains(name) { return String(node.className || '').split(/\s+/).includes(name); },
     },
-    append(...kids) { for (const kid of kids) { kid.parentNode = node; node.children.push(kid); } },
+    append(...kids) { for (const kid of kids) { if (kid.parentNode) kid.parentNode.children = kid.parentNode.children.filter(n => n !== kid); kid.parentNode = node; node.children.push(kid); } },
+    insertBefore(kid, before) { if (kid.parentNode) kid.parentNode.children = kid.parentNode.children.filter(n => n !== kid); const index = before ? node.children.indexOf(before) : node.children.length; node.children.splice(index, 0, kid); kid.parentNode = node; },
+    replaceWith(kid) { const parent = node.parentNode; parent.insertBefore(kid, node); parent.children = parent.children.filter(n => n !== node); node.parentNode = null; },
+    closest(selector) { return selector.split(',').some(part => matches(node, part)) ? node : node.parentNode?.closest(selector) ?? null; },
     replaceChildren(...kids) { node.children = []; node.append(...kids); },
     setAttribute() {}, removeAttribute() {}, addEventListener() {},
     getBoundingClientRect() { return { top: 0, right: 0, bottom: 0, left: 0, width: 0, height: 0 }; },
@@ -277,4 +280,35 @@ test('a row action button does not change the selection accidentally', async () 
   toggle.click();
   await flush();
   assert.match(ui.get('inspector-title').textContent, /^INSPECTOR$/, 'the power action must not select the row');
+});
+
+
+test('pointer sorting reorders before release, stays opaque and supports cancellation', async () => {
+  const ui = editor(); await flush(); await selectGroup(ui, 100002);
+  const events = new Map();
+  ui.context.window.addEventListener = (type, fn) => events.set(type, fn);
+  ui.context.window.removeEventListener = (type, fn) => { if (events.get(type) === fn) events.delete(type); };
+  ui.context.document.body = element('body');
+  ui.context.requestAnimationFrame = () => 1;
+  ui.context.cancelAnimationFrame = () => {};
+  const list = ui.get('chain-list');
+  const wireBounds = () => { for (const row of list.children) row.getBoundingClientRect = () => ({ left: 0, width: 300, height: 50, top: list.children.indexOf(row) * 60, bottom: list.children.indexOf(row) * 60 + 50 }); };
+  wireBounds();
+  const row = list.children[0];
+  const pointer = (y, target = row) => ({ button: 0, pointerId: 1, pointerType: 'mouse', clientY: y, clientX: 10, target, preventDefault() {} });
+  row.onpointerdown(pointer(20));
+  events.get('pointermove')(pointer(110));
+  assert.deepEqual(Array.from(ui.draft().prompt_order[1].order, p => p.identifier), ['main', 'other'], 'order changes during the gesture');
+  assert.equal(row.parentNode, ui.context.document.body);
+  assert.equal(row.classList.contains('dragging'), true);
+  assert.equal(row.style.opacity, undefined, 'no faded native drag image');
+  events.get('pointerup')(pointer(110));
+  assert.deepEqual(list.children.map(n => n.dataset.id), ['main', 'other']);
+  wireBounds();
+  const next = list.children[0];
+  next.onpointerdown(pointer(20, next));
+  events.get('pointermove')(pointer(110, next));
+  events.get('keydown')({ key: 'Escape', preventDefault() {} });
+  assert.deepEqual(Array.from(ui.draft().prompt_order[1].order, p => p.identifier), ['main', 'other'], 'cancel restores the prior order');
+  assert.equal(events.has('pointermove'), false);
 });
