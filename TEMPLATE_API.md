@@ -69,6 +69,7 @@ TypeScript 可从同一公开子路径导入 `PresetTemplatesV1`、`PromptTempla
 | `description` | 可选文本，最多 2,000 字符 |
 | `role` | `system`、`user` 或 `assistant` |
 | `content` | 静态文本，可为空，最多 200,000 字符；注册时不展开宏、不执行回调 |
+| `targetMarker` | 可选的酒馆 marker identifier，例如 charDescription、worldInfoBefore；声明后仅能关联该标记，不作为新增提示词插入 |
 | `defaults.placement` | 可选位置建议：`beforeHistory`、`afterHistory` 或 `depth` |
 | `defaults.depth` | depth 位置必须提供非负安全整数，其他位置不可填写 |
 | `defaults.order` | depth 位置可选的安全整数，用于深度注入排序 |
@@ -115,6 +116,26 @@ GET /preset-enhance/api/templates
 
 ## 引用与单文件分享
 
+### 关联酒馆内置标记
+
+外部模板现在也能提供预设内 marker 条目的正文。提供者仍使用 register 注册静态模板，可加 targetMarker 指定用途：
+
+```js
+{
+  id: 'character-description', version: '1', title: '角色描述',
+  role: 'system', targetMarker: 'charDescription',
+  content: '角色信息：{{char}}',
+}
+```
+
+用户在两个编辑器的“插件模板”区选择版本、选择现有 marker，然后点击“关联到标记条目”并保存。未指定 targetMarker 的通用模板也可手动关联到 marker。注册本身不接管任何条目，不按显示名称匹配或自动创建标记。
+
+关联只替换编译时的正文：保留原 identifier、marker、角色、顺序、深度、触发条件和启用状态，不把闲置或停用条目自动加入顺序表。模板 role/defaults 对 marker 关联不生效；模板宏仍在原位置展开。chatHistory 和内置 DSH 系统提示词控制条目不能作为目标。
+
+更新固定版本、内容指纹检查、缺失依赖提示和锁定限制沿用普通关联。缺失或同版本变更时跳过该条目，不悄悄切回旧快照或原标记来源。“恢复原标记”解除关联，之后重新使用原有 markers 输入；它不把原 marker 转为普通文本提示词。此接口提供正文，不实现世界书检索或变量插件本身。
+
+标记关联保存为 templateBindings[identifier]，在普通引用字段上增加 target: "marker" 和 contentSnapshot。原 prompts 条目完整保留，正文编辑框只读显示插件快照。导出和重载保持该引用；旧版不支持 marker 关联时会跳过并提示，而非将其作为普通模板注入。
+
 在 ST 预设内部保存（分享包中即 preset.data），以提示词 identifier 为键：
 
 ```json
@@ -137,4 +158,4 @@ GET /preset-enhance/api/templates
 
 prompts 中同 identifier 的角色和正文是保存时的源文本快照，prompt_order 仍是开关和位置的权威。未知扩展字段保留。普通 JSON 和单文件分享都会保留引用及快照；接收者未安装提供者时可查看快照、安装依赖，或显式转为本地副本。不分享整个提供者目录、运行时变量或插件代码。
 
-编辑器通过 POST /preset-enhance/api 的 template-select 动作转换草稿，参数为 preset、presetId、selection。selection 包含 operation（add/update/detach）、identifier（更新/解除时）、providerId/templateId/templateVersion、expectedFingerprint（添加/更新时）和 characterId。返回 preset、identifier、changed；该动作不写盘，之后复用已有带 revision 的保存动作。GET 目录端点仍然只读。
+编辑器通过 POST /preset-enhance/api 的 template-select 动作转换草稿，参数为 preset、presetId、selection。selection 包含 operation（add/bind-marker/update/detach）、identifier（关联标记/更新/解除时）、providerId/templateId/templateVersion、expectedFingerprint（添加/关联/更新时）和 characterId。返回 preset、identifier、changed；该动作不写盘，之后复用已有带 revision 的保存动作。GET 目录端点仍然只读。

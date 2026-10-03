@@ -1687,7 +1687,8 @@ function renderEditor() {
   $('depth').value = prompt.injection_depth ?? 4;
   $('priority').value = prompt.injection_order ?? 100;
   const chatHistory = prompt.identifier === 'chatHistory';
-  $('content').value = chatHistory ? '此内容从当前聊天记录读取' : prompt.content ?? '';
+  const templateRef = globalThis.PresetPluginTemplates?.bindings(preset)?.[prompt.identifier];
+  $('content').value = chatHistory ? '此内容从当前聊天记录读取' : templateRef?.target === 'marker' ? templateRef.contentSnapshot ?? '' : prompt.content ?? '';
   for (const id of ['prompt-name', 'role', 'position', 'depth', 'priority']) $(id).disabled = fixed;
   $('content').disabled = fixed || !!prompt.marker || isLinkedTemplate(prompt.identifier);
   $('role').disabled = fixed || isLinkedTemplate(prompt.identifier);
@@ -1697,7 +1698,7 @@ function renderEditor() {
   $('down').disabled = fixed || !used;
   $('marker-note').textContent = fixed ?
     '内置模板：控制其他 DSH 模式启用此预设时是否保留该模式的系统提示词；正文从当前模式动态读取，只可开关。' : prompt.marker ?
-    `标记 ${prompt.identifier}：chatHistory 展开真实会话；其他标记在下方 JSON 中填写。` :
+    (templateRef?.target === 'marker' ? `标记 ${prompt.identifier}：正文由插件模板提供；可在插件模板区恢复原标记。` : `标记 ${prompt.identifier}：chatHistory 展开真实会话；其他标记在下方 JSON 中填写。`) :
     `${prompt.identifier}${used ? '' : ' · 当前为闲置条目，加入顺序表后才会参与注入'}${isLinkedTemplate(prompt.identifier) ? ' · 插件关联正文只读；请在插件模板区更新版本或转为本地副本' : ''}`;
 }
 

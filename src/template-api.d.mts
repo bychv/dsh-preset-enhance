@@ -12,6 +12,8 @@ export interface PromptTemplateV1 {
   description?: string;
   role: 'system' | 'user' | 'assistant';
   content: string;
+  /** Optional Tavern marker identifier; selected explicitly, never chatHistory. */
+  targetMarker?: string;
   defaults?: {
     placement: 'beforeHistory' | 'afterHistory' | 'depth';
     depth?: number;

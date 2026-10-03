@@ -42,6 +42,10 @@ function templatesOf(value: unknown): PromptTemplateV1[] {
       content: text(raw.content, '模板 content', MAX_CONTENT, true),
     };
     if (raw.description !== undefined) item.description = text(raw.description, '模板 description', 2000, true);
+    if (raw.targetMarker !== undefined) {
+      item.targetMarker = identifier(raw.targetMarker, 'targetMarker');
+      if (['chatHistory', 'dsh-preset-enhance:dsh-system-prompt'].includes(item.targetMarker)) throw new Error('不能替换聊天记录或 DSH 系统提示词标记');
+    }
     if (raw.defaults !== undefined) {
       const defaults = raw.defaults;
       if (!isRecord(defaults) || typeof defaults.placement !== 'string' || !['beforeHistory', 'afterHistory', 'depth'].includes(defaults.placement)) {

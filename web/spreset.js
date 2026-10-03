@@ -659,7 +659,9 @@ function renderInspector() {
 
   const counter = el('div', 'counter');
   const textarea = el('textarea');
-  textarea.value = source.content ?? '';
+  const templateRef = !isTemplate ? globalThis.PresetPluginTemplates?.bindings(preset)?.[source.identifier] : null;
+  const displayContent = () => templateRef?.target === 'marker' ? templateRef.contentSnapshot ?? '' : source.content ?? '';
+  textarea.value = displayContent();
   textarea.spellcheck = false;
   const marker = !isTemplate && source.marker === true;
   // 锁定正文：编辑器侧防误编辑。锁定后正文只读，粘贴/输入/程序化写入都不生效。
@@ -669,7 +671,7 @@ function renderInspector() {
     counter.textContent = fmtCount(value.length) + ' 字符 · ' + fmtCount(value ? value.split('\n').length : 0) + ' 行';
   };
   textarea.oninput = () => {
-    if (linked) { textarea.value = source.content ?? ''; return; }
+    if (linked) { textarea.value = displayContent(); return; }
     if (isTemplate) { source.content = textarea.value; templateDirty = true; status('模板未保存', 'dirty'); }
     else { source.content = textarea.value; markPreset(); renderChainRowInPlace(selection.id); }
     refreshCounter();

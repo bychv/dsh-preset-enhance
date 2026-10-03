@@ -64,8 +64,23 @@
         root.append(node('p', `${selected.ref.providerId} · ${selected.ref.templateId} · ${selected.template.role} · ${selected.template.defaults?.placement ?? 'beforeHistory'}`));
         if (selected.template.description) root.append(node('p', selected.template.description));
         const content = node('pre', selected.template.content); content.className = 'plugin-template-text'; root.append(content);
-        root.append(button('加入当前顺序表', () => mutate({ operation: 'add', ...selected.ref,
+        if (!selected.template.targetMarker) root.append(button('加入当前顺序表', () => mutate({ operation: 'add', ...selected.ref,
           expectedFingerprint: fingerprint(selected.ref) }), !ready || !options.getPreset()));
+        const targets = (options.getPreset()?.prompts ?? []).filter(prompt => prompt.marker === true &&
+          !['chatHistory', 'dsh-preset-enhance:dsh-system-prompt'].includes(prompt.identifier) &&
+          (!selected.template.targetMarker || selected.template.targetMarker === prompt.identifier));
+        const target = node('select'); target.setAttribute('aria-label', '关联酒馆标记条目');
+        target.append(node('option', '选择 marker 条目…')); target.firstChild.value = '';
+        for (const prompt of targets) {
+          const option = node('option', `${prompt.name ?? prompt.identifier} · ${prompt.identifier}`);
+          option.value = prompt.identifier; option.disabled = options.isLocked(prompt.identifier) || linked(options.getPreset(), prompt.identifier); target.append(option);
+        }
+        const bind = button('关联到标记条目', () => mutate({ operation: 'bind-marker', identifier: target.value, ...selected.ref,
+          expectedFingerprint: fingerprint(selected.ref) }), true);
+        target.onchange = () => { bind.disabled = busy || !ready || !target.value; };
+        target.disabled = busy || !ready;
+        if (targets.length) root.append(target, bind);
+        else if (selected.template.targetMarker) root.append(node('p', '此预设没有对应的 marker：' + selected.template.targetMarker));
       }
       const preset = options.getPreset();
       if (!preset) return;
@@ -83,11 +98,11 @@
         row.append(node('strong', prompt.name ?? prompt.identifier), node('p', `${ref.providerId ?? '?'} / ${ref.templateId ?? '?'} @ ${ref.templateVersion ?? '?'}`),
           node('p', `${groupIds.has(prompt.identifier) ? '当前顺序表内' : '不在当前顺序表内'} · ${reason}`));
         const saved = node('details'); saved.append(node('summary', '查看已保存的文本快照'));
-        const text = node('pre', prompt.content ?? ''); text.className = 'plugin-template-text'; saved.append(text); row.append(saved);
+        const text = node('pre', ref.target === 'marker' ? ref.contentSnapshot ?? '' : prompt.content ?? ''); text.className = 'plugin-template-text'; saved.append(text); row.append(saved);
         const locked = options.isLocked(prompt.identifier);
         row.append(button('定位条目', () => options.onSelect(prompt.identifier)));
-        row.append(button('转为本地副本', () => {
-          if (confirm('解除插件关联，保留当前文本快照、位置和开关，之后可编辑正文。继续？')) void mutate({ operation: 'detach', identifier: prompt.identifier });
+        row.append(button(ref.target === 'marker' ? '恢复原标记' : '转为本地副本', () => {
+          if (confirm(ref.target === 'marker' ? '解除插件关联并恢复原 marker 的内容来源，位置和开关不变。继续？' : '解除插件关联，保留当前文本快照、位置和开关，之后可编辑正文。继续？')) void mutate({ operation: 'detach', identifier: prompt.identifier });
         }, locked));
         const canUpdate = ready && selected && selected.ref.providerId === ref.providerId && selected.ref.templateId === ref.templateId;
         row.append(button('接受上方所选版本', () => {

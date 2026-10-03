@@ -22,6 +22,8 @@ function find(catalog: TemplateCatalogSnapshot | undefined, ref: Record<string, 
   return catalog?.providers.find(provider => provider.providerId === ref.providerId)?.templates
     .find(template => template.id === ref.templateId && template.version === ref.templateVersion);
 }
+const markerTarget = (prompt: PresetPrompt) => prompt.marker === true &&
+  !['chatHistory', 'dsh-preset-enhance:dsh-system-prompt'].includes(prompt.identifier);
 
 /** Resolve only into a request copy. Unavailable linked text must never fall back to its snapshot. */
 export function resolveTemplateBindings(preset: SillyTavernPreset, catalog?: TemplateCatalogSnapshot, activeIds?: Set<string>) {
@@ -34,7 +36,10 @@ export function resolveTemplateBindings(preset: SillyTavernPreset, catalog?: Tem
     const ref = bindings[prompt.identifier];
     const template = object(ref) ? find(catalog, ref) : undefined;
     const fingerprint = template ? templateFingerprint(template) : null;
-    const reason = !object(ref) || ref.mode !== 'linked' || prompt.identifier === 'chatHistory' || prompt.marker
+    const marker = object(ref) && ref.target === 'marker';
+    const reason = !object(ref) || ref.mode !== 'linked' || prompt.identifier === 'chatHistory' || prompt.identifier === 'dsh-preset-enhance:dsh-system-prompt' ||
+      (marker ? !markerTarget(prompt) : !!prompt.marker) ||
+      (template?.targetMarker !== undefined && (!marker || template.targetMarker !== prompt.identifier))
       ? '模板关联无效'
       : !template ? '提供者或锁定版本不可用'
       : ref.fingerprint !== fingerprint ? '同版本内容已变化，请查看并重新接受'
@@ -44,7 +49,7 @@ export function resolveTemplateBindings(preset: SillyTavernPreset, catalog?: Tem
       if (reason) warnings.push(`插件模板「${prompt.name ?? prompt.identifier}」已跳过：${reason}`);
     }
     if (reason) { missing.add(prompt.identifier); return prompt; }
-    return { ...prompt, role: template!.role, content: template!.content };
+    return { ...prompt, role: marker ? prompt.role : template!.role, content: template!.content, ...(marker ? { marker: false } : {}) };
   });
   // Keep placeholders in the order table so missing templates do not produce duplicate warnings.
   return {
@@ -55,7 +60,7 @@ export function resolveTemplateBindings(preset: SillyTavernPreset, catalog?: Tem
 }
 
 export interface TemplateSelection {
-  operation: 'add' | 'update' | 'detach';
+  operation: 'add' | 'update' | 'detach' | 'bind-marker';
   identifier?: string;
   providerId?: string;
   templateId?: string;
@@ -74,10 +79,15 @@ export function selectTemplate(source: SillyTavernPreset, catalog: TemplateCatal
   const settings = ext[NS] ??= {};
   const bindings = templateBindings(preset);
   settings.templateBindings = bindings;
-  if (!['add', 'update', 'detach'].includes(selection.operation)) throw new Error('模板操作无效');
+  if (!['add', 'update', 'detach', 'bind-marker'].includes(selection.operation)) throw new Error('模板操作无效');
   let prompt = preset.prompts.find(item => item.identifier === selection.identifier);
   const previous = prompt && Object.hasOwn(bindings, prompt.identifier) ? bindings[prompt.identifier] : undefined;
-  if (selection.operation !== 'add') {
+  if (selection.operation === 'bind-marker') {
+    if (!prompt || !markerTarget(prompt)) throw new Error('请选择可关联的酒馆 marker 条目');
+    if (locks.includes(prompt.identifier)) throw new Error('条目已锁定，请先解锁');
+    if (previous) throw new Error('条目已有关联，请更新版本或先解除关联');
+  }
+  if (selection.operation === 'update' || selection.operation === 'detach') {
     if (!prompt || !previous) throw new Error('关联模板条目不存在');
     if (locks.includes(prompt.identifier)) throw new Error('条目已锁定，请先解锁');
     if (selection.operation === 'detach') {
@@ -92,6 +102,16 @@ export function selectTemplate(source: SillyTavernPreset, catalog: TemplateCatal
   if (!template) throw new Error('提供者或所选模板版本不可用，请刷新目录');
   const fingerprint = templateFingerprint(template);
   if (selection.expectedFingerprint !== fingerprint) throw new Error('目录已变化，请刷新并重新查看模板');
+  const marker = selection.operation === 'bind-marker' || previous?.target === 'marker';
+  if (marker && (!prompt || !markerTarget(prompt))) throw new Error('marker 条目已改变，请解除关联后重新选择');
+  if (template.targetMarker !== undefined && (!marker || template.targetMarker !== prompt?.identifier)) throw new Error('模板仅适用于指定 marker');
+  if (marker) {
+    Object.defineProperty(bindings, prompt!.identifier, { enumerable: true, configurable: true, writable: true, value: {
+      mode: 'linked', target: 'marker', providerId: selection.providerId, templateId: selection.templateId,
+      templateVersion: template.version, fingerprint, contentSnapshot: template.content,
+    } });
+    return { preset, identifier: prompt!.identifier, changed: JSON.stringify(preset) !== JSON.stringify(source) };
+  }
   if (selection.operation === 'add') {
     prompt = preset.prompts.find(item => {
       const ref = Object.hasOwn(bindings, item.identifier) ? bindings[item.identifier] : undefined;
