@@ -3,7 +3,7 @@
  *
  * Hand-written on purpose: the plugin never bundles another copy of Cordis, the
  * host framework or React, so the runtime contract it consumes is declared here
- * and re-checked against the pinned host source (currently DSH 0.1.6-alpha.2)
+ * and re-checked against the pinned host source (currently DSH 0.2.1-alpha.1)
  * before every release. Members marked optional are probed with optional
  * chaining at runtime and must stay optional here as well.
  */
