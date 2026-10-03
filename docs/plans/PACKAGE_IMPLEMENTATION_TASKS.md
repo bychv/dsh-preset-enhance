@@ -1,6 +1,8 @@
 # 分包实施任务索引
 
-本分支 next-ver 已合入 T01/T02 外部提示词模板和酒馆 marker 关联；T03 及显示包 T04–T08 的 alpha 实现未合入。marker 接口与保存规则见 TEMPLATE_API.md。
+本分支 next-ver 已合入 T01/T02 外部提示词模板和酒馆 marker 关联；T03 及显示包 T04–T08 的 alpha 实现未合入。marker 接口与保存规则见 [模板 API](../api/TEMPLATE_API.md)。
+
+补充验证（2026-10-04）：476 项回归通过，并重新安装至 0.2.1-alpha.1 沙盒验证主包接口。修复了通用模板已关联 marker 后，新增普通条目可能误复用闲置 marker 的问题。新增测试覆盖共享面板关联/恢复、保存重启及分享往返。浏览器人工交互未验收，详见 [兼容记录](../compatibility/DSH_0.2.1_COMPATIBILITY.md)。
 
 合入验证（2026-10-03）：构建和类型检查通过，473 项主包回归通过。此次未重新安装沙盒；0.2.1-alpha.1 的宿主检查记录对应合入前的适配基线。
 
@@ -24,7 +26,7 @@ T01/T02 已完成模板服务与选用注入；显示包仍未创建。T04 先�
 
 ## T01 交接
 
-- 使用说明与示例：[外部提示词模板 API](../TEMPLATE_API.md)。这是当前已实现接口的权威说明。
+- 使用说明与示例：[外部提示词模板 API](../api/TEMPLATE_API.md)。这是当前已实现接口的权威说明。
 - 注册表：`src/lib/template-registry.mts`；公开运行时入口：`src/templates.mts`；公开类型：`src/template-api.d.mts`。
 - 宿主集成：`src/index.mts` 发布 `presetTemplates`，提供 `GET /preset-enhance/api/templates`。
 - 针对性测试：`tests/template-registry.test.mjs`、`tests/template-api.test.mjs`；测试包含两个模拟提供者及不改变预设文件/模型请求的检查。
@@ -56,7 +58,7 @@ npm pack --dry-run --ignore-scripts
 - 选用/固定版本/脱离关联：src/lib/template-bindings.mts；共享面板：web/plugin-templates.js 与 CSS。
 - 普通工作台复用自动保存，SPreset 复用手动保存；绑定存入 ST extensions，源文本快照保存在 prompts，单文件导出保持完整。
 - 编译和预览统一解析关联。缓存键包含启用模板的实际指纹与缺失状态，提供者卸载/恢复不会继续用旧结果。
-- 文档权威入口：[模板 API](../TEMPLATE_API.md)；分享格式补充：[PRESET_FORMAT.md](../PRESET_FORMAT.md)。
+- 文档权威入口：[模板 API](../api/TEMPLATE_API.md)；分享格式补充：[PRESET_FORMAT.md](../../PRESET_FORMAT.md)。
 - 附带修复：工作台协议切换调用宿主 sessionController.selectModel 更新当前会话；无会话时才改默认值。模型列表读取官方目录，未手动设置时同步官方目录，chatModels 可覆盖；重置或清空恢复同步。
 - 验证：构建与 468 项完整本地回归通过，另新增 1 项共享面板草稿冲突测试通过；使用 alpha 现有 Schema 库校验配置。新增测试覆盖保存/分享、版本缺失、模板卸载重载后的请求缓存、当前会话隔离、模型目录同步。未安装、启动沙盒或调用真实模型。
 

@@ -3,6 +3,11 @@ import assert from 'node:assert/strict';
 import { selectTemplate, templateFingerprint, resolveTemplateBindings } from '../lib/template-bindings.mjs';
 import { compilePreset } from '../lib/preset.mjs';
 import { createTemplateRegistry } from '../lib/template-registry.mjs';
+import { encodePresetPackage, decodePresetDocument } from '../lib/preset-package.mjs';
+import { PresetStore } from '../lib/store.mjs';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const template = { id: 'character', version: '1', title: '角色描述', role: 'assistant', content: '角色：{{char}}', targetMarker: 'charDescription' };
 const catalog = (t = template) => ({ contractVersion: 1, revision: 1, providers: [{ providerId: 'addon', title: 'Addon', templates: [t] }] });
@@ -47,4 +52,34 @@ test('marker binding refuses history, ordinary prompts, locks, and mismatched ta
   assert.equal(registry.service.list().providers[0].templates[0].targetMarker, 'charDescription');
   assert.throws(() => registry.service.register(owner, { providerId: 'bad', title: 'Bad', templates: [{ ...template, targetMarker: 'chatHistory' }] }), /聊天记录/);
   registry.close();
+});
+
+test('adding a generic template never reuses an idle marker or bypasses its lock', () => {
+  const generic = { ...template }; delete generic.targetMarker;
+  const source = original(); source.prompt_order[0].order = [{ identifier: 'chatHistory', enabled: true }];
+  const bound = selectTemplate(source, catalog(generic), selection(generic)).preset;
+  const add = { ...selection(generic), operation: 'add' }; delete add.identifier;
+  const result = selectTemplate(bound, catalog(generic), add, ['charDescription']);
+  assert.notEqual(result.identifier, 'charDescription');
+  assert.equal(result.preset.prompts.length, source.prompts.length + 1);
+  assert.ok(!result.preset.prompt_order[0].order.some(row => row.identifier === 'charDescription'));
+  assert.deepEqual(result.preset.prompts[0], source.prompts[0]);
+  assert.throws(() => selectTemplate(bound, catalog(generic), { ...add, identifier: 'charDescription' }, ['charDescription']), /不能指定/);
+});
+
+test('marker references survive save, restart and single-file sharing with original marker intact', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'marker-share-'));
+  const store = new PresetStore(join(directory, 'state.json'));
+  let restored;
+  try {
+    const preset = selectTemplate(original(), catalog(), selection()).preset;
+    await store.transaction(state => { state.presets.push({ id: 'marker-test', name: 'Marker test', preset }); });
+    restored = new PresetStore(store.file);
+    const state = await restored.read();
+    const decoded = decodePresetDocument(JSON.parse(JSON.stringify(encodePresetPackage(state.presets[0], state))));
+    assert.deepEqual(decoded.preset, preset);
+    assert.equal(compilePreset(decoded.preset, history, { templateCatalog: catalog() }).messages[1].role, 'system');
+    const detached = selectTemplate(decoded.preset, catalog(), { operation: 'detach', identifier: 'charDescription' }).preset;
+    assert.deepEqual(detached.prompts, original().prompts);
+  } finally { await store.close(); await restored?.close(); await rm(directory, { recursive: true, force: true }); }
 });

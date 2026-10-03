@@ -1,6 +1,6 @@
 # 外部模板注册与插件组合接口方案
 
-状态：总体设计草案；T01/T02 模板注册与选用注入已实现，实际使用以 [模板 API 文档](../TEMPLATE_API.md) 为准。序列处理、渲染和脚本接口仍未实现。任务进度见 [实施索引](PACKAGE_IMPLEMENTATION_TASKS.md)。配合 [显示分包方案](DISPLAY_REGEX_PACKAGE_PLAN.md)，渲染模板随显示包实现，不为此新建通用插件框架。
+状态：总体设计草案；T01/T02 模板注册与选用注入已实现，实际使用以 [模板 API 文档](../api/TEMPLATE_API.md) 为准。序列处理、渲染和脚本接口仍未实现。任务进度见 [实施索引](PACKAGE_IMPLEMENTATION_TASKS.md)。配合 [显示分包方案](DISPLAY_REGEX_PACKAGE_PLAN.md)，渲染模板随显示包实现，不为此新建通用插件框架。
 
 ## 职责分开，按引用组合
 

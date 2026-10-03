@@ -36,7 +36,7 @@
     "README.md",
     "PRESET_FORMAT.md",
     "locale",
-    "TEMPLATE_API.md"
+    "docs"
   ],
   "dsh": {
     "bundle": {
