@@ -1,6 +1,59 @@
 /* Both views read one immutable request snapshot. Opening Raw/history never prepares a request. */
 (() => {
   const node = (tag, text) => { const out = document.createElement(tag); if (text !== undefined) out.textContent = text; return out; };
+  const numberTokens = new WeakMap();
+  const parseJson = text => JSON.parse(text, (_key, value, context) => {
+    if (typeof value !== 'number' || !context?.source) return value;
+    const token = {}; numberTokens.set(token, context.source); return token;
+  });
+  // Render only the opened branch; large objects/arrays reveal 50 entries at a time.
+  function jsonTree(value, key, root = false) {
+    const label = key === undefined ? '' : `${typeof key === 'number' ? '[' + key + ']' : JSON.stringify(key)}: `;
+    const numberToken = value !== null && typeof value === 'object' ? numberTokens.get(value) : undefined;
+    const container = value !== null && typeof value === 'object' && numberToken === undefined;
+    const longText = typeof value === 'string' && (value.length > 300 || value.includes('\n'));
+    if (!container && !longText) {
+      const row = node('div'); row.className = 'json-leaf';
+      if (label) { const name = node('span', label); name.className = 'json-key'; row.append(name); }
+      const text = node('span', numberToken ?? JSON.stringify(value));
+      text.className = `json-value json-${numberToken !== undefined ? 'number' : value === null ? 'null' : typeof value}`; row.append(text);
+      return row;
+    }
+    const array = Array.isArray(value), keys = container && !array ? Object.keys(value) : null;
+    const count = container ? array ? value.length : keys.length : value.length;
+    if (container && count === 0) {
+      const row = node('div', label + (array ? '[]' : '{}')); row.className = 'json-leaf'; return row;
+    }
+    const details = node('details'); details.className = 'json-branch';
+    details.append(node('summary', `${label}${container ? (array ? `数组 [${count}]` : `对象 {${count}}`) : `字符串 · ${count} 字符`}`));
+    let expanded = false;
+    const render = () => {
+      if (details.open === expanded) return;
+      expanded = details.open;
+      while (details.children.length > 1) details.removeChild(details.lastChild);
+      if (!expanded) return;
+      if (longText) { const text = node('pre', value); text.className = 'json-text'; details.append(text); return; }
+      const children = node('div'); children.className = 'json-children'; details.append(children);
+      let cursor = 0, more;
+      const batch = () => {
+        if (!details.open) return;
+        if (more) children.removeChild(more);
+        const stop = Math.min(cursor + 50, count);
+        while (cursor < stop) {
+          const childKey = array ? cursor : keys[cursor];
+          children.append(jsonTree(value[childKey], childKey)); cursor++;
+        }
+        if (cursor < count) {
+          more = node('button', `再显示 ${Math.min(50, count - cursor)} 项（剩余 ${count - cursor}）`); more.type = 'button';
+          more.className = 'json-more'; more.onclick = batch; children.append(more);
+        }
+      };
+      batch();
+    };
+    details.ontoggle = render;
+    if (root) { details.open = true; render(); }
+    return details;
+  }
   function mount({ output, warnings, raw, rawButton, copyButton, note, choices, onChoose, onStatus }) {
     let current = null, rawMode = false, generation = 0;
     function card(message) {
@@ -57,8 +110,14 @@
     function mode() {
       output.hidden = rawMode; raw.hidden = !rawMode; copyButton.hidden = !rawMode;
       rawButton.textContent = rawMode ? '返回消息预览' : '原始消息（Raw）';
-      if (rawMode) raw.textContent = current?.raw ?? current?.unavailable ?? '原始请求不可用';
-      else raw.textContent = '';
+      raw.replaceChildren();
+      if (rawMode) {
+        if (typeof current?.raw !== 'string') raw.append(node('p', current?.unavailable ?? '原始请求不可用'));
+        else {
+          try { raw.append(jsonTree(parseJson(current.raw), undefined, true)); }
+          catch { raw.append(node('p', '无法解析 JSON，显示原文'), node('pre', current.raw)); }
+        }
+      }
       copyButton.disabled = !current?.raw;
     }
     rawButton.disabled = true;
@@ -82,7 +141,7 @@
         rawButton.disabled = false; renderMessages(); mode();
       },
       stale() { if (current && current.source !== 'wire') note.textContent = '当前草稿或设置已变化，请重新解析'; },
-      clear() { current = null; ++generation; output.replaceChildren(); raw.textContent = ''; note.textContent = ''; choices.hidden = true; rawButton.disabled = true; },
+      clear() { current = null; ++generation; output.replaceChildren(); raw.replaceChildren(); note.textContent = ''; choices.hidden = true; rawButton.disabled = true; },
     };
   }
   globalThis.PresetRequestPreview = Object.freeze({ mount });

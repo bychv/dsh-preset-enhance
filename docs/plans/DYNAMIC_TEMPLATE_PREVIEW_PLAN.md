@@ -1,10 +1,10 @@
 # 动态提示词模板与请求预览实施方案
 
-状态：next-ver 已实现 D01–D04 的基础功能，尚未发版。可调用接口、示例及使用边界见 [模板 API](../api/TEMPLATE_API.md)，总体边界见 [插件接口方案](PLUGIN_TEMPLATE_CONTRACT_PLAN.md)。下文保留设计依据；当前实现范围与验证见文末。
+状态：next-ver 已实现 D01–D04 的基础功能，纳入 0.3.5-alpha.1。可调用接口、示例及使用边界见 [模板 API](../api/TEMPLATE_API.md)，总体边界见 [插件接口方案](PLUGIN_TEMPLATE_CONTRACT_PLAN.md)。日常操作见 [请求预览说明](../guides/REQUEST_PREVIEW.md)。下文保留实施前的设计依据，包含拟议字段，不作为现行接口契约；当前实现范围与验证见文末。
 
 目标：在点击发送后，根据本轮用户消息和会话数据生成模板正文；工作台可调试这一过程，并查看每次实际发出的消息。动态解析不依赖独立显示包或提示词序列处理链先落地。
 
-## 一、当前缺口与实现原则
+## 一、实施前缺口与实现原则
 
 目前模板目录只保存静态 content，compilePreset 在请求时展开宏，已支持 lastusermessage 等值；复杂检索或异步计算没有接入点。实际发送在 src/index.mts 的 injectStream 中编译并缓存，而预览直接调用 compilePreset，两者后续处理不同。
 

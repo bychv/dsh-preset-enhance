@@ -1,3 +1,5 @@
+import { DSH_TEMPLATE_ID, validateDshTemplates } from './dsh-system-template.mjs';
+import { validateRequestSettings } from './request-settings.mjs';
 import { applyHistoryPatches, historyInsertionIndex, validateHistoryPatches } from './history-patches.mjs';
 import { createMacroContext, renderMacros } from './macros.mjs';
 import { resolveTemplateBindings, templateBindings } from './template-bindings.mjs';
@@ -24,6 +26,8 @@ export function validatePreset(preset: unknown): SillyTavernPreset {
   if (preset.dsh_system_prompt_enabled != null && typeof preset.dsh_system_prompt_enabled !== 'boolean') {
     throw new Error('dsh_system_prompt_enabled 必须是布尔值');
   }
+  validateDshTemplates(preset.dsh_system_prompt_templates);
+  validateRequestSettings(preset.dsh_request);
   const ids = new Set<string>();
   templateBindings(preset as unknown as SillyTavernPreset);
   for (const p of preset.prompts as unknown[]) {
@@ -75,10 +79,19 @@ export function compilePreset(preset: SillyTavernPreset, history: HostMessage[] 
   const last = (role: 'user' | 'assistant') => textOf(history.findLast(m => m.role === role && (role !== 'user' || m.source?.kind !== 'tool')));
   const ctx = createMacroContext({ local: options.local, global: options.global, seed: options.seed ?? 'preview', values: {
       user: 'User', char: 'Assistant', lastusermessage: last('user'), lastcharmessage: last('assistant'),
-      lastmessage: textOf(history.at(-1)), ...options.values,
+      lastmessage: textOf(history.at(-1)), ...options.values, ...options.dshSystemTemplate?.values,
     } });
   const before: HostMessage[] = [], after: HostMessage[] = [], depthEntries: DepthEntry[] = [], entries: CompiledEntry[] = [];
   ctx.warnings.push(...resolved.warnings);
+  if (options.dshSystemTemplate?.available && dshSystemPromptEnabled(preset)) {
+    const host = options.dshSystemTemplate;
+    const text = renderMacros(Object.hasOwn(preset.dsh_system_prompt_templates ?? {}, host.modeId)
+      ? preset.dsh_system_prompt_templates![host.modeId] : '{{dsh::prompt}}', ctx);
+    entries.push({ identifier: DSH_TEMPLATE_ID, name: 'DSH 系统提示词', role: 'system', text });
+    if (text.trim()) before.push({ id: `preset:dsh-system:${options.seed ?? 'preview'}`, role: 'system',
+      content: [{ type: 'text', text }], source: { kind: 'plugin', plugin: 'dsh-preset-enhance' } });
+    ctx.warnings.push(...host.warnings);
+  }
   let hasHistory = false;
   const byId = new Map<string, PresetPrompt>(preset.prompts.map(p => [p.identifier, p] as [string, PresetPrompt]));
   for (const item of getOrder(preset, options.characterId)) {

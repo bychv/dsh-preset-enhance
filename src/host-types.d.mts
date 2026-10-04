@@ -96,10 +96,10 @@ export interface AgentToolScope {
 }
 
 export interface AgentHandle {
-  options?: { provider?: string };
+  options?: { provider?: string; model?: string; reasoningEffort?: string; [key: string]: unknown };
   session?: SessionLike;
   id?: string;
-  ctx?: { tools?: Partial<AgentToolScope>; effect?(callback: () => () => void): unknown };
+  ctx?: { get?(name: string): unknown; systemPrompt?: { assemble(context: any): Promise<any> }; tools?: Partial<AgentToolScope>; effect?(callback: () => () => void): unknown };
   [key: string]: unknown;
 }
 
@@ -204,6 +204,7 @@ export interface AgentPresetDefinitionLike {
  * the 0.1.6 members and are absent on 0.1.7.
  */
 export interface AgentPresetRegistryLike {
+  readonly defaultId?: string;
   register?(definition: AgentPresetDefinitionLike): Promise<() => Promise<void>>;
   /** Lease over one preset's scope; release it through [Symbol.asyncDispose](). */
   acquireScope?(id?: string): Promise<{ key: unknown; [Symbol.asyncDispose](): Promise<void> }>;

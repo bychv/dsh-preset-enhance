@@ -86,4 +86,22 @@
 .regex-hits li.skip{color:#c9a86a}
 #prefill-settings { border: 0; padding: 0; margin: 0; min-width: 0; }
 #prefill-settings:disabled { opacity: .55; }
-.preview-raw { max-height: 65vh; overflow: auto; white-space: pre; border: 1px solid var(--border, #444); padding: 12px; } .preview-history { margin: 8px 0; } #preview-requests { max-width: 100%; }
+.preview-raw { max-height: 65vh; overflow: auto; white-space: normal; border: 1px solid var(--border, #444); padding: 12px; font-family: ui-monospace, Consolas, monospace; font-size: 12px; } .preview-history { margin: 8px 0; } #preview-requests { max-width: 100%; }
+
+.preview-raw .json-branch { margin: 3px 0; min-width: 0; }
+.preview-raw .json-branch > summary { padding: 4px 6px; cursor: pointer; overflow-wrap: anywhere; color: #b8d6e4; }
+.preview-raw .json-branch > summary:hover { background: #1d303a; border-radius: 4px; }
+.preview-raw .json-children { padding-left: 16px; margin-left: 7px; border-left: 1px solid #344752; }
+.preview-raw .json-leaf { padding: 4px 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.preview-raw .json-key { color: #b8d6e4; }
+.preview-raw .json-string { color: #b1dcc5; }
+.preview-raw .json-number { color: #eac990; }
+.preview-raw .json-boolean, .preview-raw .json-null { color: #bdabe4; }
+.preview-raw .json-text, .preview-raw > pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 4px 6px 8px 18px; font: inherit; color: #b1dcc5; }
+.preview-raw .json-more { margin: 6px; font-size: 12px; padding: 4px 8px; }
+
+.request-token-controls input[type="range"] { flex: 1; min-width: 120px; width: auto; }
+.request-token-controls input[type="number"] { width: 130px; }
+.dsh-template-macros { max-height: 320px; overflow: auto; }
+.dsh-template-macros summary { overflow-wrap: anywhere; }
+.dsh-template-macros pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }

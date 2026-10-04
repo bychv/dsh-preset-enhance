@@ -182,6 +182,8 @@ export interface SillyTavernPreset {
   prompt_order?: PromptOrderGroup[];
   assistant_prefill?: string;
   dsh_system_prompt_enabled?: boolean;
+  dsh_system_prompt_templates?: Record<string, string>;
+  dsh_request?: { max_tokens?: number; stream?: boolean; [key: string]: unknown };
   [key: string]: unknown;
 }
 
@@ -220,6 +222,7 @@ export interface CompiledPreset {
 export interface CompilePresetOptions {
   templateCatalog?: import('../template-api.mjs').TemplateCatalogSnapshot;
   dynamicBodies?: Record<string, import('./template-bindings.mjs').DynamicBody>;
+  dshSystemTemplate?: import('./dsh-system-template.mjs').DshSystemTemplate;
   seed?: string;
   local?: Record<string, string>;
   global?: Record<string, string>;

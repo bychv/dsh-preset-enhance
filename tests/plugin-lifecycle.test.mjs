@@ -35,7 +35,7 @@ test('concurrent host disposal waits for an active stream and preserves its beta
     });
     const ctx = {
       effect(setup) { const dispose = setup(); if (typeof dispose === 'function') disposers.push(dispose); },
-      on(_event, handler) { intercept = handler; },
+      on(event, handler) { if (event === 'llm/stream') intercept = handler; },
       sessions: { get() { return { id: 's', header: { agentPreset: 'standard', createdAt: 0 } }; } },
       webServer: { register() { return () => {}; } },
       llm: { async *stream(options) {

@@ -1,3 +1,5 @@
+import { readDshSystemTemplate, withoutDshPrompt } from './lib/dsh-system-template.mjs';
+import { readRequestSettings } from './lib/request-settings.mjs';
 import { createPresetReader, PRESET_READ_BASE } from './lib/preset-reader.mjs';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
@@ -33,11 +35,11 @@ export const AGENT_PRESET_ID = 'st-preset';
 const BASE = '/preset-enhance';
 const DSH_SYSTEM_PROMPT = '@deepseek-ai/dsh-system-prompt';
 const digest = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
-const PRESET_COMPILER_VERSION = 9;
+const PRESET_COMPILER_VERSION = 10;
 function compilationKey(preset, messages, options, protocol, references, dynamicBodies) {
     return digest({ compiler: PRESET_COMPILER_VERSION, preset, messages, characterId: String(options.characterId ?? 100001),
         values: { user: 'User', char: 'Assistant', ...options.values }, markers: options.markers ?? {},
-        trigger: options.trigger ?? 'normal', postToolPrefix: options.postToolPrefix, protocol, references,
+        trigger: options.trigger ?? 'normal', postToolPrefix: options.postToolPrefix, protocol, references, dshSystemTemplate: options.dshSystemTemplate,
         dynamicBodies: dynamicBodies && Object.keys(dynamicBodies).length ? dynamicBodies : undefined });
 }
 const ownGet = (object, key) => key !== undefined && Object.hasOwn(object, key) ? object[key] : undefined;
@@ -331,7 +333,7 @@ export async function apply(ctx, config = {}) {
             (shouldAutoEnable(state, session) && defaultRecord(state) ? { enabled: true, presetId: defaultRecord(state).id, characterId: null, values: {}, markers: {} } : undefined);
         const dependencyKey = (state) => {
             const binding = effectiveBinding(state);
-            return digest({ binding, record: state.presets.find(p => p.id === binding?.presetId), global: state.global,
+            return digest({ binding, mode: sessionModeId(session), record: state.presets.find(p => p.id === binding?.presetId), global: state.global,
                 local: ownGet(state.sessions, sessionId)?.result.local, protocol: connectionProtocolFor(state, connectionInfo),
                 beta: state.deepseekBetaPrefix, postToolPrefixMode: state.postToolPrefixMode, postToolPrefixText: state.postToolPrefixText,
                 prefixToolCalls: state.prefixToolCalls, prefixNonOfficialRemoveTools: state.prefixNonOfficialRemoveTools, prefixOutputExtraction: state.prefixOutputExtraction });
@@ -339,9 +341,16 @@ export async function apply(ctx, config = {}) {
         const initialBinding = effectiveBinding(initial);
         const initialRecord = initial.presets.find(p => p.id === initialBinding?.presetId);
         const dynamic = initialBinding?.enabled && initialRecord && Object.values(templateBindings(initialRecord.preset, templateCatalog)).some(ref => ref?.mode === 'linked-dynamic');
-        const expectedDependency = dynamic ? dependencyKey(initial) : undefined;
+        const needsDsh = initialBinding?.enabled && initialRecord && !exclusive && dshSystemPromptEnabled(initialRecord.preset);
+        const expectedDependency = dynamic || needsDsh ? dependencyKey(initial) : undefined;
+        const dshSystemTemplate = needsDsh ? await lifecycle.track(readDshSystemTemplate(ctx, sessionId, modeId, options.signal, options)) : undefined;
+        if (needsDsh && !dshSystemTemplate?.available && Object.hasOwn(initialRecord.preset.dsh_system_prompt_templates ?? {}, modeId))
+            throw new Error('当前无法读取 DSH 提示词服务，无法展开自定义模式模板');
+        const preparedHistory = (preset) => exclusive || !dshSystemPromptEnabled(preset)
+            ? presetModeHistory(history) : dshSystemTemplate?.available ? withoutDshPrompt(history) : history;
+        let requestSettings;
         const historyRevision = dynamic && session.deriveMessages ? digest(session.deriveMessages()) : undefined;
-        const dynamicBodies = dynamic ? (await lifecycle.track(prepareDynamicTemplates(templateRegistry, initialRecord.preset, !exclusive && !dshSystemPromptEnabled(initialRecord.preset) ? presetModeHistory(history) : history, {
+        const dynamicBodies = dynamic ? (await lifecycle.track(prepareDynamicTemplates(templateRegistry, initialRecord.preset, preparedHistory(initialRecord.preset), {
             ...initialBinding, local: ownGet(initial.sessions, sessionId)?.result.local, global: initial.global,
             sessionId, presetId: initialRecord.id, mode: modeId, protocol: connectionProtocolFor(initial, connectionInfo),
             purpose: 'request', signal: options.signal, templateCatalog,
@@ -371,17 +380,17 @@ export async function apply(ctx, config = {}) {
                 const record = current.presets.find(p => p.id === binding.presetId);
                 if (!record)
                     throw new Error('当前会话启用的预设不存在');
-                const presetHistory = !exclusive && !dshSystemPromptEnabled(record.preset)
-                    ? presetModeHistory(history) : history;
+                const presetHistory = preparedHistory(record.preset);
+                requestSettings = readRequestSettings(record.preset);
                 const postToolPrefix = current.deepseekBetaPrefix && current.postToolPrefixMode === 'custom'
                     ? current.postToolPrefixText : undefined;
                 const templateReferences = resolveTemplateBindings(record.preset, templateCatalog, new Set(getOrder(record.preset, binding.characterId).filter(item => item.enabled).map(item => item.identifier))).references;
-                const key = compilationKey(record.preset, presetHistory, { ...binding, postToolPrefix }, connectionProtocolFor(current, connectionInfo), templateReferences, dynamicBodies);
+                const key = compilationKey(record.preset, presetHistory, { ...binding, postToolPrefix, dshSystemTemplate }, connectionProtocolFor(current, connectionInfo), templateReferences, dynamicBodies);
                 const prior = ownGet(current.sessions, sessionId);
                 if (prior?.key === key)
                     return prior.result;
                 const compiledResult = compilePreset(record.preset, presetHistory, {
-                    ...binding, seed: key, local: prior?.result.local, global: current.global, postToolPrefix, templateCatalog, dynamicBodies,
+                    ...binding, seed: key, local: prior?.result.local, global: current.global, postToolPrefix, templateCatalog, dynamicBodies, dshSystemTemplate,
                 });
                 options.signal?.throwIfAborted();
                 // The host serializes the request with whichever protocol its connection uses, and
@@ -420,7 +429,7 @@ export async function apply(ctx, config = {}) {
             yield* traceRequest(snapshots, sessionId, options, next());
             return;
         }
-        const request = routedRequest(options, messages, filteredTools);
+        const request = routedRequest({ ...options, ...(requestSettings?.maxTokens ? { maxTokens: requestSettings.maxTokens } : {}) }, messages, filteredTools);
         // The compatibility bridge is chat-completions only: under the Messages mode it
         // must never arm, so an unadapted prefix is never sent.
         const betaPrefix = connectionProtocolFor(initial, connectionInfo) !== 'messages' &&
@@ -433,6 +442,7 @@ export async function apply(ctx, config = {}) {
         const prefixKey = betaPrefix ? messageText(messages.at(-1)) : '';
         const releaseBeta = compiled !== null ? deepSeekBeta.activate(sessionId, prefixKey, {
             mode: connectionProtocolFor(initial, connectionInfo),
+            ...requestSettings,
             toolCalls: initial.prefixToolCalls === true,
             removeNonOfficialTools: initial.prefixNonOfficialRemoveTools !== false,
             extractOutput: initial.prefixOutputExtraction === true,
@@ -520,6 +530,12 @@ export async function apply(ctx, config = {}) {
             return respond(res, 200, templateCatalogWithFingerprints(templateRegistry.service.list()));
         },
     }), 'preset-enhance: template catalog route');
+    const modeWatchers = new Set();
+    ctx.on('agent-preset/selected', (sessionId) => {
+        for (const watcher of modeWatchers)
+            if (watcher.sessionId === sessionId)
+                watcher.notify();
+    });
     ctx.effect(() => ctx.webServer.register({
         kind: 'exact', path: `${BASE}/api/request-events`, handler: (req, res) => {
             if (req.method !== 'GET')
@@ -532,9 +548,11 @@ export async function apply(ctx, config = {}) {
             res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', 'x-accel-buffering': 'no' });
             const send = (id) => res.write(`data: ${JSON.stringify({ id })}\n\n`);
             let timer;
-            const unsubscribe = snapshots.subscribe(sessionId, send, () => { clearInterval(timer); res.end(); });
+            const watcher = { sessionId, notify: () => res.write('event: mode\ndata: {}\n\n') };
+            modeWatchers.add(watcher);
+            const unsubscribe = snapshots.subscribe(sessionId, send, () => { clearInterval(timer); modeWatchers.delete(watcher); res.end(); });
             timer = setInterval(() => res.write(': keepalive\n\n'), 25000);
-            res.on?.('close', () => { clearInterval(timer); unsubscribe(); });
+            res.on?.('close', () => { clearInterval(timer); modeWatchers.delete(watcher); unsubscribe(); });
             send(snapshots.latestId(sessionId) ?? '');
         },
     }), 'preset-enhance: request snapshot notifications');
@@ -579,9 +597,17 @@ export async function apply(ctx, config = {}) {
                     const modeDefault = defaultRecord(state);
                     const modes = await agentModeRows(ctx);
                     const discovered = await discoverModeToolCatalogs(ctx, modes);
-                    const liveMode = sessionModeId(session);
+                    const liveMode = sessionModeId(session) || (!session ? url.searchParams.get('modeId') : '') || ctx.agentPresets?.defaultId || '';
                     const catalogs = requestToolCatalogs(ctx, state, discovered.catalogs, sessionId);
+                    let dshSystemTemplate;
+                    try {
+                        dshSystemTemplate = await readDshSystemTemplate(ctx, sessionId, liveMode);
+                    }
+                    catch (error) {
+                        dshSystemTemplate = { available: false, modeId: liveMode, warnings: [String(error)] };
+                    }
                     return respond(res, 200, {
+                        dshSystemTemplate,
                         revision: state.revision,
                         startupError,
                         presets: state.presets,
@@ -637,6 +663,11 @@ export async function apply(ctx, config = {}) {
                 if (req.headers.origin && new URL(String(req.headers.origin)).host !== req.headers.host)
                     throw new Error('拒绝跨来源写入');
                 const body = await readJson(req);
+                if (body.action === 'dsh-system-template') {
+                    const sessionId = String(body.sessionId ?? '');
+                    const modeId = String(body.modeId ?? sessionModeId(ctx.sessions.get(sessionId)));
+                    return respond(res, 200, await readDshSystemTemplate(ctx, sessionId, modeId));
+                }
                 if (body.action === 'request-snapshot') {
                     return respond(res, 200, { snapshot: snapshots.read(String(body.sessionId ?? url.searchParams.get('sessionId') ?? ''), body.snapshotId) });
                 }
@@ -652,20 +683,27 @@ export async function apply(ctx, config = {}) {
                     const sessionId = String(body.sessionId ?? '');
                     const current = await store.read();
                     const session = ctx.sessions.get(sessionId);
-                    const mode = sessionModeId(session);
+                    const mode = sessionModeId(session) || (!session ? String(body.modeId ?? '') : '') || ctx.agentPresets?.defaultId || '';
                     const connection = sessionConnection(ctx, sessionId);
                     const protocol = connectionProtocolFor(current, connection);
-                    const history = previewHistory(ctx, body);
+                    let history = previewHistory(ctx, body);
                     const controller = new AbortController();
                     res.on?.('close', () => controller.abort(new Error('预览已取消')));
-                    const options = { ...body.options, local: ownGet(current.sessions, sessionId)?.result.local, global: current.global,
+                    const dshSystemTemplate = mode !== AGENT_PRESET_ID && dshSystemPromptEnabled(body.preset)
+                        ? await readDshSystemTemplate(ctx, sessionId, mode, controller.signal) : undefined;
+                    if (mode !== AGENT_PRESET_ID && dshSystemPromptEnabled(body.preset) && !dshSystemTemplate?.available && Object.hasOwn(body.preset.dsh_system_prompt_templates ?? {}, mode))
+                        throw new Error('当前无法读取 DSH 提示词服务，无法展开自定义模式模板');
+                    if (dshSystemTemplate?.available)
+                        history = withoutDshPrompt(history);
+                    const requestSettings = readRequestSettings(validatePreset(body.preset));
+                    const options = { ...body.options, dshSystemTemplate, local: ownGet(current.sessions, sessionId)?.result.local, global: current.global,
                         postToolPrefix: current.deepseekBetaPrefix && current.postToolPrefixMode === 'custom' ? current.postToolPrefixText : undefined };
                     const prepared = await prepareDynamicTemplates(templateRegistry, validatePreset(body.preset), history, {
                         ...options, sessionId, presetId: body.presetId, mode, protocol, purpose: 'preview', signal: controller.signal,
                     });
                     const references = resolveTemplateBindings(body.preset, prepared.catalog, new Set(getOrder(body.preset, options.characterId).filter(i => i.enabled).map(i => i.identifier))).references;
                     const key = compilationKey(body.preset, history, options, protocol, references, prepared.bodies);
-                    const compiled = compilePreset(body.preset, history, { ...options, seed: key, templateCatalog: prepared.catalog, dynamicBodies: prepared.bodies });
+                    const compiled = compilePreset(body.preset, history, { ...options, seed: key, templateCatalog: prepared.catalog, dynamicBodies: prepared.bodies, dshSystemTemplate });
                     const adapted = adaptPresetForMessages(compiled.messages);
                     const result = { ...compiled, messages: adapted.messages,
                         ...(protocol === 'messages' ? { assistantPrefix: { active: false }, warnings: [...compiled.warnings, ...adapted.notes] } : {}) };
@@ -677,7 +715,7 @@ export async function apply(ctx, config = {}) {
                     if (ctx.llm.resolveCallConfig && provider === DEEPSEEK_CHAT_PROVIDER_ID) {
                         callConfig = await ctx.llm.resolveCallConfig(callConfig, controller.signal);
                     }
-                    const request = { ...callConfig,
+                    const request = { ...callConfig, ...(requestSettings.maxTokens ? { maxTokens: requestSettings.maxTokens } : {}),
                         sessionId, messages: result.messages, ...(tools.length ? { tools } : {}) };
                     let raw = JSON.stringify(request), source = 'adapter-input';
                     if (provider === DEEPSEEK_CHAT_PROVIDER_ID) {
@@ -685,7 +723,7 @@ export async function apply(ctx, config = {}) {
                             const config = chatConnection();
                             const wire = serializeRequest(request, { thinking: config.thinking, reasoningEffort: config.reasoningEffort });
                             const content = current.deepseekBetaPrefix && result.assistantPrefix.active ? messageText(result.messages.at(-1)) : '';
-                            const registry = new Map([[sessionId, new Map([[content, { count: 1, mode: 'chat-completions', toolCalls: current.prefixToolCalls === true,
+                            const registry = new Map([[sessionId, new Map([[content, { count: 1, ...requestSettings, mode: 'chat-completions', toolCalls: current.prefixToolCalls === true,
                                                 removeNonOfficialTools: current.prefixNonOfficialRemoveTools !== false, extractOutput: current.prefixOutputExtraction === true }]])]]);
                             const rewritten = rewriteDeepSeekPrefixFetch(config.baseURL + '/chat/completions', {
                                 method: 'POST', headers: { 'x-deepseek-harness-session-id': sessionId }, body: JSON.stringify(wire),
@@ -701,8 +739,8 @@ export async function apply(ctx, config = {}) {
                         result.warnings.push('当前适配器未提供纯序列化预览；显示适配器输入，实际发送后可查看最终 Raw');
                     if (!agentTools)
                         result.warnings.push('当前会话工具范围尚未建立；以发送时的工具列表为准');
-                    if (mode !== AGENT_PRESET_ID && dshSystemPromptEnabled(body.preset))
-                        result.warnings.push('宿主在发送时生成的提示词以实际请求为准');
+                    if (mode !== AGENT_PRESET_ID && dshSystemPromptEnabled(body.preset) && !dshSystemTemplate?.available)
+                        result.warnings.push('当前无法读取 DSH 提示词服务；宿主提示词以实际请求为准');
                     return respond(res, 200, { ...result, raw, source, snapshotId: randomUUID(), displayMessages: previewMessages(JSON.parse(raw), messageOrigins(result.messages)),
                         previewHistoryIds: history.map(m => m.id), at: new Date().toISOString() });
                 }

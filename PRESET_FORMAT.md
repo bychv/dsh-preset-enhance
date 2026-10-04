@@ -1,6 +1,6 @@
 # 单文件预设分享格式 v1
 
-文件名建议为 `名称.dsh-preset.json`，编码为 UTF-8。它是一份普通 JSON，包含所有预设和配置，无需 ZIP、目录或其他配套文件。插件仍可导入、导出普通 SillyTavern JSON。
+文件名建议为 `名称.dsh-preset.json`，编码为 UTF-8。它是一份普通 JSON，包含一个预设及其附带配置，无需 ZIP、目录或其他配套文件。插件仍可导入、导出普通 SillyTavern JSON。
 
 ## 文件结构
 
@@ -19,6 +19,8 @@
     "format": "sillytavern",
     "data": {
       "dsh_system_prompt_enabled": true,
+      "dsh_system_prompt_templates": {},
+      "dsh_request": { "max_tokens": 0, "stream": true },
       "prompts": [
         { "identifier": "chatHistory", "marker": true, "role": "user" }
       ],
@@ -63,7 +65,13 @@
 
 `format`、`version`、`preset` 必填。文件大小限制与原 JSON 导入相同，为 8 MB。自定义提示词的换行按 JSON 规则写为 `\n`；宏保留源文本，在实际请求时展开。
 
-`preset.data.dsh_system_prompt_enabled` 是可选布尔值，省略时按 `true` 处理。它对应工作台置顶的只读“DSH 系统提示词”模板：在其他 DSH 模式中启用该预设时，`true` 保留模式原有系统提示与运行时注入，`false` 将其移除。专用“预设模式”始终移除这些内容。
+`preset.data.dsh_system_prompt_enabled` 是可选布尔值，省略时按 `true` 处理。它对应工作台置顶的“DSH 系统提示词”模板：在其他 DSH 模式中启用该预设时，`true` 保留模式原有系统提示与运行时注入，`false` 将其移除。专用“预设模式”始终移除这些内容。
+
+`preset.data.dsh_system_prompt_templates` 是可选的「模式 ID → 正文」对象。同一预设中各模式的编辑互不覆盖；没有对应键时动态使用该模式的默认正文，有键时使用保存的修改（包括空字符串）。恢复默认只删除当前模式的键。运行时变量与段落保持宏源文本，未解析的值不写入分享文件。
+
+`preset.data.dsh_request` 是可选请求配置：`max_tokens` 为 `0–1000000` 整数，缺省或 `0` 沿用接口默认；`stream` 为布尔值，缺省为 `true`。这些参数随预设保存与导出，仅在预设注入启用时生效。
+
+宏与模式规则见 [DSH 系统模板与请求参数](docs/api/DSH_SYSTEM_TEMPLATE.md)。
 
 ## 预填充配置
 

@@ -1,21 +1,40 @@
 # 文档导航
 
-本索引对应 next-ver：已包含外部提示词模板注册、编辑器选用、动态正文和酒馆 marker 关联，以及实际请求/Raw 预览和历史折叠。alpha 的提示词处理链与独立显示包尚未合入本分支。
+本文档对应 **0.3.5-alpha.1**（next-ver 分支），通过 npm `alpha` 通道提供。
 
-| 需要查阅 | 文档 |
+## 使用与接入
+
+| 目的 | 文档 |
 | --- | --- |
-| 安装与工作台使用 | [项目说明](../README.md) |
-| 预设导入、导出和分享字段 | [单文件格式](../PRESET_FORMAT.md) |
-| 外部插件注册模板、固定版本、marker 关联 | [模板接口](api/TEMPLATE_API.md) |
-| DSH 0.2.1-alpha.1 适配与验证边界 | [兼容记录](compatibility/DSH_0.2.1_COMPATIBILITY.md) |
-| 开发任务与本分支实现范围 | [实施索引](plans/PACKAGE_IMPLEMENTATION_TASKS.md) |
-| 显示侧正则、组件与独立状态设计 | [显示分包方案](plans/DISPLAY_REGEX_PACKAGE_PLAN.md) |
-| 模板、序列处理及脚本接口设计 | [接口设计方案](plans/PLUGIN_TEMPLATE_CONTRACT_PLAN.md) |
-| 发送时动态模板、实际请求预览与历史折叠 | [动态模板与预览方案](plans/DYNAMIC_TEMPLATE_PREVIEW_PLAN.md) |
-| 工具分组实现约定 | [工具分组](plans/TOOL_GROUPS_IMPLEMENTATION.md) |
+| 安装、工作台、预填充与工具管理 | [使用指南](guides/WORKBENCH.md) |
+| 请求处理流程、模块分工与生命周期 | [插件架构](ARCHITECTURE.md) |
+| 构建、测试与打包命令 | [开发验证](DEVELOPMENT.md) |
+| 查看消息、折叠历史、结构化 Raw 与工具续轮 | [请求预览](guides/REQUEST_PREVIEW.md) |
+| 按模式编辑 DSH 正文、动态宏、输出上限与流式开关 | [系统模板与请求参数](api/DSH_SYSTEM_TEMPLATE.md) |
+| 导入、导出和分享字段 | [单文件格式](../PRESET_FORMAT.md) |
+| 外部模板注册、动态解析、marker 自动关联与 chatHistory 修改 | [模板 API](api/TEMPLATE_API.md) |
+| 内部 agent 查询预设、HTTP 凭证与权限边界 | [预设只读 API](api/PRESET_READ_API.md) |
 
-api 保存当前可调用接口；compatibility 保存有版本和范围的验证记录；plans 保存开发设计与交接资料。方案中的规划能力不代表当前分支已经实现。
+## 当前实现范围
 
-- [预设只读 API v1](api/PRESET_READ_API.md)：内部 agent 工具、HTTP 读取与外部授权边界。
+已实现外部静态/动态模板、marker 自动关联与冲突选择、chatHistory 深度修改、提供者启停和热重载跟踪、实际请求预览、结构化 Raw、预设只读查询，以及可编辑的模式系统模板和请求参数。
 
-- [2026-10-04 alpha 接入验证](testing/2026-10-04-ALPHA_INTEGRATION.md)：实际宿主、HTTP 路由、工具及插件生命周期验证。
+alpha 的通用提示词序列处理链与独立显示包尚未合入本分支。显示侧正则、组件、选项栏、MVU 及脚本运行时相关设计不代表本分支已有可调用接口。接口调用以 `api/` 为准，规划及交接见 `plans/`。
+
+## 兼容与验证记录
+
+| 文档 | 范围 |
+| --- | --- |
+| [DSH 0.2.1 兼容记录](compatibility/DSH_0.2.1_COMPATIBILITY.md) | 初始适配基线与后续验证入口 |
+| [2026-10-04 接入验证](testing/2026-10-04-ALPHA_INTEGRATION.md) | 真实宿主、HTTP、工具及插件生命周期 |
+| [2026-10-04 系统模板验证](testing/2026-10-04-SYSTEM_TEMPLATE.md) | 524 项回归、真实提示词服务及输入后切换模式的页面验证 |
+
+测试数量与结论属于各次记录的代码快照，不应理解为每次文档更新都重新运行。
+
+## 设计与任务
+
+- [分包任务索引](plans/PACKAGE_IMPLEMENTATION_TASKS.md)：本分支交付范围与后续任务。
+- [动态模板与请求预览方案](plans/DYNAMIC_TEMPLATE_PREVIEW_PLAN.md)：已实现功能的设计依据及边界。
+- [模板、序列处理及脚本接口方案](plans/PLUGIN_TEMPLATE_CONTRACT_PLAN.md)：插件解耦与后续扩展。
+- [显示分包方案](plans/DISPLAY_REGEX_PACKAGE_PLAN.md)：显示侧正则、组件和独立状态。
+- [工具分组约定](plans/TOOL_GROUPS_IMPLEMENTATION.md)：工具配置分组及保存规则。

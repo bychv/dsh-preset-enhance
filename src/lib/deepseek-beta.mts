@@ -1,3 +1,4 @@
+import { bufferedResponseToSse } from './buffered-response.mjs';
 import { emulateToolCallRequest, transformToolCallResponse } from './toolcall-prefill.mjs';
 import type { JsonObject, ResponseTransformMetadata } from './toolcall-prefill.mjs';
 import { classifyProtocolPath, detectProtocol, observeProtocolRequest, protocolCapability } from './protocol.mjs';
@@ -23,6 +24,8 @@ export type BridgeProtocolMode = 'chat-completions' | 'messages';
 /** Activation bookkeeping for one session/text pair. */
 interface ActivationEntry {
   count: number;
+  maxTokens?: number;
+  stream?: boolean;
   toolCalls: boolean;
   removeNonOfficialTools: boolean;
   extractOutput: boolean;
@@ -161,6 +164,7 @@ export interface DeepSeekPrefixRewrite {
   input: FetchInput;
   init: RequestInitLike;
   changed: boolean;
+  bufferedResponseProtocol?: BridgeProtocolMode;
   mode: 'none' | 'official' | 'adapter' | 'switch';
   /** Protocol this rewrite made the request use on the wire. */
   protocol: LlmProtocol;
@@ -188,6 +192,31 @@ export interface DeepSeekPrefixRewrite {
  * pretending the compatibility path applied.
  */
 export function rewriteDeepSeekPrefixFetch(
+  input: FetchInput, init: RequestInitLike = {}, registries: readonly SessionRegistry[] = [], options: { reroute?: boolean } = {},
+): DeepSeekPrefixRewrite {
+  const rewritten = rewritePrefixFetch(input, init, registries, options);
+  const sessionId = detectProtocol(input, init).sessionId;
+  if (!sessionId || (rewritten.protocol !== 'chat-completions' && rewritten.protocol !== 'messages')) return rewritten;
+  const body = jsonBody(rewritten.init);
+  if (!body) return rewritten;
+  const last = Array.isArray(body.messages) ? body.messages.at(-1) : undefined;
+  const matching = typeof last?.content === 'string' ? activeEntry(registries, sessionId, last.content) : null;
+  let settings: BridgeRegistryEntry | undefined = matching ?? undefined;
+  if (!settings) for (const registry of registries) {
+    const texts = registry.get(sessionId);
+    const entry = texts?.get('') ?? [...texts?.values() ?? []].find(e => typeof e === 'object' && (e.stream !== undefined || e.maxTokens !== undefined));
+    if (entryCount(entry) > 0) { settings = entry; break; }
+  }
+  if (!settings || typeof settings !== 'object') return rewritten;
+  if (settings.maxTokens === undefined && settings.stream === undefined) return rewritten;
+  const configured: JsonObject = { ...body, ...(settings.maxTokens && settings.maxTokens > 0 ? { max_tokens: settings.maxTokens } : {}),
+    ...(settings.stream === undefined ? {} : { stream: settings.stream }) };
+  if (settings.stream === false) delete configured.stream_options;
+  return { ...rewritten, changed: true, init: { ...rewritten.init, body: JSON.stringify(configured) },
+    ...(settings.stream === false ? { bufferedResponseProtocol: rewritten.protocol } : {}) };
+}
+
+function rewritePrefixFetch(
   input: FetchInput, init: RequestInitLike = {}, registries: readonly SessionRegistry[] = [],
   options: { reroute?: boolean } = {},
 ): DeepSeekPrefixRewrite {
@@ -419,6 +448,7 @@ function createWrapper(host: BridgeHost): FetchLike {
     } catch (error) { captured?.('传输失败'); throw error; }
     let out = rewritten.responseTransform ?
       await transformToolCallResponse(response, rewritten.responseTransform) : response;
+    if (rewritten.bufferedResponseProtocol) out = await bufferedResponseToSse(out, rewritten.bufferedResponseProtocol);
     if (rewritten.translateResponseTo === 'messages') {
       // Only a response this bridge actually rewrote is translated back.
       out = await translateChatResponse(out,
@@ -468,6 +498,8 @@ export interface DeepSeekBridgeActivation {
 }
 
 export interface DeepSeekBetaActivationOptions {
+  maxTokens?: number;
+  stream?: boolean;
   toolCalls?: boolean;
   removeNonOfficialTools?: boolean;
   extractOutput?: boolean;
@@ -569,6 +601,7 @@ export function installDeepSeekBetaBridge(
     const count = entryCount(entry);
     if (count <= 1) texts.delete(content);
     else if (entry && typeof entry === 'object') texts.set(content, {
+      ...entry,
       count: count - 1,
       toolCalls: entry.toolCalls === true,
       removeNonOfficialTools: entry.removeNonOfficialTools !== false,
@@ -591,6 +624,8 @@ export function installDeepSeekBetaBridge(
       if (!texts) { texts = new Map(); registry.set(sessionId, texts); }
       texts.set(content, {
         count: entryCount(texts.get(content)) + 1,
+        ...(activationOptions.maxTokens === undefined ? {} : { maxTokens: activationOptions.maxTokens }),
+        ...(activationOptions.stream === undefined ? {} : { stream: activationOptions.stream }),
         toolCalls: activationOptions.toolCalls === true,
         removeNonOfficialTools: activationOptions.removeNonOfficialTools !== false,
         extractOutput: activationOptions.extractOutput === true,

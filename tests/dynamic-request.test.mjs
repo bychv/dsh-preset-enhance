@@ -9,19 +9,21 @@ import { PresetStore } from '../lib/store.mjs';
 import { serializeRequest } from '../vendor/deepseek-chat/index.mjs';
 
 const user = (id, text) => ({ id, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }] });
-async function setup(run, historyMode = false) {
+async function setup(run, historyMode = false, promptSource) {
   const dir = await mkdtemp(join(tmpdir(), 'preset-dynamic-request-'));
   const store = new PresetStore(join(dir, 'state.json'));
   const originalFetch = globalThis.fetch, sent = [], routes = new Map(), services = new Map(), listeners = {}, disposers = [];
   const histories = { a: [user('u1', 'hello')], b: [user('u2', 'other')] };
   const tools = [{ name: 'echo', description: 'Echo', parameters: { type: 'object', properties: {} } }];
-  globalThis.fetch = async (url, init) => { sent.push({ url, raw: init.body }); return new Response('{}'); };
+  globalThis.fetch = async (url, init) => { sent.push({ url, raw: init.body }); return Response.json({ choices: [{ message: { role: 'assistant', content: 'done' }, finish_reason: 'stop' }] }); };
+  if (promptSource) services.set('systemPrompt', promptSource);
   const session = id => ({ id, header: { agentPreset: 'standard' }, deriveMessages: () => histories[id] ?? [],
     requestHeader: () => ({ config: { provider: 'preset-deepseek-chat', model: 'deepseek-chat', reasoningEffort: 'off' } }) });
   const ctx = {
     effect: fn => { const dispose = fn(); if (typeof dispose === 'function') disposers.push(dispose); },
     provide: (key, value) => services.set(key, value), get: key => services.get(key), on: (key, fn) => { listeners[key] = fn; },
-    sessions: { get: session }, agents: { get: id => ({ session: session(id), ctx: { tools: { schemas: () => tools } } }) },
+    sessions: { get: session }, agents: { get: id => ({ session: session(id), options: { model: 'deepseek-chat', provider: 'preset-deepseek-chat' }, ctx: { tools: { schemas: () => tools } } }) },
+    systemPrompt: promptSource,
     webServer: { register: route => { routes.set(route.path, route); } },
     llm: { stream: options => listeners['llm/stream'](options, async function* () {
       const wire = serializeRequest(options);
@@ -152,4 +154,45 @@ test('read API mounts on the actual DSH prefix boundary and rejects unauthentica
     });
     assert.equal(status, 401); assert.equal(result.error.code, 'access_required');
   } finally { await f.close(); }
+});
+
+
+test('editable DSH templates refresh cached requests and match Raw draft with non-stream parameters', async () => {
+  let model = 'first';
+  const promptSource = { assemble: async () => ({ sections: [{ name: 'persona', text: 'DSH {{model}}' }], variables: { model } }) };
+  const f = await setup(input => input.userText, false, promptSource);
+  try {
+    f.preset.dsh_system_prompt_templates = { standard: 'EDITED {{dsh::var::model}}' };
+    f.preset.dsh_request = { max_tokens: 765432, stream: false };
+    await f.store.transaction(state => { state.presets[0].preset = structuredClone(f.preset); });
+    f.histories.a.unshift({ id: 'old-system', role: 'system', source: { kind: 'system-prompt' }, content: [{ type: 'text', text: 'STALE HOST' }] });
+    const preview = () => f.post({ action: 'preview', sessionId: 'a', preset: f.preset, options: { values: {}, markers: {} } });
+    let draft = await preview(); await f.send('a'); assert.equal(draft.raw, f.sent.at(-1).raw);
+    let wire = JSON.parse(f.sent.at(-1).raw);
+    assert.equal(wire.stream, false); assert.equal(wire.max_tokens, 765432); assert.ok(!f.sent.at(-1).raw.includes('STALE HOST'));
+    assert.ok(f.sent.at(-1).raw.includes('EDITED first'));
+    model = 'second'; draft = await preview(); await f.send('a'); assert.equal(draft.raw, f.sent.at(-1).raw); assert.ok(f.sent.at(-1).raw.includes('EDITED second'));
+    assert.equal(f.histories.a[0].content[0].text, 'STALE HOST', 'history stays unchanged');
+  } finally { await f.close(); }
+});
+
+
+test('the first user request expands fresh DSH macros without any prior request header', async () => {
+  const promptSource = { assemble: async ({agent}) => ({ sections: [{name:'persona', text:'{{model}} in {{cwd}} via {{provider}}'}],
+    variables: {model:agent.options.model, provider:agent.options.provider, cwd:agent.session.header.cwd} }) };
+  const f = await setup(input => input.userText, false, promptSource);
+  try {
+    const fresh = { id:'a', header:{agentPreset:'standard',cwd:'D:\\new-session'},
+      deriveMessages:()=>f.histories.a, requestHeader:()=>undefined };
+    f.ctx.sessions.get = () => fresh;
+    f.ctx.agents.get = () => ({ session:fresh, options:{provider:'old-provider',model:'old-model'}, ctx:{tools:{schemas:()=>f.tools}} });
+    f.preset.dsh_system_prompt_templates = {standard:'FIRST {{dsh::var::model}} {{dsh::var::provider}} {{dsh::var::cwd}}'};
+    await f.store.transaction(state => {state.presets[0].preset = structuredClone(f.preset);});
+    await f.send('a');
+    const raw = f.sent[0].raw;
+    assert.match(raw, /FIRST deepseek-chat preset-deepseek-chat/);
+    assert.ok(JSON.parse(raw).messages[0].content.includes('D:\\new-session'));
+    assert.ok(!raw.includes('{{dsh::')); assert.ok(!raw.includes('old-model'));
+    assert.equal((await f.post({action:'request-snapshot',sessionId:'a'})).snapshot.raw,raw);
+  } finally {await f.close();}
 });

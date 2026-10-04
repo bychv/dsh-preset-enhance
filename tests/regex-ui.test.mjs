@@ -233,12 +233,15 @@ function editor(presetValue = basePreset(), fetchImpl) {
     document: { getElementById: get, querySelector: () => element('section'), addEventListener() {}, createElement: element, createTextNode: text => ({ _text: text, children: [] }) },
   };
   runInNewContext(script + `
+    const __originalRenderEditor = renderEditor;
     renderList = () => {}; renderEditor = () => {};
     function __textOf(node) { return [node._text || '', ...((node.children ?? []).map(__textOf))].join(' '); }
     preset = structuredClone(__initialPreset);
     globalThis.regexUi = {
       load(value) { preset = value; selectedId = ''; renderRegexPanel(); return preset; },
       preset: () => preset,
+      requestSettings: () => renderRequestSettings(),
+      openDsh(info) { state.sessionMode = info.modeId; state.dshSystemTemplate = info; selectedPrompt = DSH_SYSTEM_PROMPT_TEMPLATE_ID; __originalRenderEditor(); },
       scripts: () => regexScripts(),
       options: () => regexOptions(),
       dirty: () => dirty,
@@ -450,4 +453,44 @@ test('the test box posts to the shared regex entry and keeps 命中 / 未命中 
   assert.match(rendered, /仅作用于显示侧或消息写入阶段，本次请求不执行：显示侧/);
   assert.match(ui.get('regex-test-note').textContent, /使用深度 -1/);
   assert.match(ui.get('regex-test-note').textContent, /预填充/);
+});
+
+
+test('request sliders and manual inputs stay synchronized, clamp the range, and save with stream selection', async () => {
+  const ui = editor(basePreset()); ui.requestSettings();
+  assert.equal(ui.get('request-max-tokens').value, '0'); assert.equal(ui.get('request-stream').checked, true);
+  ui.get('request-max-tokens-range').value = '789012'; ui.get('request-max-tokens-range').oninput();
+  assert.equal(ui.get('request-max-tokens').value, '789012'); assert.equal(ui.preset().dsh_request.max_tokens, 789012);
+  ui.get('request-max-tokens').value = '2000000'; ui.get('request-max-tokens').oninput();
+  assert.equal(ui.get('request-max-tokens-range').value, '1000000');
+  ui.get('request-max-tokens').value = '-1'; ui.get('request-max-tokens').oninput();
+  assert.equal(ui.get('request-max-tokens-range').value, '0');
+  ui.get('request-stream').checked = false; ui.get('request-stream').onchange(); await ui.savePreset();
+  const saved = ui.requests.find(request => request.action === 'save');
+  assert.equal(saved.preset.dsh_request.max_tokens, 0); assert.equal(saved.preset.dsh_request.stream, false);
+});
+
+test('pinned DSH body is editable by mode and reset removes only its override', async () => {
+  const info = { available: true, modeId: 'standard', template: 'Default {{dsh::var::model}}', variables: ['model'], sections: [] };
+  const ui = editor(basePreset(), async () => ({ ok: true, json: async () => info }));
+  ui.openDsh(info); assert.equal(ui.get('content').disabled, false); assert.equal(ui.get('content').value, info.template);
+  assert.equal(ui.get('role').disabled, true);
+  ui.get('content').value = 'Custom {{dsh::var::model}}'; ui.get('content').oninput();
+  assert.equal(ui.preset().dsh_system_prompt_templates.standard, 'Custom {{dsh::var::model}}');
+  ui.preset().dsh_system_prompt_templates.other = 'Other template';
+  await ui.get('dsh-template-reset').onclick();
+  assert.equal(ui.preset().dsh_system_prompt_templates.standard, undefined); assert.equal(ui.preset().dsh_system_prompt_templates.other, 'Other template');
+});
+
+
+test('changing modes displays its own default or edited template without overwriting the other mode draft', () => {
+  const ui = editor(basePreset());
+  const info = modeId => ({ available: true, modeId, template: 'Default ' + modeId, variables: [], sections: [] });
+  ui.openDsh(info('standard')); ui.get('content').value = 'Edited standard'; ui.get('content').oninput();
+  ui.openDsh(info('plugin-mode')); assert.equal(ui.get('content').value, 'Default plugin-mode');
+  ui.get('content').value = 'Edited plugin'; ui.get('content').oninput();
+  ui.openDsh(info('standard')); assert.equal(ui.get('content').value, 'Edited standard');
+  ui.openDsh(info('plugin-mode')); assert.equal(ui.get('content').value, 'Edited plugin');
+  ui.openDsh(info('untouched')); assert.equal(ui.get('content').value, 'Default untouched');
+  assert.equal(ui.preset().dsh_system_prompt_templates.untouched, undefined);
 });

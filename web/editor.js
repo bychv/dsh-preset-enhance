@@ -2,12 +2,14 @@ import { mcpTabNames } from './tool-labels.js';
 
 const $ = id => document.getElementById(id);
 const sessionId = new URLSearchParams(location.search).get('sessionId') ?? '';
+let inputModeId = new URLSearchParams(location.search).get('modeId') ?? '';
 let state = { presets: [], revision: 0 }, selectedId = '', selectedPrompt = '', dirty = false;
 let preset = blank();
 let pluginTemplatePanel = null;
 let requestPreview = null, previewController = null, previewGeneration = 0;
 const isLinkedTemplate = id => globalThis.PresetPluginTemplates?.linked(preset, id) === true;
 const DSH_SYSTEM_PROMPT_TEMPLATE_ID = 'dsh-preset-enhance:dsh-system-prompt';
+let dshTemplateEditMode = '';
 const PRESET_AUTO_SAVE_KEY = 'dsh-preset-enhance.preset-auto-save';
 const PRESET_AUTO_SAVE_DELAY = 600;
 const GLOBAL_CONFIG_AUTO_SAVE_DELAY = 700;
@@ -69,10 +71,11 @@ function markDirty() {
   schedulePresetAutoSave();
 }
 async function api(body, options = {}) {
-  const res = await fetch(`/preset-enhance/api?sessionId=${encodeURIComponent(sessionId)}`, body ? {
+  const requestedMode = inputModeId;
+  const res = await fetch(`/preset-enhance/api?sessionId=${encodeURIComponent(sessionId)}${!sessionId && inputModeId ? '&modeId=' + encodeURIComponent(inputModeId) : ''}`, body ? {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ revision: state.revision, ...body }),
+    body: JSON.stringify({ revision: state.revision, ...(!sessionId && inputModeId ? { modeId: inputModeId } : {}), ...body }),
     ...(options.keepalive === true ? { keepalive: true } : {}),
     ...(options.signal ? { signal: options.signal } : {}),
   } : { ...(options.signal ? { signal: options.signal } : {}) });
@@ -82,6 +85,7 @@ async function api(body, options = {}) {
     error.status = res.status;
     throw error;
   }
+  if (!body && !sessionId && requestedMode !== inputModeId) return api(body, options);
   return result;
 }
 function guard(fn) {
@@ -99,10 +103,12 @@ function current() {
 function dshSystemPromptTemplate() {
   return {
     identifier: DSH_SYSTEM_PROMPT_TEMPLATE_ID,
-    name: 'DSH 系统提示词',
+    name: `DSH 系统提示词 · ${modeName(state.sessionMode)}`,
     role: 'system',
     marker: true,
-    content: state.dshSystemPromptText || '此内容从当前 DSH 模式的系统提示词读取',
+    content: Object.hasOwn(preset.dsh_system_prompt_templates ?? {}, state.sessionMode ?? '')
+      ? preset.dsh_system_prompt_templates[state.sessionMode ?? '']
+      : state.dshSystemTemplate?.template ?? state.dshSystemPromptText ?? '',
   };
 }
 function isDshSystemPromptTemplate(promptOrId) {
@@ -143,6 +149,7 @@ function loadDraft(id) {
   $('order').value = String(binding.presetId === id && binding.characterId != null ? binding.characterId :
     preset.prompt_order.find(group => String(group.character_id) === '100001')?.character_id ?? preset.prompt_order[0].character_id);
   $('prefill').value = preset.assistant_prefill ?? '';
+  renderRequestSettings();
   selectedPrompt = order()[0]?.identifier ?? preset.prompts[0]?.identifier ?? '';
   dirty = false;
   renderList();
@@ -1636,7 +1643,7 @@ function renderPromptItem(prompt, item, used, term, parent) {
   const button = document.createElement('button');
   button.className = 'entry';
   button.dataset.promptId = prompt.identifier;
-  button.textContent = fixed ? 'DSH 系统提示词 · 内置模板' :
+  button.textContent = fixed ? `${prompt.name} · 内置模板` :
     `${prompt.name ?? prompt.identifier} · ${prompt.marker ? '标记' : prompt.role ?? 'system'}`;
   button.onclick = () => {
     selectedPrompt = prompt.identifier;
@@ -1700,14 +1707,16 @@ function renderEditor() {
   const templateRef = globalThis.PresetPluginTemplates?.bindings(preset)?.[prompt.identifier];
   $('content').value = chatHistory ? '此内容从当前聊天记录读取' : templateRef?.target === 'marker' ? templateRef.contentSnapshot ?? '' : prompt.content ?? '';
   for (const id of ['prompt-name', 'role', 'position', 'depth', 'priority']) $(id).disabled = fixed;
-  $('content').disabled = fixed || !!prompt.marker || isLinkedTemplate(prompt.identifier);
+  $('content').disabled = fixed ? !state.dshSystemTemplate?.available : !!prompt.marker || isLinkedTemplate(prompt.identifier);
+  $('dsh-template-controls').hidden = !fixed;
+  if (fixed) { dshTemplateEditMode = state.sessionMode ?? ''; renderDshTemplateMacros(); }
   $('role').disabled = fixed || isLinkedTemplate(prompt.identifier);
   $('prompt-enabled').checked = fixed ? preset.dsh_system_prompt_enabled !== false : item?.enabled ?? false;
   $('prompt-enabled').disabled = !used;
   $('up').disabled = fixed || !used;
   $('down').disabled = fixed || !used;
   $('marker-note').textContent = fixed ?
-    '内置模板：控制其他 DSH 模式启用此预设时是否保留该模式的系统提示词；正文从当前模式动态读取，只可开关。' : prompt.marker ?
+    `DSH 模式：${(state.agentModes ?? []).find(m => m.id === state.sessionMode)?.name ?? state.sessionMode ?? '默认'} · 动态宏在每次发送和预览时更新。${state.presetMode ? '专用预设模式不注入 DSH 提示词。' : ''}${state.dshSystemTemplate?.available ? '' : '当前无法读取模式模板。'}` : prompt.marker ?
     (templateRef?.target === 'marker' ? `标记 ${prompt.identifier}：正文由插件模板提供；可在插件模板区恢复原标记。` : `标记 ${prompt.identifier}：chatHistory 展开真实会话；其他标记在下方 JSON 中填写。`) :
     `${prompt.identifier}${used ? '' : ' · 当前为闲置条目，加入顺序表后才会参与注入'}${isLinkedTemplate(prompt.identifier) ? ' · 插件关联正文只读；请在插件模板区更新版本或转为本地副本' : ''}`;
 }
@@ -1717,13 +1726,71 @@ for (const [id, key, numeric] of [
   ['depth', 'injection_depth', true], ['priority', 'injection_order', true], ['content', 'content'],
 ]) {
   $(id).oninput = () => {
-    if (!current() || isDshSystemPromptTemplate(selectedPrompt)) return;
+    if (!current()) return;
+    if (isDshSystemPromptTemplate(selectedPrompt)) {
+      if (key === 'content' && state.dshSystemTemplate?.available) {
+        preset.dsh_system_prompt_templates ??= {};
+        Object.defineProperty(preset.dsh_system_prompt_templates, dshTemplateEditMode, { value: $(id).value, writable: true, configurable: true, enumerable: true });
+        markDirty();
+      }
+      return;
+    }
     if (isLinkedTemplate(selectedPrompt) && (key === 'content' || key === 'role')) return;
     current()[key] = numeric ? Number($(id).value) : $(id).value;
     markDirty();
     if (id === 'prompt-name' || id === 'role') renderList();
   };
 }
+function renderRequestSettings() {
+  const value = preset.dsh_request?.max_tokens ?? 0;
+  $('request-max-tokens').value = String(value);
+  $('request-max-tokens-range').value = String(value);
+  $('request-stream').checked = preset.dsh_request?.stream !== false;
+}
+function updateMaxTokens(id) {
+  const number = Number($(id).value);
+  if (!Number.isFinite(number)) return;
+  const value = Math.max(0, Math.min(1000000, Math.round(number)));
+  preset.dsh_request = { ...preset.dsh_request, max_tokens: value };
+  $('request-max-tokens').value = String(value);
+  $('request-max-tokens-range').value = String(value);
+  markDirty();
+}
+for (const id of ['request-max-tokens', 'request-max-tokens-range']) $(id).oninput = () => updateMaxTokens(id);
+$('request-stream').onchange = () => {
+  preset.dsh_request = { ...preset.dsh_request, stream: $('request-stream').checked };
+  markDirty();
+};
+function renderDshTemplateMacros() {
+  const box = $('dsh-template-macros'); box.replaceChildren();
+  const info = state.dshSystemTemplate;
+  const variables = document.createElement('p');
+  variables.textContent = (info?.variables ?? []).map(name => '{{dsh::var::' + name + '}}').join(' · ');
+  box.append(variables);
+  for (const section of info?.sections ?? []) {
+    const details = document.createElement('details'), summary = document.createElement('summary'), text = document.createElement('pre');
+    summary.textContent = section.name + ' · ' + section.macro;
+    text.textContent = section.text;
+    const expand = document.createElement('button'); expand.type = 'button'; expand.textContent = '将此段落展开为可编辑正文';
+    expand.onclick = () => {
+      const content = current()?.content ?? '';
+      if (!content.includes(section.macro)) { status('当前模板未使用此段落宏'); return; }
+      $('content').value = content.split(section.macro).join(section.template);
+      $('content').oninput();
+      status('已展开段落；变量宏继续动态更新');
+    };
+    details.append(summary, expand, text); box.append(details);
+  }
+}
+$('dsh-template-reset').onclick = guard(async () => {
+  const modeId = dshTemplateEditMode, generation = presetDraftGeneration;
+  const info = await api({ action: 'dsh-system-template', sessionId, modeId });
+  if (generation !== presetDraftGeneration) return;
+  if (!info.available) throw new Error('当前无法读取 DSH 模式模板');
+  if (state.sessionMode === modeId) state.dshSystemTemplate = info;
+  if (preset.dsh_system_prompt_templates) delete preset.dsh_system_prompt_templates[modeId];
+  markDirty(); renderEditor(); status('已恢复当前模式的默认系统提示词');
+});
 $('prompt-enabled').onchange = () => {
   setEnabled(selectedPrompt, $('prompt-enabled').checked);
   renderList();
@@ -2322,6 +2389,7 @@ let requestEvents;
 function connectRequestEvents() {
   if (!sessionId || typeof EventSource === 'undefined' || requestEvents) return;
   requestEvents = new EventSource(`/preset-enhance/api/request-events?sessionId=${encodeURIComponent(sessionId)}`);
+  requestEvents.addEventListener('mode', () => { void refreshConnectionState(); });
   requestEvents.onmessage = event => {
     const { id } = JSON.parse(event.data);
     if (id) void readRequestSnapshot(id).catch(error => status(error.message, true));
@@ -2331,7 +2399,7 @@ window.addEventListener('pagehide', () => { previewController?.abort(); requestE
 window.addEventListener('pageshow', connectRequestEvents);
 connectRequestEvents();
 document.querySelector('.preview').addEventListener('input', () => { ++previewGeneration; previewController?.abort(); requestPreview.stale(); });
-for (const id of ['user', 'char', 'markers', 'order', 'deepseek-beta-prefix', 'prefix-tool-calls', 'prefix-output-extraction', 'prefix-nonofficial-remove-tools', 'post-tool-prefix-mode', 'post-tool-prefix-text', 'enabled']) {
+for (const id of ['user', 'char', 'markers', 'order', 'deepseek-beta-prefix', 'prefix-tool-calls', 'prefix-output-extraction', 'prefix-nonofficial-remove-tools', 'post-tool-prefix-mode', 'post-tool-prefix-text', 'enabled', 'request-max-tokens', 'request-max-tokens-range', 'request-stream']) {
   $(id).addEventListener('change', () => { ++previewGeneration; previewController?.abort(); requestPreview.stale(); });
 }
 
@@ -2904,17 +2972,33 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') flushToolDraftKeepalive();
   else void refreshConnectionState();
 });
+let connectionRefreshGeneration = 0;
 async function refreshConnectionState() {
   if (connectionSwitchSaving) return;
+  const generation = ++connectionRefreshGeneration;
   try {
     const latest = await api();
+    if (generation !== connectionRefreshGeneration || connectionSwitchSaving) return;
+    const modeChanged = state.sessionMode !== latest.sessionMode;
+    state.sessionMode = latest.sessionMode;
+    state.presetMode = latest.presetMode;
+    state.dshSystemTemplate = latest.dshSystemTemplate;
     state.connectionChoice = latest.connectionChoice;
     state.protocol = latest.protocol;
     state.protocolNotes = latest.protocolNotes;
+    if (modeChanged) { previewController?.abort(); ++previewGeneration; requestPreview?.stale(); renderList(); updateSessionNote(); }
+    if (isDshSystemPromptTemplate(selectedPrompt)) renderEditor();
     renderConnectionChoice();
     renderProtocolNotice();
   } catch { /* keep the last confirmed state while disconnected */ }
 }
+window.addEventListener('message', event => {
+  if (event.source !== window.parent || event.origin !== location.origin ||
+      event.data?.type !== 'preset-enhance:input-mode' || typeof event.data.modeId !== 'string') return;
+  if (!sessionId && inputModeId === event.data.modeId) return;
+  inputModeId = event.data.modeId;
+  if (state) void refreshConnectionState().catch(error => status(error.message, true));
+});
 window.addEventListener('focus', () => { void refreshConnectionState(); });
 pluginTemplatePanel = globalThis.PresetPluginTemplates?.mount($('plugin-template-panel'), {
   api, getPreset: () => preset, getPresetId: () => selectedId, getCharacterId: () => $('order').value,

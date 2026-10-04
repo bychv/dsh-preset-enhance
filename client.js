@@ -52,7 +52,34 @@ window.__ModuleLoader__.load({
       }, []);
     }
 
-    const workbenchSrc = sessionId => '/preset-enhance?sessionId=' + encodeURIComponent(sessionId);
+    let hostSlots;
+    const workbenchSrc = (sessionId, modeId = '') => '/preset-enhance?sessionId=' + encodeURIComponent(sessionId) +
+      (!sessionId && modeId ? '&modeId=' + encodeURIComponent(modeId) : '');
+    const noSubscribe = () => () => {};
+    function useInputMode(sessionId) {
+      const key = 'conversation.hero.agentPreset';
+      const entryOf = () => (hostSlots?.entriesOfSlot?.(key) ?? hostSlots?.entries?.(key) ?? [])[0];
+      const entry = React.useSyncExternalStore(
+        listener => hostSlots?.subscribe?.(key, listener) ?? noSubscribe(), entryOf, entryOf);
+      // Read the same public slot face used by DSH's mode chip. Do not select a mode.
+      const face = entry?.inject?.(sessionId || undefined);
+      const source = face?.hooks?.agentPresetSeat;
+      const read = () => source?.getSnapshot?.().current ?? '';
+      const modeId = React.useSyncExternalStore(source ? listener => source.subscribe(listener) : noSubscribe, read, read);
+      React.useEffect(() => { if (source && !read()) void face.load?.(); }, [entry, source]);
+      return modeId;
+    }
+    function useWorkbenchFrame({ sessionId, modeId = '' }) {
+      const frame = React.useRef(null), initial = React.useRef(null);
+      if (!initial.current || initial.current.sessionId !== sessionId) {
+        initial.current = { sessionId, src: workbenchSrc(sessionId, modeId) };
+      }
+      const notify = () => frame.current?.contentWindow?.postMessage(
+        { type: 'preset-enhance:input-mode', modeId }, window.location.origin);
+      React.useEffect(notify, [sessionId, modeId]);
+      return React.createElement('iframe', { ref: frame, title: WORKBENCH_TITLE, src: initial.current.src,
+        onLoad: notify, style: FRAME_STYLE });
+    }
     /**
      * Session-scoped workbench. `conversation.view` is declared with
      * `scope: 'session'` (ui-conversation/src/client/contract/slots.ts), so the
@@ -65,25 +92,29 @@ window.__ModuleLoader__.load({
     const SessionFrame = props => {
       useDshResizeLock();
       const sessionId = props.sessionId ?? props.injected?.sessionId ?? '';
+      const modeId = useInputMode(sessionId);
+      const frame = useWorkbenchFrame({ sessionId, modeId });
       if (!sessionId) {
         return React.createElement('p', { className: 'muted' },
           '未识别当前会话，暂不能编辑会话级设置；请从会话视图或侧边栏面板打开预设工作台。');
       }
-      return React.createElement('iframe', { title: WORKBENCH_TITLE, src: workbenchSrc(sessionId), style: FRAME_STYLE });
+      return frame;
     };
     /**
      * Root-scope workbench, addressed by the sidebar panel id. `main` is a
      * root-scoped keyed slot (ui-sidebar/README.zh.md), so this occurrence gets no
-     * sessionId and `useSessions.current` — the host's main-view binding — is the
-     * only session source. A host-provided sessionId still wins when present.
+     * sessionId. Current DSH marks the main-view Session via retainedBy.mainView;
+     * older hosts expose current directly. A host-provided sessionId still wins.
      */
     const MainPanelFrame = props => {
       useDshResizeLock();
       const currentSessionId = typeof props.useSessions === 'function'
-        ? props.useSessions(state => state.current)
+        ? props.useSessions(state => Object.values(state.byId ?? {}).find(session =>
+          (session.retainedBy?.mainView ?? 0) > 0)?.id ?? state.current)
         : undefined;
       const sessionId = props.sessionId ?? props.injected?.sessionId ?? currentSessionId ?? '';
-      return React.createElement('iframe', { title: WORKBENCH_TITLE, src: workbenchSrc(sessionId), style: FRAME_STYLE });
+      const modeId = useInputMode(sessionId);
+      return useWorkbenchFrame({ sessionId, modeId });
     };
     const PresetIcon = ({ size = 18 }) => React.createElement('svg', {
       width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8,
@@ -92,6 +123,7 @@ window.__ModuleLoader__.load({
     React.createElement('path', { d: 'M8 8h8M8 12h5M8 16h8' }),
     React.createElement('path', { d: 'M16 11v4M14 13h4' }));
     return { inject: ['slots', 'conversation'], apply(ctx) {
+      hostSlots = ctx.slots;
       // Every registration is fiber-scoped: slots.inject()/register() run through
       // the caller's ctx.effect (ui-renderer/src/client/registry.ts), and the loader
       // disposes the entry fiber on disable/removal and re-materializes the factory

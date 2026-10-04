@@ -57,6 +57,15 @@ export function renderMacros(input: string, ctx: MacroContext = createMacroConte
       if (out.length > 2_000_000) throw new Error('宏展开结果超过 2 MB');
       continue;
     }
+    if (name === 'dsh') {
+      const key = ['dsh', ...parts.map(p => p.trim().replace(/\\([{}\\])/g, '$1'))].join('::').toLowerCase();
+      if (!Object.hasOwn(ctx.values, key)) throw new Error('DSH 动态宏不可用：' + raw);
+      // Runtime values are literal data, never recursively evaluated as Tavern macros.
+      const value = ctx.values[key];
+      out += ctx.valueTransform && level === 0 ? ctx.valueTransform(value) : value;
+      if (out.length > 2_000_000) throw new Error('宏展开结果超过 2 MB');
+      continue;
+    }
     const known = /^(?:(?:set|get|add|inc|dec|flush)(?:global)?var|random|pick|roll|newline|noop|reverse)$/;
     if (!known.test(name) && !Object.hasOwn(ctx.values, name)) {
       ctx.warnings.push(`未支持的宏：${head}`); out += input.slice(start, cursor); continue;

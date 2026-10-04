@@ -197,7 +197,9 @@ test('client registers the workbench and locks both DSH resize handles while mou
       assert.equal(name, 'react');
       return {
         createElement: (type, props, ...children) => ({ type, props, children }),
-        useEffect(effect) { cleanups.push(effect()); },
+        useEffect(effect) { const dispose = effect(); if (typeof dispose === 'function') cleanups.push(dispose); },
+        useRef(value) { return { current: value }; },
+        useSyncExternalStore(_subscribe, read) { return read(); },
       };
     });
     const injected = [], registered = [];
