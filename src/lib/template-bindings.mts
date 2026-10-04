@@ -4,12 +4,33 @@ import type { SillyTavernPreset, PresetPrompt, PromptOrderEntry } from './types.
 
 const NS = 'dsh-preset-enhance';
 const object = (value: unknown): value is Record<string, any> => !!value && typeof value === 'object' && !Array.isArray(value);
-export function templateBindings(preset: SillyTavernPreset): Record<string, any> {
+export function templateBindings(preset: SillyTavernPreset, catalog?: TemplateCatalogSnapshot): Record<string, any> {
   const extensions = preset.extensions;
   const raw = object(extensions) && object(extensions[NS]) ? extensions[NS].templateBindings : undefined;
-  if (raw === undefined) return {};
-  if (!object(raw)) throw new Error('templateBindings 必须为对象');
-  return raw;
+  if (raw !== undefined && !object(raw)) throw new Error('templateBindings 必须为对象');
+  if (!catalog) return raw ?? {};
+  const bindings = Object.assign(Object.create(null), raw ?? {});
+  for (const id of Object.keys(bindings)) if (bindings[id]?.automatic === true) delete bindings[id];
+  const disabled = object(extensions) && object(extensions[NS]) && Array.isArray(extensions[NS].autoTemplateDisabled) ? extensions[NS].autoTemplateDisabled : [];
+  const candidates = new Map<string, Array<{ providerId: string; template: PromptTemplateV1 }>>();
+  for (const provider of catalog.providers) for (const template of provider.templates) {
+    if (!template.targetMarker) continue;
+    const list = candidates.get(template.targetMarker) ?? [];
+    list.push({ providerId: provider.providerId, template }); candidates.set(template.targetMarker, list);
+  }
+  for (const prompt of preset.prompts) {
+    if (!markerTarget(prompt) || Object.hasOwn(bindings, prompt.identifier) || disabled.includes(prompt.identifier)) continue;
+    const matches = candidates.get(prompt.identifier) ?? [];
+    if (matches.length > 1) {
+      bindings[prompt.identifier] = { mode: 'auto-conflict', candidates: matches.map(({ providerId, template }) => `${providerId}/${template.id}@${template.version}`).sort() };
+    } else if (matches.length === 1) {
+      const { providerId, template } = matches[0];
+      bindings[prompt.identifier] = { mode: template.dynamic ? 'linked-dynamic' : 'linked', target: 'marker', automatic: true,
+        ...(raw?.[prompt.identifier]?.providerId === providerId && raw?.[prompt.identifier]?.templateId === template.id ? { config: raw[prompt.identifier].config, failurePolicy: raw[prompt.identifier].failurePolicy } : {}),
+        providerId, templateId: template.id, templateVersion: template.version, fingerprint: templateFingerprint(template), contentSnapshot: template.content };
+    }
+  }
+  return bindings;
 }
 export const templateFingerprint = (template: PromptTemplateV1) => createHash('sha256').update(JSON.stringify(template)).digest('hex');
 export function templateCatalogWithFingerprints(catalog: TemplateCatalogSnapshot) {
@@ -28,13 +49,21 @@ const markerTarget = (prompt: PresetPrompt) => prompt.marker === true &&
 /** Resolve only into a request copy. Unavailable linked text must never fall back to its snapshot. */
 export interface DynamicBody { text?: string; patches?: HistoryPatchV1[]; reason?: string }
 export function resolveTemplateBindings(preset: SillyTavernPreset, catalog?: TemplateCatalogSnapshot, activeIds?: Set<string>, bodies?: Record<string, DynamicBody>) {
-  const bindings = templateBindings(preset);
+  const bindings = templateBindings(preset, catalog);
   const warnings: string[] = [];
   const references: Array<{ identifier: string; fingerprint: string | null; reason: string }> = [];
   const missing = new Set<string>();
   const prompts = preset.prompts.map(prompt => {
     if (!Object.hasOwn(bindings, prompt.identifier)) return prompt;
     const ref = bindings[prompt.identifier];
+    if (ref?.mode === 'auto-conflict') {
+      if (!activeIds || activeIds.has(prompt.identifier)) {
+        const reason = `自动关联冲突，请在插件模板中选择：${ref.candidates.join('、')}`;
+        references.push({ identifier: prompt.identifier, fingerprint: null, reason });
+        warnings.push(`插件模板「${prompt.name ?? prompt.identifier}」${reason}`);
+      }
+      return prompt;
+    }
     const template = object(ref) ? find(catalog, ref) : undefined;
     const fingerprint = template ? templateFingerprint(template) : null;
     const marker = object(ref) && ref.target === 'marker';
@@ -65,7 +94,7 @@ export function resolveTemplateBindings(preset: SillyTavernPreset, catalog?: Tem
 }
 
 export interface TemplateSelection {
-  operation: 'add' | 'update' | 'detach' | 'bind-marker' | 'configure';
+  operation: 'add' | 'update' | 'detach' | 'bind-marker' | 'configure' | 'restore-auto';
   config?: Record<string, unknown>;
   failurePolicy?: 'abort' | 'skip';
   identifier?: string;
@@ -86,10 +115,18 @@ export function selectTemplate(source: SillyTavernPreset, catalog: TemplateCatal
   const settings = ext[NS] ??= {};
   const bindings = templateBindings(preset);
   settings.templateBindings = bindings;
-  if (!['add', 'update', 'detach', 'bind-marker', 'configure'].includes(selection.operation)) throw new Error('模板操作无效');
+  if (!['add', 'update', 'detach', 'bind-marker', 'configure', 'restore-auto'].includes(selection.operation)) throw new Error('模板操作无效');
   if (selection.operation === 'add' && selection.identifier !== undefined) throw new Error('新增模板不能指定现有条目；关联标记请使用 bind-marker');
   let prompt = preset.prompts.find(item => item.identifier === selection.identifier);
-  const previous = prompt && Object.hasOwn(bindings, prompt.identifier) ? bindings[prompt.identifier] : undefined;
+  const effective = templateBindings(preset, catalog);
+  const previous = prompt && Object.hasOwn(effective, prompt.identifier) && effective[prompt.identifier]?.mode !== 'auto-conflict' ? effective[prompt.identifier] : undefined;
+  if (selection.operation === 'restore-auto') {
+    if (!prompt || !markerTarget(prompt)) throw new Error('请选择 marker 条目');
+    if (locks.includes(prompt.identifier)) throw new Error('条目已锁定，请先解锁');
+    delete bindings[prompt.identifier];
+    settings.autoTemplateDisabled = (Array.isArray(settings.autoTemplateDisabled) ? settings.autoTemplateDisabled : []).filter((id: string) => id !== prompt!.identifier);
+    return { preset, identifier: prompt.identifier, changed: JSON.stringify(preset) !== JSON.stringify(source) };
+  }
   if (selection.operation === 'configure') {
     if (!prompt || previous?.mode !== 'linked-dynamic') throw new Error('动态关联条目不存在');
     if (locks.includes(prompt.identifier)) throw new Error('条目已锁定，请先解锁');
@@ -100,7 +137,7 @@ export function selectTemplate(source: SillyTavernPreset, catalog: TemplateCatal
   if (selection.operation === 'bind-marker') {
     if (!prompt || !markerTarget(prompt)) throw new Error('请选择可关联的酒馆 marker 条目');
     if (locks.includes(prompt.identifier)) throw new Error('条目已锁定，请先解锁');
-    if (previous) throw new Error('条目已有关联，请更新版本或先解除关联');
+    if (previous && !previous.automatic) throw new Error('条目已有关联，请更新版本或先解除关联');
   }
   if (selection.operation === 'update' || selection.operation === 'detach') {
     if (!prompt || !previous) throw new Error('关联模板条目不存在');
@@ -108,6 +145,7 @@ export function selectTemplate(source: SillyTavernPreset, catalog: TemplateCatal
     if (selection.operation === 'detach') {
       if (previous.mode === 'linked-dynamic' && previous.target !== 'marker') prompt.content = (prompt.content ?? '').replaceAll('{{dynamic::body}}', '');
       delete bindings[prompt.identifier];
+      if (markerTarget(prompt)) settings.autoTemplateDisabled = [...new Set([...(Array.isArray(settings.autoTemplateDisabled) ? settings.autoTemplateDisabled : []), prompt.identifier])];
       return { preset, identifier: prompt.identifier, changed: true };
     }
     if (previous.providerId !== selection.providerId || previous.templateId !== selection.templateId) {
@@ -123,8 +161,9 @@ export function selectTemplate(source: SillyTavernPreset, catalog: TemplateCatal
   if (template.targetMarker !== undefined && (!marker || template.targetMarker !== prompt?.identifier)) throw new Error('模板仅适用于指定 marker');
   if (marker && prompt?.identifier === 'chatHistory' && (template.targetMarker !== 'chatHistory' || template.dynamic?.output !== 'history-patches')) throw new Error('chatHistory 仅接受结构化历史修改模板');
   if (marker) {
+    settings.autoTemplateDisabled = (Array.isArray(settings.autoTemplateDisabled) ? settings.autoTemplateDisabled : []).filter((id: string) => id !== prompt!.identifier);
     Object.defineProperty(bindings, prompt!.identifier, { enumerable: true, configurable: true, writable: true, value: {
-      ...(object(previous) ? previous : {}), mode: template.dynamic ? 'linked-dynamic' : 'linked', target: 'marker', providerId: selection.providerId, templateId: selection.templateId,
+      ...(object(previous) ? previous : {}), mode: template.dynamic ? 'linked-dynamic' : 'linked', automatic: false, target: 'marker', providerId: selection.providerId, templateId: selection.templateId,
       templateVersion: template.version, fingerprint, contentSnapshot: template.content,
     } });
     return { preset, identifier: prompt!.identifier, changed: JSON.stringify(preset) !== JSON.stringify(source) };

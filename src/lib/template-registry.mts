@@ -106,12 +106,12 @@ export function createTemplateRegistry(onListenerError: (error: unknown) => void
       }
     });
   };
-  const checkCatalog = (provider: TemplateProviderV1): Map<string, string> => {
+  const checkCatalog = (provider: TemplateProviderV1, reloaded = false): Map<string, string> => {
     const fingerprints = new Map<string, string>();
     for (const template of provider.templates) {
       const key = JSON.stringify([provider.providerId, template.id, template.version]);
       const fingerprint = createHash('sha256').update(JSON.stringify(template)).digest('hex');
-      if (versions.has(key) && versions.get(key) !== fingerprint) throw new Error(`模板 ${template.id}@${template.version} 内容已改变，请使用新版本`);
+      if (!reloaded && versions.has(key) && versions.get(key) !== fingerprint) throw new Error(`模板 ${template.id}@${template.version} 内容已改变，请使用新版本`);
       fingerprints.set(key, fingerprint);
     }
     const additions = [...fingerprints.keys()].filter(key => !versions.has(key)).length;
@@ -146,8 +146,8 @@ export function createTemplateRegistry(onListenerError: (error: unknown) => void
         for (const template of templates) if (template.dynamic && !Object.hasOwn(resolvers, template.dynamic.resolverId)) throw new Error('动态模板解析器未注册');
       };
       validateRuntime(entry.templates);
-      const controller = new AbortController();
-      const fingerprints = checkCatalog(entry);
+      let controller = new AbortController();
+      const fingerprints = checkCatalog(entry, true);
       let active = false;
       const dispose = () => {
         if (!active) return;
@@ -160,12 +160,14 @@ export function createTemplateRegistry(onListenerError: (error: unknown) => void
         owner.effect(() => {
           assertOpen();
           if (providers.has(providerId)) throw new Error(`模板提供者已注册：${providerId}`);
+          controller = new AbortController();
+          const lease = controller;
           providers.set(providerId, entry);
           runtimes.set(providerId, { resolvers, controller });
           remember(fingerprints);
           active = true;
           changed();
-          return dispose;
+          return () => { if (controller === lease) dispose(); };
         }, `preset-enhance: templates ${providerId}`);
       } catch (error) { dispose(); throw error; }
       if (!active) throw new Error('模板提供者作用域未启用');

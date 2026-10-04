@@ -90,12 +90,12 @@ test('failed registration and invalid shapes never leave partial catalog entries
   assert.equal(service.list().providers.length, 1);
 });
 
-test('version identity survives provider reloads within one registry activation', () => {
+test('a new provider scope may reload changed content; updates still require a new version', () => {
   const { service } = createTemplateRegistry();
   service.register(scope(), provider()).dispose();
-  assert.throws(() => service.register(scope(), provider('example.one', [template({ content: 'mutated' })])), /新版本/);
-  service.register(scope(), provider());
-  assert.equal(service.list().providers.length, 1);
+  const handle = service.register(scope(), provider('example.one', [template({ content: 'mutated' })]));
+  assert.equal(service.list().providers[0].templates[0].content, 'mutated');
+  assert.throws(() => handle.update([template({ content: 'again' })]), /新版本/);
 });
 
 test('catalog notifications coalesce, isolate listener errors, and unsubscribe cleanly', async () => {

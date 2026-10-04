@@ -56,7 +56,7 @@ export const AGENT_PRESET_ID = 'st-preset';
 const BASE = '/preset-enhance';
 const DSH_SYSTEM_PROMPT = '@deepseek-ai/dsh-system-prompt';
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
-const PRESET_COMPILER_VERSION = 8;
+const PRESET_COMPILER_VERSION = 9;
 function compilationKey(preset: unknown, messages: HostMessage[], options: Record<string, any>, protocol: string, references: unknown, dynamicBodies: unknown) {
   return digest({ compiler: PRESET_COMPILER_VERSION, preset, messages, characterId: String(options.characterId ?? 100001),
     values: { user: 'User', char: 'Assistant', ...options.values }, markers: options.markers ?? {},
@@ -357,7 +357,7 @@ const chatConnection = () => {
     };
     const initialBinding = effectiveBinding(initial);
     const initialRecord = initial.presets.find(p => p.id === initialBinding?.presetId);
-    const dynamic = initialBinding?.enabled && initialRecord && Object.values(templateBindings(initialRecord.preset)).some(ref => ref?.mode === 'linked-dynamic');
+    const dynamic = initialBinding?.enabled && initialRecord && Object.values(templateBindings(initialRecord.preset, templateCatalog)).some(ref => ref?.mode === 'linked-dynamic');
     const expectedDependency = dynamic ? dependencyKey(initial) : undefined;
     const historyRevision = dynamic && session.deriveMessages ? digest(session.deriveMessages()) : undefined;
     const dynamicBodies = dynamic ? (await lifecycle.track(prepareDynamicTemplates(templateRegistry, initialRecord!.preset,
@@ -481,6 +481,22 @@ const chatConnection = () => {
     [`${BASE}/plugin-templates.css`, ['web/plugin-templates.css', 'text/css']],
     [`${BASE}/request-preview.js`, ['web/request-preview.js', 'text/javascript']],
   ]);
+  const templateEventClosers = new Set<() => void>();
+  ctx.effect(() => () => { for (const close of [...templateEventClosers]) close(); }, 'preset-enhance: template event cleanup');
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact', path: `${BASE}/api/template-events`, handler: (req: HostRequest, res: HostResponse) => {
+      if (req.method !== 'GET') return respond(res, 405, { error: 'Method not allowed' });
+      if (lifecycle.closing || !templateServiceAvailable || !res.write) return respond(res, 503, { error: '模板通知不可用' });
+      res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', 'x-accel-buffering': 'no' });
+      const send = (revision: number) => res.write!(`data: ${JSON.stringify({ revision })}\n\n`);
+      const unsubscribe = templateRegistry.service.subscribe(send);
+      const timer = setInterval(() => res.write!(': keepalive\n\n'), 25000);
+      const close = () => { clearInterval(timer); unsubscribe(); templateEventClosers.delete(close); res.end(); };
+      templateEventClosers.add(close);
+      res.on?.('close', () => { clearInterval(timer); unsubscribe(); templateEventClosers.delete(close); });
+      send(templateRegistry.service.list().revision);
+    },
+  }), 'preset-enhance: template event route');
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact', path: `${BASE}/api/templates`, handler: async (req: HostRequest, res: HostResponse) => {
       if (req.method !== 'GET') return respond(res, 405, { error: 'Method not allowed' });
@@ -664,7 +680,7 @@ const chatConnection = () => {
           const preset = validatePreset(body.preset);
           const order = getOrder(preset, body.options?.characterId).filter(i => i.enabled);
           const ids = new Set(order.map(i => i.identifier));
-          const dynamic = Object.entries(templateBindings(preset)).some(([id, ref]) => ids.has(id) && ref?.mode === 'linked-dynamic');
+          const dynamic = Object.entries(templateBindings(preset, templateRegistry.service.list())).some(([id, ref]) => ids.has(id) && ref?.mode === 'linked-dynamic');
           const tail = preset.prompts.find(p => p.identifier === order.at(-1)?.identifier);
           return respond(res, 200, { pending: dynamic, assistantPrefix: { active: !!preset.assistant_prefill?.trim() || tail?.role === 'assistant' || tail?.role === 'model' } });
         }

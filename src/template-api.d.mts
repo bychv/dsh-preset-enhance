@@ -14,7 +14,7 @@ export interface PromptTemplateV1 {
   content: string;
   /** Request-time literal body for {{dynamic::body}}; callbacks are registered separately. */
   dynamic?: { resolverId: string; input?: 'latest-user' | 'history'; output?: 'text' | 'history-patches' };
-  /** Optional Tavern marker identifier; selected explicitly; chatHistory requires structured history-patches output. */
+  /** Optional Tavern marker identifier; unique target auto-binds; conflicts need selection. chatHistory requires history-patches. */
   targetMarker?: string;
   defaults?: {
     placement: 'beforeHistory' | 'afterHistory' | 'depth';

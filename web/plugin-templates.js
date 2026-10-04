@@ -2,7 +2,7 @@
 (() => {
   const namespace = 'dsh-preset-enhance';
   const bindings = preset => preset?.extensions?.[namespace]?.templateBindings ?? {};
-  const linked = (preset, id) => Object.hasOwn(bindings(preset), id);
+  const linked = (preset, id) => Object.hasOwn(bindings(preset), id) && !bindings(preset)[id]?.automatic;
   const key = ref => JSON.stringify([ref.providerId, ref.templateId, ref.templateVersion]);
   const node = (tag, text) => {
     const out = document.createElement(tag);
@@ -12,10 +12,25 @@
   function mount(root, options) {
     if (!root) return null;
     let catalog = { providers: [], fingerprints: [] }, chosen = '', busy = false, ready = false, note = '', stopped = false;
-    let refreshing = null;
+    let refreshing = null, refreshAgain = false;
     const rows = () => catalog.providers.flatMap(provider => provider.templates.map(template => ({
       provider, template, ref: { providerId: provider.providerId, templateId: template.id, templateVersion: template.version },
     })));
+    const effectiveBindings = preset => {
+      const stored = bindings(preset);
+      const refs = Object.fromEntries(Object.entries(stored).filter(([, ref]) => !ref?.automatic));
+      const disabled = preset?.extensions?.[namespace]?.autoTemplateDisabled ?? [];
+      for (const prompt of preset?.prompts ?? []) {
+        if (!prompt.marker || prompt.identifier === 'dsh-preset-enhance:dsh-system-prompt' || Object.hasOwn(refs, prompt.identifier) || disabled.includes(prompt.identifier)) continue;
+        const matches = rows().filter(row => row.template.targetMarker === prompt.identifier);
+        if (matches.length === 1) {
+          const row = matches[0]; refs[prompt.identifier] = { ...row.ref, target: 'marker', automatic: true,
+            ...(stored[prompt.identifier]?.providerId === row.ref.providerId && stored[prompt.identifier]?.templateId === row.ref.templateId ? { config: stored[prompt.identifier].config, failurePolicy: stored[prompt.identifier].failurePolicy } : {}),
+            mode: row.template.dynamic ? 'linked-dynamic' : 'linked', fingerprint: fingerprint(row.ref), contentSnapshot: row.template.content };
+        } else if (matches.length > 1) refs[prompt.identifier] = { mode: 'auto-conflict', candidates: matches };
+      }
+      return refs;
+    };
     const fingerprint = ref => catalog.fingerprints.find(item => key(item) === key(ref))?.fingerprint;
     const button = (label, callback, disabled = false) => {
       const out = node('button', label); out.type = 'button'; out.disabled = disabled || busy;
@@ -44,7 +59,7 @@
       const opened = root.open;
       root.replaceChildren(node('summary', '插件模板'));
       root.open = opened;
-      const help = node('p', '选择版本，加入当前顺序表。');
+      const help = node('p', '目标标记默认自动关联；冲突时选择版本。');
       help.className = 'muted'; root.append(help);
       root.append(button('刷新目录', refresh));
       const message = node('p', note || (!catalog.providers.length ? '当前没有可用的插件模板。' : ''));
@@ -87,23 +102,35 @@
       if (!preset) return;
       root.append(node('h4', '此预设的关联条目'));
       const groupIds = new Set(options.getOrder().map(item => item.identifier));
-      const bound = preset.prompts.filter(prompt => linked(preset, prompt.identifier));
+      const refs = effectiveBindings(preset);
+      for (const id of preset.extensions?.[namespace]?.autoTemplateDisabled ?? []) {
+        if (!preset.prompts.some(prompt => prompt.identifier === id)) continue;
+        root.append(node('p', `${id} · 已关闭自动关联`), button('恢复自动关联', () => mutate({ operation: 'restore-auto', identifier: id }), options.isLocked(id)));
+      }
+      const bound = preset.prompts.filter(prompt => Object.hasOwn(refs, prompt.identifier));
       if (!bound.length) root.append(node('p', '尚未选用插件模板。'));
       for (const prompt of bound) {
-        const ref = bindings(preset)[prompt.identifier] ?? {};
+        const ref = refs[prompt.identifier] ?? {};
+        if (ref.mode === 'auto-conflict') {
+          root.append(node('strong', `${prompt.name ?? prompt.identifier} · 关联冲突`),
+            node('p', ref.candidates.map(row => `${row.provider.title} / ${row.template.title} @ ${row.template.version}`).join('、')),
+            node('p', '请选择上方模板并关联到此标记；当前保留原内容。'));
+          continue;
+        }
         const matching = available.find(row => key(row.ref) === key(ref));
         const valid = ready && matching && ref.mode === (matching.template.dynamic ? 'linked-dynamic' : 'linked') && fingerprint(ref) === ref.fingerprint;
         const reason = !ready ? '目录未连接，请刷新' : !matching ? '提供者或锁定版本不可用，注入时跳过'
-          : !valid ? '关联内容变化，注入时跳过；请选择版本查看并重新接受' : '固定版本可用';
+          : !valid ? '关联内容变化，注入时跳过；请选择版本查看并重新接受' : ref.automatic ? '自动关联' : '手动固定版本';
         const row = node('div'); row.className = 'plugin-template-binding';
         row.append(node('strong', prompt.name ?? prompt.identifier), node('p', `${ref.providerId ?? '?'} / ${ref.templateId ?? '?'} @ ${ref.templateVersion ?? '?'}`),
           node('p', `${groupIds.has(prompt.identifier) ? '当前顺序表内' : '不在当前顺序表内'} · ${reason}`));
         const saved = node('details'); saved.append(node('summary', '查看已保存的文本快照'));
         const text = node('pre', ref.target === 'marker' ? ref.contentSnapshot ?? '' : prompt.content ?? ''); text.className = 'plugin-template-text'; saved.append(text); row.append(saved);
         const locked = options.isLocked(prompt.identifier);
+        if (!ref.automatic && ref.target === 'marker') row.append(button('恢复自动关联', () => mutate({ operation: 'restore-auto', identifier: prompt.identifier }), locked));
         row.append(button('定位条目', () => options.onSelect(prompt.identifier)));
         row.append(button(ref.target === 'marker' ? '恢复原标记' : ref.mode === 'linked-dynamic' ? '转为本地副本（清除动态槽位）' : '转为本地副本', () => {
-          if (confirm(ref.target === 'marker' ? '解除插件关联并恢复原 marker 的内容来源，位置和开关不变。继续？' : ref.mode === 'linked-dynamic' ? '解除关联并清除动态槽位，保留其余模板文本。可从预览手动复制所需正文。继续？' : '解除插件关联，保留当前文本快照、位置和开关，之后可编辑正文。继续？')) void mutate({ operation: 'detach', identifier: prompt.identifier });
+          if (confirm(ref.target === 'marker' ? '解除插件关联并关闭此标记的自动关联，恢复原内容来源。继续？' : ref.mode === 'linked-dynamic' ? '解除关联并清除动态槽位，保留其余模板文本。可从预览手动复制所需正文。继续？' : '解除插件关联，保留当前文本快照、位置和开关，之后可编辑正文。继续？')) void mutate({ operation: 'detach', identifier: prompt.identifier });
         }, locked));
         if (ref.mode === 'linked-dynamic') {
           const config = node('textarea'); config.setAttribute('aria-label', '动态模板配置 JSON'); config.value = JSON.stringify(ref.config ?? {}, null, 2); config.disabled = locked || busy;
@@ -128,7 +155,7 @@
     }
     function refresh() {
       if (stopped) return Promise.resolve();
-      if (refreshing) return refreshing;
+      if (refreshing) { refreshAgain = true; return refreshing; }
       refreshing = (async () => {
         try {
           const response = await fetch('/preset-enhance/api/templates');
@@ -137,15 +164,15 @@
           if (value.contractVersion !== 1) throw new Error('不支持的模板目录版本');
           catalog = value; ready = true; note = '';
         } catch (error) { ready = false; note = error.message; }
-        finally { refreshing = null; if (!stopped) { render(); options.onCatalog?.(); } }
+        finally { refreshing = null; if (!stopped) { render(); options.onCatalog?.(); if (refreshAgain) { refreshAgain = false; void Promise.resolve().then(refresh); } } }
       })();
       return refreshing;
     }
     const focus = () => { void refresh(); };
     window.addEventListener('focus', focus);
-    let timer;
-    const start = () => { stopped = false; clearInterval(timer); timer = setInterval(() => { if (!document.hidden) void refresh(); }, 30000); void refresh(); };
-    window.addEventListener('pagehide', () => { stopped = true; clearInterval(timer); });
+    let timer, events;
+    const start = () => { stopped = false; events?.close(); if (typeof EventSource !== 'undefined') { events = new EventSource('/preset-enhance/api/template-events'); events.onmessage = () => { void refresh(); }; } clearInterval(timer); timer = setInterval(() => { if (!document.hidden) void refresh(); }, 30000); void refresh(); };
+    window.addEventListener('pagehide', () => { stopped = true; clearInterval(timer); events?.close(); });
     window.addEventListener('pageshow', start);
     start();
     render(); void refresh();

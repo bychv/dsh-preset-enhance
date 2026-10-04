@@ -214,3 +214,5 @@ ST 预设的 extensions["dsh-preset-enhance"].templateBindings 保存选用模�
 依赖缺失时不会用快照自动注入；用户可安装对应提供者，或在编辑器中转为本地副本。字段和接入示例见 [模板 API](docs/api/TEMPLATE_API.md#引用与单文件分享)。
 
 酒馆 marker 关联额外保存 target: "marker" 与 contentSnapshot；原 prompts 条目保留，插件只在请求副本中替换正文，沿用原角色和位置。解除关联恢复原标记内容来源；chatHistory 仅允许 dynamic.output 为 history-patches 的结构化修改，原历史不写回。单文件分享同时保留原标记与外部引用。
+
+默认关联：唯一 targetMarker 候选自动生效，不写入预设；手动关联优先。自动关联的配置保存为带 automatic: true 的 templateBindings；autoTemplateDisabled 位于同一插件扩展下，保存用户禁止自动关联的 marker ID。热重载及插件启停会更新自动关联，不覆盖手动选择和禁止状态。

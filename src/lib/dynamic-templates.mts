@@ -25,7 +25,7 @@ export async function prepareDynamicTemplates(registry: ReturnType<typeof create
   const prompts = new Map(preset.prompts.map(p => [p.identifier, p]));
   const ids = new Set(getOrder(preset, options.characterId).filter(item => item.enabled &&
     (!prompts.get(item.identifier)?.injection_trigger?.length || prompts.get(item.identifier)!.injection_trigger!.includes(options.trigger ?? 'normal'))).map(item => item.identifier));
-  const refs = templateBindings(preset);
+  const refs = templateBindings(preset, catalog);
   const work = [...ids].filter(id => refs[id]?.mode === 'linked-dynamic');
   const bodies: Record<string, DynamicBody> = Object.create(null);
   if (!work.length) return { catalog, bodies };
