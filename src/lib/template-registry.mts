@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type {
-  PresetTemplatesV1, PromptTemplateV1, TemplateProviderV1, TemplateOwnerContext,
+  PresetTemplatesV1, PromptTemplateV1, TemplateProviderV1, TemplateOwnerContext, TemplateRuntimeV1,
 } from '../template-api.mjs';
 
 const MAX_PROVIDERS = 64;
@@ -42,9 +42,20 @@ function templatesOf(value: unknown): PromptTemplateV1[] {
       content: text(raw.content, '模板 content', MAX_CONTENT, true),
     };
     if (raw.description !== undefined) item.description = text(raw.description, '模板 description', 2000, true);
+    if (raw.dynamic !== undefined) {
+      if (!isRecord(raw.dynamic) || (raw.dynamic.input !== undefined && !['latest-user', 'history'].includes(String(raw.dynamic.input)))) throw new Error('动态模板输入声明无效');
+      item.dynamic = { resolverId: identifier(raw.dynamic.resolverId, 'resolverId'), input: raw.dynamic.input === 'history' ? 'history' : 'latest-user' };
+      if (raw.dynamic.output !== undefined) {
+        if (!['text', 'history-patches'].includes(String(raw.dynamic.output))) throw new Error('动态模板输出声明无效');
+        item.dynamic.output = raw.dynamic.output as 'text' | 'history-patches';
+      }
+      if (item.dynamic.output === 'history-patches') {
+        if (raw.targetMarker !== 'chatHistory' || raw.dynamic.input !== 'history' || item.content !== '' || raw.defaults !== undefined) throw new Error('历史修改模板需指定 chatHistory、history 输入、空 content，且不设 defaults');
+      } else if (!item.content.includes('{{dynamic::body}}')) throw new Error('动态模板必须包含 {{dynamic::body}} 槽位');
+    }
     if (raw.targetMarker !== undefined) {
       item.targetMarker = identifier(raw.targetMarker, 'targetMarker');
-      if (['chatHistory', 'dsh-preset-enhance:dsh-system-prompt'].includes(item.targetMarker)) throw new Error('不能替换聊天记录或 DSH 系统提示词标记');
+      if (item.targetMarker === 'dsh-preset-enhance:dsh-system-prompt' || (item.targetMarker === 'chatHistory' && item.dynamic?.output !== 'history-patches')) throw new Error('不能替换聊天记录或 DSH 系统提示词标记');
     }
     if (raw.defaults !== undefined) {
       const defaults = raw.defaults;
@@ -72,6 +83,7 @@ function templatesOf(value: unknown): PromptTemplateV1[] {
 /** One registry per activation. Never writes presets, macro state, or request messages. */
 export function createTemplateRegistry(onListenerError: (error: unknown) => void = () => {}) {
   const providers = new Map<string, TemplateProviderV1>();
+  const runtimes = new Map<string, { resolvers: TemplateRuntimeV1['resolvers']; controller: AbortController }>();
   // Keep fingerprints across provider reloads, but never keep withdrawn template bodies.
   const versions = new Map<string, string>();
   const listeners = new Set<(revision: number) => void>();
@@ -114,7 +126,8 @@ export function createTemplateRegistry(onListenerError: (error: unknown) => void
   };
   const service: PresetTemplatesV1 = Object.freeze({
     contractVersion: 1 as const,
-    register(owner: TemplateOwnerContext, definition: TemplateProviderV1) {
+    capabilities: Object.freeze({ dynamicTemplatesV1: true as const, historyPatchesV1: true as const }),
+    register(owner: TemplateOwnerContext, definition: TemplateProviderV1, runtime?: TemplateRuntimeV1) {
       assertOpen();
       if (!owner || typeof owner.effect !== 'function') throw new Error('注册模板需要有效的插件作用域');
       if (!isRecord(definition)) throw new Error('模板提供者必须是普通对象');
@@ -124,11 +137,23 @@ export function createTemplateRegistry(onListenerError: (error: unknown) => void
       let entry: TemplateProviderV1 = {
         providerId, title: text(definition.title, '提供者 title', 200), templates: templatesOf(definition.templates),
       };
+      const resolvers = Object.assign(Object.create(null), runtime?.resolvers ?? {}) as TemplateRuntimeV1['resolvers'];
+      for (const [id, callback] of Object.entries(resolvers)) {
+        identifier(id, 'resolverId');
+        if (typeof callback !== 'function') throw new Error('动态解析器必须是函数');
+      }
+      const validateRuntime = (templates: PromptTemplateV1[]) => {
+        for (const template of templates) if (template.dynamic && !Object.hasOwn(resolvers, template.dynamic.resolverId)) throw new Error('动态模板解析器未注册');
+      };
+      validateRuntime(entry.templates);
+      const controller = new AbortController();
       const fingerprints = checkCatalog(entry);
       let active = false;
       const dispose = () => {
         if (!active) return;
         active = false;
+        controller.abort(new Error('模板提供者已卸载'));
+        runtimes.delete(providerId);
         if (!closed && providers.get(providerId) === entry) { providers.delete(providerId); changed(); }
       };
       try {
@@ -136,6 +161,7 @@ export function createTemplateRegistry(onListenerError: (error: unknown) => void
           assertOpen();
           if (providers.has(providerId)) throw new Error(`模板提供者已注册：${providerId}`);
           providers.set(providerId, entry);
+          runtimes.set(providerId, { resolvers, controller });
           remember(fingerprints);
           active = true;
           changed();
@@ -148,6 +174,7 @@ export function createTemplateRegistry(onListenerError: (error: unknown) => void
           assertOpen();
           if (!active || providers.get(providerId) !== entry) throw new Error('模板注册已释放');
           const next = { providerId, title: entry.title, templates: templatesOf(templates) };
+          validateRuntime(next.templates);
           const updates = checkCatalog(next);
           if (JSON.stringify(next) === JSON.stringify(entry)) return;
           remember(updates);
@@ -174,9 +201,17 @@ export function createTemplateRegistry(onListenerError: (error: unknown) => void
   });
   return {
     service,
+    resolver(providerId: string, resolverId: string) {
+      assertOpen();
+      const runtime = runtimes.get(providerId);
+      const run = runtime?.resolvers[resolverId];
+      return run && runtime ? { run, signal: runtime.controller.signal } : undefined;
+    },
     close() {
       if (closed) return;
       closed = true;
+      for (const runtime of runtimes.values()) runtime.controller.abort(new Error('模板注册服务已停用'));
+      runtimes.clear();
       providers.clear();
       versions.clear();
       listeners.clear();

@@ -209,6 +209,8 @@
 
 ST 预设的 extensions["dsh-preset-enhance"].templateBindings 保存选用模板的提供者、模板 ID、固定版本与内容指纹；prompts 保存文本快照，prompt_order 控制顺序与开关。普通 JSON 与本分享格式都保留这些字段。
 
+静态关联 mode 为 linked；动态关联 mode 为 linked-dynamic，另保留 config（解析器配置 JSON）与 failurePolicy（abort 默认、skip 可选）。快照是模板定义，不是某次动态结果；本轮正文、历史与解析器代码不导出。旧版只认可 linked，会跳过动态关联并提示。动态关联转为本地副本时清除动态槽位，其余定义保留。
+
 依赖缺失时不会用快照自动注入；用户可安装对应提供者，或在编辑器中转为本地副本。字段和接入示例见 [模板 API](docs/api/TEMPLATE_API.md#引用与单文件分享)。
 
-酒馆 marker 关联额外保存 target: "marker" 与 contentSnapshot；原 prompts 条目保留，插件只在请求副本中替换正文，沿用原角色和位置。解除关联恢复原标记内容来源；不允许替换 chatHistory。单文件分享同时保留原标记与外部引用。
+酒馆 marker 关联额外保存 target: "marker" 与 contentSnapshot；原 prompts 条目保留，插件只在请求副本中替换正文，沿用原角色和位置。解除关联恢复原标记内容来源；chatHistory 仅允许 dynamic.output 为 history-patches 的结构化修改，原历史不写回。单文件分享同时保留原标记与外部引用。

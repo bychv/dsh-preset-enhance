@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
-const script = readFileSync(new URL('../web/editor.js', import.meta.url), 'utf8')
+const script = readFileSync(new URL('../web/request-preview.js', import.meta.url), 'utf8') + '\n' + readFileSync(new URL('../web/editor.js', import.meta.url), 'utf8')
   .replace(/^import .*;\r?\n/, '').replace('await guard(() => reload())();', '');
 function editor(storage = new Map(), fetch = async () => { throw new Error('offline'); }) {
   const nodes = new Map();
@@ -15,7 +15,7 @@ function editor(storage = new Map(), fetch = async () => { throw new Error('offl
     localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) },
     setTimeout: () => 1, clearTimeout() {},
     window: { addEventListener() {}, matchMedia: () => ({ matches: false, addEventListener() {} }) },
-    document: { getElementById: get, addEventListener() {}, createElement: node },
+    document: { getElementById: get, querySelector: node, addEventListener() {}, createElement: node },
   };
   runInNewContext(script + `
     renderList = () => {}; renderEditor = () => {};

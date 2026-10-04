@@ -484,8 +484,7 @@ test('system prompt toggle filters durable DSH history in requests and previews 
         await apiHandler(req, { writeHead: value => { status = value; },
           end: value => { preview = JSON.parse(String(value)); } });
         assert.equal(status, 200, preview?.error);
-        assert.deepEqual(preview.messages.slice(1), kept);
-        assert.equal(preview.messages[0].content[0].text, 'PRESET');
+        assert.deepEqual(preview.messages, calls.at(-1).messages, 'preview includes the same system-message adaptation as dispatch');
         assert.deepEqual(history, original);
       }
     }

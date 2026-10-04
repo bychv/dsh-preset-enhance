@@ -6,7 +6,9 @@ export { Config } from './lib/plugin-config.mjs';
 import { createChatModelCatalog } from './lib/chat-models.mjs';
 import { PresetStore } from './lib/store.mjs';
 import { createTemplateRegistry } from './lib/template-registry.mjs';
-import { resolveTemplateBindings, selectTemplate, templateCatalogWithFingerprints } from './lib/template-bindings.mjs';
+import { resolveTemplateBindings, selectTemplate, templateCatalogWithFingerprints, templateBindings } from './lib/template-bindings.mjs';
+import { prepareDynamicTemplates } from './lib/dynamic-templates.mjs';
+import { RequestSnapshots, traceRequest, previewMessages, messageOrigins } from './lib/request-preview.mjs';
 import { PRESET_TEMPLATES_SERVICE } from './templates.mjs';
 import { compilePreset, validatePreset, getOrder, dshSystemPromptEnabled } from './lib/preset.mjs';
 import { decodePresetDocument, encodePresetPackage, attachPrefillSettings, applyPackagePrefill } from './lib/preset-package.mjs';
@@ -14,7 +16,7 @@ import {
   deleteLibraryEntry, presetLocks, restoreDefaultTemplates, saveLibraryEntry, setPresetLock,
   summarizeSPreset, syncSPresetMirror,
 } from './lib/s-preset-library.mjs';
-import { installDeepSeekBetaBridge } from './lib/deepseek-beta.mjs';
+import { installDeepSeekBetaBridge, rewriteDeepSeekPrefixFetch } from './lib/deepseek-beta.mjs';
 import { createProtocolObserver } from './lib/protocol.mjs';
 import { connectionSelection, selectConnection, sessionConnection, writeConnectionProtocol } from './lib/connection.mjs';
 import type { ConnectionProtocol, ConnectionProtocolInfo } from './lib/connection.mjs';
@@ -24,6 +26,7 @@ import { createPresetModeController, modeCapability, readModeToolCatalog } from 
 import {
   attributionHeaders, createDeepSeekChatAdapter, DEEPSEEK_CHAT_PROVIDER_ID, DeepSeekFileStore,
   deepSeekFilesIndexPath, resolveChatConnection, resolveRequestImageTarget,
+  serializeRequest,
 } from './vendor/deepseek-chat/index.mjs';
 import type { LlmErrorFactory, RequestImageAttachment } from './vendor/deepseek-chat/index.mjs';
 import { adaptPresetForMessages } from './lib/messages.mjs';
@@ -53,7 +56,13 @@ export const AGENT_PRESET_ID = 'st-preset';
 const BASE = '/preset-enhance';
 const DSH_SYSTEM_PROMPT = '@deepseek-ai/dsh-system-prompt';
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
-const PRESET_COMPILER_VERSION = 6;
+const PRESET_COMPILER_VERSION = 8;
+function compilationKey(preset: unknown, messages: HostMessage[], options: Record<string, any>, protocol: string, references: unknown, dynamicBodies: unknown) {
+  return digest({ compiler: PRESET_COMPILER_VERSION, preset, messages, characterId: String(options.characterId ?? 100001),
+    values: { user: 'User', char: 'Assistant', ...options.values }, markers: options.markers ?? {},
+    trigger: options.trigger ?? 'normal', postToolPrefix: options.postToolPrefix, protocol, references,
+    dynamicBodies: dynamicBodies && Object.keys(dynamicBodies as object).length ? dynamicBodies : undefined });
+}
 const ownGet = <T,>(object: Record<string, T>, key: string | undefined): T | undefined =>
   key !== undefined && Object.hasOwn(object, key) ? object[key] : undefined;
 const assign = <T,>(object: Record<string, T>, key: string, value: T): void => {
@@ -174,6 +183,7 @@ export async function apply(ctx: PluginContext, config: PluginConfig = {}) {
 
   const lifecycle = createPluginLifecycle();
   const routed = new WeakSet();
+  const snapshots = new RequestSnapshots();
   // DSH 0.1.6 defaults the official connection to the Messages protocol, where the
   // assistant-prefix/toolcall compatibility bridge cannot apply. Observations are
   // recorded per session so the workbench can say so instead of pretending.
@@ -224,6 +234,7 @@ const chatConnection = () => {
       await store.close();
       disposeChatAdapter?.();
       deepSeekBeta.dispose();
+      snapshots.close();
     });
   }, 'preset-enhance: ordered teardown');
 
@@ -312,7 +323,7 @@ const chatConnection = () => {
     ctx.effect(() => register(presetCommand(store)), 'preset-enhance: /preset');
   }
 
-  async function* injectStream(options: StreamOptions, next: () => AsyncIterable<unknown>) {
+  async function* injectStream(options: StreamOptions, next: () => AsyncIterable<unknown>, onDispatch: () => void) {
     // A degraded startup never injects a partial preset: requests pass through untouched.
     if (startupError) { yield* next(); return; }
     const sessionId = options.sessionId;
@@ -334,9 +345,32 @@ const chatConnection = () => {
     const catalogChanged = observed.length > 0 && !sameCatalog(initial.toolCatalogs[modeId] ?? [],
       editableToolCatalog([initial.toolCatalogs, { [modeId]: observed }])[modeId]);
     let compiled: CompiledPreset | null = null;
+    // Resolver I/O must not hold the shared store's write queue.
+    const effectiveBinding = (state: PresetState) => ownGet(state.bindings, sessionId) ??
+      (shouldAutoEnable(state, session) && defaultRecord(state) ? { enabled: true, presetId: defaultRecord(state)!.id, characterId: null, values: {}, markers: {} } : undefined);
+    const dependencyKey = (state: PresetState) => {
+      const binding = effectiveBinding(state);
+      return digest({ binding, record: state.presets.find(p => p.id === binding?.presetId), global: state.global,
+        local: ownGet(state.sessions, sessionId)?.result.local, protocol: connectionProtocolFor(state, connectionInfo),
+        beta: state.deepseekBetaPrefix, postToolPrefixMode: state.postToolPrefixMode, postToolPrefixText: state.postToolPrefixText,
+        prefixToolCalls: state.prefixToolCalls, prefixNonOfficialRemoveTools: state.prefixNonOfficialRemoveTools, prefixOutputExtraction: state.prefixOutputExtraction });
+    };
+    const initialBinding = effectiveBinding(initial);
+    const initialRecord = initial.presets.find(p => p.id === initialBinding?.presetId);
+    const dynamic = initialBinding?.enabled && initialRecord && Object.values(templateBindings(initialRecord.preset)).some(ref => ref?.mode === 'linked-dynamic');
+    const expectedDependency = dynamic ? dependencyKey(initial) : undefined;
+    const historyRevision = dynamic && session.deriveMessages ? digest(session.deriveMessages()) : undefined;
+    const dynamicBodies = dynamic ? (await lifecycle.track(prepareDynamicTemplates(templateRegistry, initialRecord!.preset,
+      !exclusive && !dshSystemPromptEnabled(initialRecord!.preset) ? presetModeHistory(history) : history, {
+        ...initialBinding, local: ownGet(initial.sessions, sessionId)?.result.local, global: initial.global,
+        sessionId, presetId: initialRecord!.id, mode: modeId, protocol: connectionProtocolFor(initial, connectionInfo),
+        purpose: 'request', signal: options.signal, templateCatalog,
+      }))).bodies : undefined;
 
     if (wantsPreset || catalogChanged) {
       compiled = await lifecycle.track(store.transaction((current: PresetState) => {
+        if (expectedDependency !== undefined && (dependencyKey(current) !== expectedDependency ||
+          (historyRevision !== undefined && digest(session.deriveMessages!()) !== historyRevision))) throw new Error('动态解析期间预设、变量或会话已变化，请重新发送');
         let changed = false;
         if (observed.length > 0 && syncToolCatalog(current, modeId, observed)) changed = true;
         let binding = ownGet(current.bindings, sessionId);
@@ -359,12 +393,11 @@ const chatConnection = () => {
           ? current.postToolPrefixText : undefined;
         const templateReferences = resolveTemplateBindings(record.preset, templateCatalog,
           new Set(getOrder(record.preset, binding.characterId).filter(item => item.enabled).map(item => item.identifier))).references;
-        const key = digest({ compiler: PRESET_COMPILER_VERSION, messages: presetHistory, preset: record, binding, postToolPrefix,
-          templateReferences, protocol: connectionProtocolFor(current, connectionInfo) });
+        const key = compilationKey(record.preset, presetHistory, { ...binding, postToolPrefix }, connectionProtocolFor(current, connectionInfo), templateReferences, dynamicBodies);
         const prior = ownGet(current.sessions, sessionId);
         if (prior?.key === key) return prior.result;
         const compiledResult = compilePreset(record.preset, presetHistory, {
-          ...binding, seed: key, local: prior?.result.local, global: current.global, postToolPrefix, templateCatalog,
+          ...binding, seed: key, local: prior?.result.local, global: current.global, postToolPrefix, templateCatalog, dynamicBodies,
         });
         options.signal?.throwIfAborted();
         // The host serializes the request with whichever protocol its connection uses, and
@@ -399,7 +432,7 @@ const chatConnection = () => {
     const toolsChanged = (options.tools?.length ?? 0) !== filteredTools.length;
     const messages = compiled?.messages ?? history;
     const messagesChanged = compiled !== null || messages !== options.messages;
-    if (!toolsChanged && !messagesChanged) { yield* next(); return; }
+    if (!toolsChanged && !messagesChanged) { onDispatch(); yield* traceRequest(snapshots, sessionId, options, next()); return; }
 
     const request = routedRequest(options, messages, filteredTools);
     // The compatibility bridge is chat-completions only: under the Messages mode it
@@ -419,14 +452,19 @@ const chatConnection = () => {
       extractOutput: initial.prefixOutputExtraction === true,
     }) : () => {};
     routed.add(request);
-    try { yield* ctx.llm.stream(request); } finally { releaseBeta(); routed.delete(request); }
+    try { onDispatch(); yield* traceRequest(snapshots, sessionId, request, ctx.llm.stream(request), compiled ? { warnings: compiled.warnings, promptRegex: compiled.promptRegex } : undefined); } finally { releaseBeta(); routed.delete(request); }
   }
 
   ctx.on('llm/stream', async function* (options: StreamOptions, next: () => AsyncIterable<unknown>) {
     if (lifecycle.closing) throw new Error('插件正在停用，请稍后重试');
     let finish!: () => void;
     lifecycle.track(new Promise<void>(resolve => { finish = resolve; }));
-    try { yield* injectStream(options, next); } finally { finish(); }
+    let dispatched = false;
+    try { yield* injectStream(options, next, () => { dispatched = true; }); }
+    catch (error) {
+      if (!dispatched && !routed.has(options) && !options.purpose && options.sessionId && !startupError) snapshots.preparationFailed(options.sessionId, error);
+      throw error;
+    } finally { finish(); }
   });
 
   const assets = new Map<string, [string, string]>([
@@ -441,6 +479,7 @@ const chatConnection = () => {
     [`${BASE}/spreset.css`, ['web/spreset.css', 'text/css']],
     [`${BASE}/plugin-templates.js`, ['web/plugin-templates.js', 'text/javascript']],
     [`${BASE}/plugin-templates.css`, ['web/plugin-templates.css', 'text/css']],
+    [`${BASE}/request-preview.js`, ['web/request-preview.js', 'text/javascript']],
   ]);
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact', path: `${BASE}/api/templates`, handler: async (req: HostRequest, res: HostResponse) => {
@@ -451,6 +490,21 @@ const chatConnection = () => {
       return respond(res, 200, templateCatalogWithFingerprints(templateRegistry.service.list()));
     },
   }), 'preset-enhance: template catalog route');
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact', path: `${BASE}/api/request-events`, handler: (req: HostRequest, res: HostResponse) => {
+      if (req.method !== 'GET') return respond(res, 405, { error: 'Method not allowed' });
+      if (lifecycle.closing || !res.write) return respond(res, 503, { error: '请求预览通知不可用' });
+      const sessionId = new URL(String(req.url ?? ''), 'http://preset.local').searchParams.get('sessionId') ?? '';
+      if (!sessionId || !ctx.sessions.get(sessionId)) return respond(res, 400, { error: '需要当前会话' });
+      res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', 'x-accel-buffering': 'no' });
+      const send = (id: string) => res.write!(`data: ${JSON.stringify({ id })}\n\n`);
+      let timer: ReturnType<typeof setInterval>;
+      const unsubscribe = snapshots.subscribe(sessionId, send, () => { clearInterval(timer); res.end(); });
+      timer = setInterval(() => res.write!(': keepalive\n\n'), 25000);
+      res.on?.('close', () => { clearInterval(timer); unsubscribe(); });
+      send(snapshots.latestId(sessionId) ?? '');
+    },
+  }), 'preset-enhance: request snapshot notifications');
   for (const [path, [file, mime]] of assets) ctx.effect(() => ctx.webServer.register({
     kind: 'exact', path,
     handler: async (req: HostRequest, res: HostResponse) => {
@@ -544,6 +598,9 @@ const chatConnection = () => {
         if (!String(req.headers['content-type'] ?? '').startsWith('application/json')) throw new Error('需要 application/json');
         if (req.headers.origin && new URL(String(req.headers.origin)).host !== req.headers.host) throw new Error('拒绝跨来源写入');
         const body = await readJson(req);
+        if (body.action === 'request-snapshot') {
+          return respond(res, 200, { snapshot: snapshots.read(String(body.sessionId ?? url.searchParams.get('sessionId') ?? ''), body.snapshotId) });
+        }
         if (body.action === 'template-select') {
           const draft = validatePreset(body.preset);
           const current = await store.read();
@@ -553,9 +610,63 @@ const chatConnection = () => {
           return respond(res, 200, result);
         }
         if (body.action === 'preview') {
-          return respond(res, 200, compilePreset(body.preset, previewHistory(ctx, body), {
-            ...body.options, seed: 'preview', templateCatalog: templateRegistry.service.list(),
-          }));
+          const sessionId = String(body.sessionId ?? '');
+          const current = await store.read();
+          const session = ctx.sessions.get(sessionId);
+          const mode = sessionModeId(session);
+          const connection = sessionConnection(ctx, sessionId);
+          const protocol = connectionProtocolFor(current, connection);
+          const history = previewHistory(ctx, body);
+          const controller = new AbortController();
+          res.on?.('close', () => controller.abort(new Error('预览已取消')));
+          const options = { ...body.options, local: ownGet(current.sessions, sessionId)?.result.local, global: current.global,
+            postToolPrefix: current.deepseekBetaPrefix && current.postToolPrefixMode === 'custom' ? current.postToolPrefixText : undefined };
+          const prepared = await prepareDynamicTemplates(templateRegistry, validatePreset(body.preset), history, {
+            ...options, sessionId, presetId: body.presetId, mode, protocol, purpose: 'preview', signal: controller.signal,
+          });
+          const references = resolveTemplateBindings(body.preset, prepared.catalog,
+            new Set(getOrder(body.preset, options.characterId).filter(i => i.enabled).map(i => i.identifier))).references;
+          const key = compilationKey(body.preset, history, options, protocol, references, prepared.bodies);
+          const compiled = compilePreset(body.preset, history, { ...options, seed: key, templateCatalog: prepared.catalog, dynamicBodies: prepared.bodies });
+          const adapted = adaptPresetForMessages(compiled.messages);
+          const result = { ...compiled, messages: adapted.messages,
+            ...(protocol === 'messages' ? { assistantPrefix: { active: false }, warnings: [...compiled.warnings, ...adapted.notes] } : {}) };
+          const selection = connectionSelection(ctx, sessionId);
+          const provider = selection.provider ?? connection?.provider ?? '';
+          const agentTools = ctx.agents?.get(sessionId)?.ctx?.tools?.schemas?.();
+          const tools = filterTools(agentTools ?? [], effectiveToolPolicy(toolPolicySnapshot(current), sessionId, mode, agentTools));
+          let callConfig: Record<string, unknown> = { provider, model: selection.model ?? '', reasoningEffort: selection.reasoningEffort ?? undefined };
+          if (ctx.llm.resolveCallConfig && provider === DEEPSEEK_CHAT_PROVIDER_ID) {
+            callConfig = await ctx.llm.resolveCallConfig(callConfig as { provider: string; model: string }, controller.signal);
+          }
+          const request = { ...callConfig,
+            sessionId, messages: result.messages, ...(tools.length ? { tools } : {}) };
+          let raw = JSON.stringify(request), source = 'adapter-input';
+          if (provider === DEEPSEEK_CHAT_PROVIDER_ID) {
+            try {
+              const config = chatConnection();
+              const wire = serializeRequest(request as never, { thinking: config.thinking, reasoningEffort: config.reasoningEffort });
+              const content = current.deepseekBetaPrefix && result.assistantPrefix.active ? messageText(result.messages.at(-1)) : '';
+              const registry = new Map([[sessionId, new Map([[content, { count: 1, mode: 'chat-completions' as const, toolCalls: current.prefixToolCalls === true,
+                removeNonOfficialTools: current.prefixNonOfficialRemoveTools !== false, extractOutput: current.prefixOutputExtraction === true }]])]]);
+              const rewritten = rewriteDeepSeekPrefixFetch(config.baseURL + '/chat/completions', {
+                method: 'POST', headers: { 'x-deepseek-harness-session-id': sessionId }, body: JSON.stringify(wire),
+              }, [registry]);
+              raw = String(rewritten.init?.body ?? JSON.stringify(wire)); source = 'draft-wire';
+            } catch { result.warnings.push('附件或适配器需要发送阶段准备；当前预览为适配器输入，实际发送后可查看最终 Raw'); }
+          } else result.warnings.push('当前适配器未提供纯序列化预览；显示适配器输入，实际发送后可查看最终 Raw');
+          if (!agentTools) result.warnings.push('当前会话工具范围尚未建立；以发送时的工具列表为准');
+          if (mode !== AGENT_PRESET_ID && dshSystemPromptEnabled(body.preset)) result.warnings.push('宿主在发送时生成的提示词以实际请求为准');
+          return respond(res, 200, { ...result, raw, source, snapshotId: randomUUID(), displayMessages: previewMessages(JSON.parse(raw), messageOrigins(result.messages)),
+            previewHistoryIds: history.map(m => m.id), at: new Date().toISOString() });
+        }
+        if (body.action === 'prefill-inspect') {
+          const preset = validatePreset(body.preset);
+          const order = getOrder(preset, body.options?.characterId).filter(i => i.enabled);
+          const ids = new Set(order.map(i => i.identifier));
+          const dynamic = Object.entries(templateBindings(preset)).some(([id, ref]) => ids.has(id) && ref?.mode === 'linked-dynamic');
+          const tail = preset.prompts.find(p => p.identifier === order.at(-1)?.identifier);
+          return respond(res, 200, { pending: dynamic, assistantPrefix: { active: !!preset.assistant_prefill?.trim() || tail?.role === 'assistant' || tail?.role === 'model' } });
         }
 
         // The workbench test box. Regular expressions, the placement/depth plan and the macro engine

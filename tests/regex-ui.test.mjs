@@ -219,7 +219,7 @@ function editor(presetValue = basePreset(), fetchImpl) {
     requests.push(JSON.parse(options.body));
     return { ok: true, json: async () => ({ revision: 1 }) };
   });
-  const script = readFileSync(new URL('../web/editor.js', import.meta.url), 'utf8')
+  const script = readFileSync(new URL('../web/request-preview.js', import.meta.url), 'utf8') + '\n' + readFileSync(new URL('../web/editor.js', import.meta.url), 'utf8')
     .replace(/^import .*;\r?\n/, '').replace('await guard(() => reload())();', '');
   const context = {
     URLSearchParams, structuredClone, console, fetch, __initialPreset: presetValue,
@@ -230,7 +230,7 @@ function editor(presetValue = basePreset(), fetchImpl) {
     Option: function (text, value) { const option = element('option'); option.textContent = text; option.value = value; return option; },
     crypto: { randomUUID: () => 'uuid' },
     window: { addEventListener() {}, matchMedia: () => ({ matches: false, addEventListener() {} }) },
-    document: { getElementById: get, addEventListener() {}, createElement: element, createTextNode: text => ({ _text: text, children: [] }) },
+    document: { getElementById: get, querySelector: () => element('section'), addEventListener() {}, createElement: element, createTextNode: text => ({ _text: text, children: [] }) },
   };
   runInNewContext(script + `
     renderList = () => {}; renderEditor = () => {};

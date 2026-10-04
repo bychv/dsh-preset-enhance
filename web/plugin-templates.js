@@ -61,13 +61,14 @@
       root.append(select);
       const selected = available.find(row => key(row.ref) === chosen);
       if (selected) {
-        root.append(node('p', `${selected.ref.providerId} · ${selected.ref.templateId} · ${selected.template.role} · ${selected.template.defaults?.placement ?? 'beforeHistory'}`));
+        root.append(node('p', `${selected.ref.providerId} · ${selected.ref.templateId} · ${selected.template.role} · ${selected.template.defaults?.placement ?? 'beforeHistory'}${selected.template.dynamic?.output === 'history-patches' ? ' · 历史深度修改' : selected.template.dynamic ? ' · 动态正文' : ''}`));
         if (selected.template.description) root.append(node('p', selected.template.description));
         const content = node('pre', selected.template.content); content.className = 'plugin-template-text'; root.append(content);
         if (!selected.template.targetMarker) root.append(button('加入当前顺序表', () => mutate({ operation: 'add', ...selected.ref,
           expectedFingerprint: fingerprint(selected.ref) }), !ready || !options.getPreset()));
         const targets = (options.getPreset()?.prompts ?? []).filter(prompt => prompt.marker === true &&
-          !['chatHistory', 'dsh-preset-enhance:dsh-system-prompt'].includes(prompt.identifier) &&
+          prompt.identifier !== 'dsh-preset-enhance:dsh-system-prompt' &&
+          (prompt.identifier !== 'chatHistory' || selected.template.dynamic?.output === 'history-patches') &&
           (!selected.template.targetMarker || selected.template.targetMarker === prompt.identifier));
         const target = node('select'); target.setAttribute('aria-label', '关联酒馆标记条目');
         target.append(node('option', '选择 marker 条目…')); target.firstChild.value = '';
@@ -91,7 +92,7 @@
       for (const prompt of bound) {
         const ref = bindings(preset)[prompt.identifier] ?? {};
         const matching = available.find(row => key(row.ref) === key(ref));
-        const valid = ready && matching && ref.mode === 'linked' && fingerprint(ref) === ref.fingerprint;
+        const valid = ready && matching && ref.mode === (matching.template.dynamic ? 'linked-dynamic' : 'linked') && fingerprint(ref) === ref.fingerprint;
         const reason = !ready ? '目录未连接，请刷新' : !matching ? '提供者或锁定版本不可用，注入时跳过'
           : !valid ? '关联内容变化，注入时跳过；请选择版本查看并重新接受' : '固定版本可用';
         const row = node('div'); row.className = 'plugin-template-binding';
@@ -101,9 +102,19 @@
         const text = node('pre', ref.target === 'marker' ? ref.contentSnapshot ?? '' : prompt.content ?? ''); text.className = 'plugin-template-text'; saved.append(text); row.append(saved);
         const locked = options.isLocked(prompt.identifier);
         row.append(button('定位条目', () => options.onSelect(prompt.identifier)));
-        row.append(button(ref.target === 'marker' ? '恢复原标记' : '转为本地副本', () => {
-          if (confirm(ref.target === 'marker' ? '解除插件关联并恢复原 marker 的内容来源，位置和开关不变。继续？' : '解除插件关联，保留当前文本快照、位置和开关，之后可编辑正文。继续？')) void mutate({ operation: 'detach', identifier: prompt.identifier });
+        row.append(button(ref.target === 'marker' ? '恢复原标记' : ref.mode === 'linked-dynamic' ? '转为本地副本（清除动态槽位）' : '转为本地副本', () => {
+          if (confirm(ref.target === 'marker' ? '解除插件关联并恢复原 marker 的内容来源，位置和开关不变。继续？' : ref.mode === 'linked-dynamic' ? '解除关联并清除动态槽位，保留其余模板文本。可从预览手动复制所需正文。继续？' : '解除插件关联，保留当前文本快照、位置和开关，之后可编辑正文。继续？')) void mutate({ operation: 'detach', identifier: prompt.identifier });
         }, locked));
+        if (ref.mode === 'linked-dynamic') {
+          const config = node('textarea'); config.setAttribute('aria-label', '动态模板配置 JSON'); config.value = JSON.stringify(ref.config ?? {}, null, 2); config.disabled = locked || busy;
+          const failure = node('select'); failure.setAttribute('aria-label', '动态解析失败策略');
+          for (const [value, label] of [['abort', '失败时停止发送'], ['skip', '失败时跳过条目']]) { const option = node('option', label); option.value = value; failure.append(option); }
+          failure.value = ref.failurePolicy ?? 'abort'; failure.disabled = locked || busy;
+          row.append(config, failure, button('应用动态配置', () => {
+            try { return mutate({ operation: 'configure', identifier: prompt.identifier, config: JSON.parse(config.value), failurePolicy: failure.value }); }
+            catch { note = '配置需要有效 JSON 对象'; render(); }
+          }, locked));
+        }
         const canUpdate = ready && selected && selected.ref.providerId === ref.providerId && selected.ref.templateId === ref.templateId;
         row.append(button('接受上方所选版本', () => {
           if (!canUpdate) return;

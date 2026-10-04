@@ -1,6 +1,7 @@
 import { emulateToolCallRequest, transformToolCallResponse } from './toolcall-prefill.mjs';
 import type { JsonObject, ResponseTransformMetadata } from './toolcall-prefill.mjs';
 import { classifyProtocolPath, detectProtocol, observeProtocolRequest, protocolCapability } from './protocol.mjs';
+import { captureOutgoingRequest } from './request-preview.mjs';
 import type { LlmProtocol, ProtocolObservation, ProtocolObserver } from './protocol.mjs';
 import { messagesRequestHeadersToChat, messagesRequestToChat, translateChatResponse } from './messages-translate.mjs';
 import type { PluginContext } from '../host-types.mjs';
@@ -410,7 +411,12 @@ function createWrapper(host: BridgeHost): FetchLike {
         }
       }
     }
-    const response = await Reflect.apply(host.original, this, [rewritten.input, rewritten.init]) as FetchResponse;
+    const captured = captureOutgoingRequest(rewritten.input, rewritten.init);
+    let response: FetchResponse;
+    try {
+      response = await Reflect.apply(host.original, this, [rewritten.input, rewritten.init]) as FetchResponse;
+      captured?.(`HTTP ${response.status}`);
+    } catch (error) { captured?.('传输失败'); throw error; }
     let out = rewritten.responseTransform ?
       await transformToolCallResponse(response, rewritten.responseTransform) : response;
     if (rewritten.translateResponseTo === 'messages') {

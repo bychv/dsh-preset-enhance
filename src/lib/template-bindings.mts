@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { PromptTemplateV1, TemplateCatalogSnapshot } from '../template-api.mjs';
+import type { HistoryPatchV1, PromptTemplateV1, TemplateCatalogSnapshot } from '../template-api.mjs';
 import type { SillyTavernPreset, PresetPrompt, PromptOrderEntry } from './types.mjs';
 
 const NS = 'dsh-preset-enhance';
@@ -23,10 +23,11 @@ function find(catalog: TemplateCatalogSnapshot | undefined, ref: Record<string, 
     .find(template => template.id === ref.templateId && template.version === ref.templateVersion);
 }
 const markerTarget = (prompt: PresetPrompt) => prompt.marker === true &&
-  !['chatHistory', 'dsh-preset-enhance:dsh-system-prompt'].includes(prompt.identifier);
+  prompt.identifier !== 'dsh-preset-enhance:dsh-system-prompt';
 
 /** Resolve only into a request copy. Unavailable linked text must never fall back to its snapshot. */
-export function resolveTemplateBindings(preset: SillyTavernPreset, catalog?: TemplateCatalogSnapshot, activeIds?: Set<string>) {
+export interface DynamicBody { text?: string; patches?: HistoryPatchV1[]; reason?: string }
+export function resolveTemplateBindings(preset: SillyTavernPreset, catalog?: TemplateCatalogSnapshot, activeIds?: Set<string>, bodies?: Record<string, DynamicBody>) {
   const bindings = templateBindings(preset);
   const warnings: string[] = [];
   const references: Array<{ identifier: string; fingerprint: string | null; reason: string }> = [];
@@ -37,30 +38,36 @@ export function resolveTemplateBindings(preset: SillyTavernPreset, catalog?: Tem
     const template = object(ref) ? find(catalog, ref) : undefined;
     const fingerprint = template ? templateFingerprint(template) : null;
     const marker = object(ref) && ref.target === 'marker';
-    const reason = !object(ref) || ref.mode !== 'linked' || prompt.identifier === 'chatHistory' || prompt.identifier === 'dsh-preset-enhance:dsh-system-prompt' ||
+    const history = prompt.identifier === 'chatHistory';
+    const reason = !object(ref) || ref.mode !== (template?.dynamic ? 'linked-dynamic' : 'linked') || (history && (!marker || template?.targetMarker !== 'chatHistory' || template?.dynamic?.output !== 'history-patches')) || prompt.identifier === 'dsh-preset-enhance:dsh-system-prompt' ||
       (marker ? !markerTarget(prompt) : !!prompt.marker) ||
       (template?.targetMarker !== undefined && (!marker || template.targetMarker !== prompt.identifier))
       ? '模板关联无效'
       : !template ? '提供者或锁定版本不可用'
       : ref.fingerprint !== fingerprint ? '同版本内容已变化，请查看并重新接受'
       : '';
+    const body = bodies && Object.hasOwn(bodies, prompt.identifier) ? bodies[prompt.identifier] : undefined;
+    const unavailable = reason || (template?.dynamic && bodies ? body?.reason || (history ? (!Array.isArray(body?.patches) ? '历史修改未解析' : '') : (typeof body?.text !== 'string' ? '动态正文未解析' : '')) : '');
     if (!activeIds || activeIds.has(prompt.identifier)) {
-      references.push({ identifier: prompt.identifier, fingerprint, reason });
-      if (reason) warnings.push(`插件模板「${prompt.name ?? prompt.identifier}」已跳过：${reason}`);
+      references.push({ identifier: prompt.identifier, fingerprint, reason: unavailable });
+      if (unavailable) warnings.push(`插件模板「${prompt.name ?? prompt.identifier}」已跳过：${unavailable}`);
     }
-    if (reason) { missing.add(prompt.identifier); return prompt; }
+    if (unavailable) { missing.add(prompt.identifier); return prompt; }
+    if (history) return prompt;
     return { ...prompt, role: marker ? prompt.role : template!.role, content: template!.content, ...(marker ? { marker: false } : {}) };
   });
   // Keep placeholders in the order table so missing templates do not produce duplicate warnings.
   return {
-    preset: { ...preset, prompts: prompts.map(prompt => missing.has(prompt.identifier)
+    preset: { ...preset, prompts: prompts.map(prompt => missing.has(prompt.identifier) && prompt.identifier !== 'chatHistory'
       ? { ...prompt, content: '', marker: false } : prompt) },
     warnings, references,
   };
 }
 
 export interface TemplateSelection {
-  operation: 'add' | 'update' | 'detach' | 'bind-marker';
+  operation: 'add' | 'update' | 'detach' | 'bind-marker' | 'configure';
+  config?: Record<string, unknown>;
+  failurePolicy?: 'abort' | 'skip';
   identifier?: string;
   providerId?: string;
   templateId?: string;
@@ -79,10 +86,17 @@ export function selectTemplate(source: SillyTavernPreset, catalog: TemplateCatal
   const settings = ext[NS] ??= {};
   const bindings = templateBindings(preset);
   settings.templateBindings = bindings;
-  if (!['add', 'update', 'detach', 'bind-marker'].includes(selection.operation)) throw new Error('模板操作无效');
+  if (!['add', 'update', 'detach', 'bind-marker', 'configure'].includes(selection.operation)) throw new Error('模板操作无效');
   if (selection.operation === 'add' && selection.identifier !== undefined) throw new Error('新增模板不能指定现有条目；关联标记请使用 bind-marker');
   let prompt = preset.prompts.find(item => item.identifier === selection.identifier);
   const previous = prompt && Object.hasOwn(bindings, prompt.identifier) ? bindings[prompt.identifier] : undefined;
+  if (selection.operation === 'configure') {
+    if (!prompt || previous?.mode !== 'linked-dynamic') throw new Error('动态关联条目不存在');
+    if (locks.includes(prompt.identifier)) throw new Error('条目已锁定，请先解锁');
+    if (!object(selection.config) || JSON.stringify(selection.config).length > 20_000 || !['abort', 'skip'].includes(selection.failurePolicy ?? '')) throw new Error('动态模板配置无效');
+    bindings[prompt.identifier] = { ...previous, config: structuredClone(selection.config), failurePolicy: selection.failurePolicy };
+    return { preset, identifier: prompt.identifier, changed: JSON.stringify(preset) !== JSON.stringify(source) };
+  }
   if (selection.operation === 'bind-marker') {
     if (!prompt || !markerTarget(prompt)) throw new Error('请选择可关联的酒馆 marker 条目');
     if (locks.includes(prompt.identifier)) throw new Error('条目已锁定，请先解锁');
@@ -92,6 +106,7 @@ export function selectTemplate(source: SillyTavernPreset, catalog: TemplateCatal
     if (!prompt || !previous) throw new Error('关联模板条目不存在');
     if (locks.includes(prompt.identifier)) throw new Error('条目已锁定，请先解锁');
     if (selection.operation === 'detach') {
+      if (previous.mode === 'linked-dynamic' && previous.target !== 'marker') prompt.content = (prompt.content ?? '').replaceAll('{{dynamic::body}}', '');
       delete bindings[prompt.identifier];
       return { preset, identifier: prompt.identifier, changed: true };
     }
@@ -106,9 +121,10 @@ export function selectTemplate(source: SillyTavernPreset, catalog: TemplateCatal
   const marker = selection.operation === 'bind-marker' || previous?.target === 'marker';
   if (marker && (!prompt || !markerTarget(prompt))) throw new Error('marker 条目已改变，请解除关联后重新选择');
   if (template.targetMarker !== undefined && (!marker || template.targetMarker !== prompt?.identifier)) throw new Error('模板仅适用于指定 marker');
+  if (marker && prompt?.identifier === 'chatHistory' && (template.targetMarker !== 'chatHistory' || template.dynamic?.output !== 'history-patches')) throw new Error('chatHistory 仅接受结构化历史修改模板');
   if (marker) {
     Object.defineProperty(bindings, prompt!.identifier, { enumerable: true, configurable: true, writable: true, value: {
-      mode: 'linked', target: 'marker', providerId: selection.providerId, templateId: selection.templateId,
+      ...(object(previous) ? previous : {}), mode: template.dynamic ? 'linked-dynamic' : 'linked', target: 'marker', providerId: selection.providerId, templateId: selection.templateId,
       templateVersion: template.version, fingerprint, contentSnapshot: template.content,
     } });
     return { preset, identifier: prompt!.identifier, changed: JSON.stringify(preset) !== JSON.stringify(source) };
@@ -132,7 +148,7 @@ export function selectTemplate(source: SillyTavernPreset, catalog: TemplateCatal
     prompt.role = template.role;
     prompt.content = template.content;
     Object.defineProperty(bindings, prompt.identifier, { enumerable: true, configurable: true, writable: true, value: {
-      ...(object(previous) ? previous : {}), mode: 'linked', providerId: selection.providerId,
+      ...(object(previous) ? previous : {}), mode: template.dynamic ? 'linked-dynamic' : 'linked', providerId: selection.providerId,
       templateId: selection.templateId, templateVersion: template.version, fingerprint,
     } });
   }

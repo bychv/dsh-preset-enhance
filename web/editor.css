@@ -86,3 +86,4 @@
 .regex-hits li.skip{color:#c9a86a}
 #prefill-settings { border: 0; padding: 0; margin: 0; min-width: 0; }
 #prefill-settings:disabled { opacity: .55; }
+.preview-raw { max-height: 65vh; overflow: auto; white-space: pre; border: 1px solid var(--border, #444); padding: 12px; } .preview-history { margin: 8px 0; } #preview-requests { max-width: 100%; }

@@ -1,3 +1,4 @@
+import { applyHistoryPatches, historyInsertionIndex, validateHistoryPatches } from './history-patches.mjs';
 import { createMacroContext, renderMacros } from './macros.mjs';
 import { resolveTemplateBindings, templateBindings } from './template-bindings.mjs';
 import { PREFILL_DEPTH, applyChatSegments, buildChatDepths, chatTargetOf, planChatMessage, readPromptRegexOptions, readRegexScripts, regexName } from './prompt-regex.mjs';
@@ -69,7 +70,7 @@ function textOf(message: HostMessage | undefined): string {
 /** Compile only preset text; history, attachments and tool blocks pass through intact. */
 export function compilePreset(preset: SillyTavernPreset, history: HostMessage[] = [], options: CompilePresetOptions = {}): CompiledPreset {
   validatePreset(preset);
-  const resolved = resolveTemplateBindings(preset, options.templateCatalog, new Set(getOrder(preset, options.characterId).filter(item => item.enabled).map(item => item.identifier)));
+  const resolved = resolveTemplateBindings(preset, options.templateCatalog, new Set(getOrder(preset, options.characterId).filter(item => item.enabled).map(item => item.identifier)), options.dynamicBodies ?? {});
   preset = resolved.preset;
   const last = (role: 'user' | 'assistant') => textOf(history.findLast(m => m.role === role && (role !== 'user' || m.source?.kind !== 'tool')));
   const ctx = createMacroContext({ local: options.local, global: options.global, seed: options.seed ?? 'preview', values: {
@@ -84,7 +85,18 @@ export function compilePreset(preset: SillyTavernPreset, history: HostMessage[] 
     if (!item.enabled) continue;
     const p = byId.get(item.identifier);
     if (!p) { ctx.warnings.push(`顺序表引用了不存在的提示词：${item.identifier}`); continue; }
-    if (p.identifier === 'chatHistory') { hasHistory = true; continue; }
+    if (p.identifier === 'chatHistory') {
+      hasHistory = true;
+      const body = options.dynamicBodies?.chatHistory;
+      if ((!p.injection_trigger?.length || p.injection_trigger.includes(options.trigger ?? 'normal')) &&
+          body?.patches && !resolved.references.find(ref => ref.identifier === 'chatHistory')?.reason &&
+          resolved.references.some(ref => ref.identifier === 'chatHistory')) {
+        const applied = applyHistoryPatches(history, validateHistoryPatches({ patches: body.patches }, history), options.seed ?? 'preview');
+        history = applied.messages;
+        depthEntries.push(...applied.insertions);
+      }
+      continue;
+    }
     const trigger = p.injection_trigger;
     if (trigger?.length && !trigger.includes(options.trigger ?? 'normal')) continue;
     let content = p.content ?? '';
@@ -92,7 +104,10 @@ export function compilePreset(preset: SillyTavernPreset, history: HostMessage[] 
       content = options.markers?.[p.identifier] ?? '';
       if (!content) { ctx.warnings.push(`未提供标记内容：${p.identifier}`); continue; }
     }
+    const body = options.dynamicBodies?.[p.identifier];
+    if (body?.text !== undefined) ctx.values['dynamic::body'] = body.text;
     const rendered = renderMacros(content, ctx);
+    delete ctx.values['dynamic::body'];
     entries.push({ identifier: p.identifier, name: p.name ?? p.identifier, role: p.role ?? 'system', text: rendered });
     if (!rendered.trim()) continue;
     const role = p.role === 'model' ? 'assistant' : p.role ?? 'system';
@@ -104,13 +119,8 @@ export function compilePreset(preset: SillyTavernPreset, history: HostMessage[] 
   // Depth is counted from original history, never from already inserted prompts.
   const buckets = new Map<number, HostMessage[]>();
   for (const entry of depthEntries.sort((a, b) => a.order - b.order)) {
-    let index = Math.max(0, history.length - entry.depth);
-    // Never split a tool-call from its results (possibly multiple tool calls).
-    if (history[index]?.source?.kind === 'tool' || history[index]?.content?.some(b => b.type === 'tool-result')) {
-      while (index > 0 && history[index - 1]?.role !== 'assistant') index--;
-      if (index > 0) index--;
-      ctx.warnings.push('深度注入已移到工具调用之前，以保留调用/结果配对');
-    }
+    const index = historyInsertionIndex(history, entry.depth);
+    if (index !== Math.max(0, history.length - entry.depth)) ctx.warnings.push('深度注入已移到工具调用之前，以保留调用/结果配对');
     const bucket = buckets.get(index) ?? []; bucket.push(entry.message); buckets.set(index, bucket);
   }
   const messages = [...before];

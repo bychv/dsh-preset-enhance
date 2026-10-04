@@ -52,6 +52,11 @@ export function renderMacros(input: string, ctx: MacroContext = createMacroConte
     const headMatch = head.match(/^([a-z]+)(?:\s+|:)([\s\S]*)$/i);
     if (headMatch) { head = headMatch[1]; parts.unshift(headMatch[2]); }
     const name = head.toLowerCase();
+    if (name === 'dynamic' && parts.length === 1 && parts[0].trim() === 'body' && Object.hasOwn(ctx.values, 'dynamic::body')) {
+      out += ctx.values['dynamic::body'];
+      if (out.length > 2_000_000) throw new Error('宏展开结果超过 2 MB');
+      continue;
+    }
     const known = /^(?:(?:set|get|add|inc|dec|flush)(?:global)?var|random|pick|roll|newline|noop|reverse)$/;
     if (!known.test(name) && !Object.hasOwn(ctx.values, name)) {
       ctx.warnings.push(`未支持的宏：${head}`); out += input.slice(start, cursor); continue;

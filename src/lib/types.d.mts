@@ -219,6 +219,7 @@ export interface CompiledPreset {
 
 export interface CompilePresetOptions {
   templateCatalog?: import('../template-api.mjs').TemplateCatalogSnapshot;
+  dynamicBodies?: Record<string, import('./template-bindings.mjs').DynamicBody>;
   seed?: string;
   local?: Record<string, string>;
   global?: Record<string, string>;

@@ -5,6 +5,7 @@ const sessionId = new URLSearchParams(location.search).get('sessionId') ?? '';
 let state = { presets: [], revision: 0 }, selectedId = '', selectedPrompt = '', dirty = false;
 let preset = blank();
 let pluginTemplatePanel = null;
+let requestPreview = null, previewController = null, previewGeneration = 0;
 const isLinkedTemplate = id => globalThis.PresetPluginTemplates?.linked(preset, id) === true;
 const DSH_SYSTEM_PROMPT_TEMPLATE_ID = 'dsh-preset-enhance:dsh-system-prompt';
 const PRESET_AUTO_SAVE_KEY = 'dsh-preset-enhance.preset-auto-save';
@@ -59,6 +60,8 @@ function updateSessionNote() {
   else $('session-note').textContent = `当前会话模式：${modeName(state.sessionMode)} · 预设注入可用 /preset 随时切换`;
 }
 function markDirty() {
+  ++previewGeneration; previewController?.abort();
+  requestPreview?.stale();
   dirty = true;
   presetDraftVersion++;
   status('草稿未保存');
@@ -71,7 +74,8 @@ async function api(body, options = {}) {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ revision: state.revision, ...body }),
     ...(options.keepalive === true ? { keepalive: true } : {}),
-  } : {});
+    ...(options.signal ? { signal: options.signal } : {}),
+  } : { ...(options.signal ? { signal: options.signal } : {}) });
   const result = await res.json();
   if (!res.ok) {
     const error = new Error(result.error ?? '请求失败');
@@ -120,6 +124,7 @@ function ensureGroups() {
   }
 }
 function loadDraft(id) {
+  previewController?.abort(); ++previewGeneration; requestPreview?.clear();
   presetDraftGeneration++;
   selectedId = id;
   const record = state.presets.find(item => item.id === id);
@@ -190,8 +195,13 @@ function syncPrefixToolControls() {
 async function refreshPrefillWarning() {
   const recordId = selectedId;
   try {
-    const result = await api({ action: 'preview', sessionId, preset, input: '预填充检测', options: options() });
+    const result = await api({ action: 'prefill-inspect', sessionId, preset, options: options() });
     if (recordId !== selectedId) return;
+    if (result.pending) {
+      $('prefill-warning').hidden = false;
+      $('prefill-warning-text').textContent = '动态模板预填充状态待解析。';
+      return;
+    }
     const active = result.assistantPrefix?.active === true;
     $('prefill-warning').hidden = !active;
     if (!active) return;
@@ -2281,40 +2291,49 @@ function downloadJson(document, filename) {
 }
 $('export').onclick = () => downloadJson(preset, `${$('name').value || 'preset'}.json`);
 
+requestPreview = globalThis.PresetRequestPreview.mount({ output: $('output'), warnings: $('warnings'),
+  raw: $('preview-raw-body'), rawButton: $('preview-raw'), copyButton: $('preview-copy'), note: $('preview-note'),
+  choices: $('preview-requests'), onStatus: status, onChoose: id => { void readRequestSnapshot(id).catch(error => status(error.message, true)); } });
 function show(result) {
-  // 请求预览与测试框展示同一份处理摘要：哪些规则在请求副本上命中了。
-  const regex = result.promptRegex;
-  const regexNote = regex
-    ? '提示词正则：' + (regex.enabled ? '已启用' : '未启用') + ' · 规则 ' + regex.rules + ' 条 · 本次命中：'
-      + (regex.applied.join('、') || '（无）')
-    : '';
-  $('warnings').textContent = [regexNote, ...result.warnings].filter(Boolean).join('\n');
-  $('output').replaceChildren();
-  for (const message of result.messages) {
-    const box = document.createElement('div');
-    box.className = 'message';
-    const label = document.createElement('b');
-    const prefix = result.assistantPrefix?.active && result.assistantPrefix.messageId === message.id ? ' · Assistant Prefix' : '';
-    label.textContent = `${message.role} · ${message.source?.plugin === 'dsh-preset-enhance' ? '预设注入' : '会话消息'}${prefix}`;
-    const pre = document.createElement('pre');
-    pre.textContent = message.content.map(block => block.type === 'text' ? block.text : `[${block.type}]`).join('\n');
-    box.append(label, pre);
-    $('output').append(box);
-  }
-  status(`已解析 ${result.messages.length} 条消息 · ${result.warnings.length} 项提示`);
+  requestPreview.show(result);
+  status(`已显示 ${(result.displayMessages ?? result.messages ?? []).length} 条请求消息`);
 }
-$('preview').onclick = guard(async () => show(await api({
-  action: 'preview',
-  sessionId,
-  preset,
-  input: $('input').value,
-  options: options(),
-})));
-$('last').onclick = guard(async () => {
-  const latest = await api();
-  if (!latest.last) throw new Error('当前会话还没有实际注入记录');
-  show(latest.last.result);
+$('preview').onclick = guard(async () => {
+  previewController?.abort(); previewController = new AbortController();
+  const generation = ++previewGeneration;
+  const controller = previewController;
+  try {
+    const result = await api({ action: 'preview', sessionId, presetId: selectedId, preset, input: $('input').value, options: options() }, { signal: controller.signal });
+    if (generation === previewGeneration) show(result);
+  } catch (error) { if (!controller.signal.aborted) throw error; }
 });
+async function readRequestSnapshot(id) {
+  const generation = ++previewGeneration;
+  previewController?.abort();
+  const result = await api({ action: 'request-snapshot', sessionId, ...(id ? { snapshotId: id } : {}) });
+  if (generation !== previewGeneration) return;
+  if (!result.snapshot) throw new Error('当前请求快照不可用，请发送后再查看');
+  show(result.snapshot);
+}
+$('last').onclick = guard(async () => {
+  await readRequestSnapshot();
+});
+let requestEvents;
+function connectRequestEvents() {
+  if (!sessionId || typeof EventSource === 'undefined' || requestEvents) return;
+  requestEvents = new EventSource(`/preset-enhance/api/request-events?sessionId=${encodeURIComponent(sessionId)}`);
+  requestEvents.onmessage = event => {
+    const { id } = JSON.parse(event.data);
+    if (id) void readRequestSnapshot(id).catch(error => status(error.message, true));
+  };
+}
+window.addEventListener('pagehide', () => { previewController?.abort(); requestEvents?.close(); requestEvents = null; });
+window.addEventListener('pageshow', connectRequestEvents);
+connectRequestEvents();
+document.querySelector('.preview').addEventListener('input', () => { ++previewGeneration; previewController?.abort(); requestPreview.stale(); });
+for (const id of ['user', 'char', 'markers', 'order', 'deepseek-beta-prefix', 'prefix-tool-calls', 'prefix-output-extraction', 'prefix-nonofficial-remove-tools', 'post-tool-prefix-mode', 'post-tool-prefix-text', 'enabled']) {
+  $(id).addEventListener('change', () => { ++previewGeneration; previewController?.abort(); requestPreview.stale(); });
+}
 
 /* ---------- 提示词正则：只改写发送给模型的请求副本 ---------- */
 

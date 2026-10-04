@@ -121,6 +121,8 @@ export interface HostRequest {
 export interface HostResponse {
   writeHead(status: number, headers?: Record<string, string>): unknown;
   end(body?: unknown): unknown;
+  write?(body: string): unknown;
+  on?(event: string, listener: () => void): unknown;
 }
 
 export interface WebRoute {
@@ -237,6 +239,7 @@ export interface PluginContext {
   on(event: string, handler: (...args: any[]) => any): void;
   llm: {
     stream(options: StreamOptions): AsyncIterable<unknown>;
+    resolveCallConfig?(config: { provider: string; model: string; reasoningEffort?: string; [key: string]: unknown }, signal?: AbortSignal): Promise<Record<string, unknown>>;
     /** 0.1.7: register an adapter for the given provider routes and get its disposer back. */
     registerAdapter?(providers: string[], adapter: unknown): (() => void) | undefined;
     /** Routes the host can activate through configuration; absent on older hosts. */
