@@ -15,3 +15,7 @@
 | 工具分组实现约定 | [工具分组](plans/TOOL_GROUPS_IMPLEMENTATION.md) |
 
 api 保存当前可调用接口；compatibility 保存有版本和范围的验证记录；plans 保存开发设计与交接资料。方案中的规划能力不代表当前分支已经实现。
+
+- [预设只读 API v1](api/PRESET_READ_API.md)：内部 agent 工具、HTTP 读取与外部授权边界。
+
+- [2026-10-04 alpha 接入验证](testing/2026-10-04-ALPHA_INTEGRATION.md)：实际宿主、HTTP 路由、工具及插件生命周期验证。

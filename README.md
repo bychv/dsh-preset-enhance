@@ -263,3 +263,7 @@ node tests/fixtures/protocol-server.mjs
 ## 许可证
 
 [MIT](LICENSE)
+
+### 内部 agent 查看预设
+
+`preset_read` 提供列表、指定预设内容和当前会话启用状态的只读查询。HTTP 接口使用会话绑定的短时凭证，暂不开放外部授权；详见 [预设只读 API](docs/api/PRESET_READ_API.md)。

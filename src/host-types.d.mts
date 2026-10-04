@@ -126,7 +126,7 @@ export interface HostResponse {
 }
 
 export interface WebRoute {
-  kind: 'exact';
+  kind: 'exact' | 'prefix';
   path: string;
   handler: (req: HostRequest, res: HostResponse) => unknown;
 }
@@ -250,6 +250,7 @@ export interface PluginContext {
   commands?: { register(command: PluginCommand): void };
   systemPrompt?: { assemble(context: any): Promise<any> };
   tools?: {
+    register?(definition: unknown): (() => void) | void;
     get?(name: string, scope?: unknown): unknown;
     guard?(handler: (exec: ToolExecution) => string | undefined): void;
     schemas?(scope?: unknown): ToolSchemaRow[];

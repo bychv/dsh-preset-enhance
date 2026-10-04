@@ -1,3 +1,4 @@
+import { createPresetReader, PRESET_READ_BASE } from './lib/preset-reader.mjs';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { homedir } from 'node:os';
@@ -481,6 +482,15 @@ const chatConnection = () => {
     [`${BASE}/plugin-templates.css`, ['web/plugin-templates.css', 'text/css']],
     [`${BASE}/request-preview.js`, ['web/request-preview.js', 'text/javascript']],
   ]);
+  const reader = createPresetReader(ctx, async () => {
+    if (startupError || lifecycle.closing) throw new Error('预设服务不可用');
+    return await store.read() as PresetState;
+  }, (state, sessionId) => ownGet(state.bindings, sessionId) ??
+    (shouldAutoEnable(state, ctx.sessions.get(sessionId)) ? defaultBinding(state) : undefined));
+  ctx.effect(() => () => reader.close(), 'preset-enhance: read API cleanup');
+  ctx.provide?.('presetReader', reader.service);
+  ctx.effect(() => ctx.webServer.register({ kind: 'prefix', path: PRESET_READ_BASE, handler: reader.handler }), 'preset-enhance: read API');
+  if (ctx.tools?.register) ctx.effect(() => ctx.tools!.register!(reader.tool), 'preset-enhance: read tool');
   const templateEventClosers = new Set<() => void>();
   ctx.effect(() => () => { for (const close of [...templateEventClosers]) close(); }, 'preset-enhance: template event cleanup');
   ctx.effect(() => ctx.webServer.register({

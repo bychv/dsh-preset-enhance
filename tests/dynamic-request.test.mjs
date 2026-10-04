@@ -53,7 +53,7 @@ async function setup(run, historyMode = false) {
       state.presets.push({ id: 'p', name: 'Test', preset });
       for (const id of ['a', 'b']) state.bindings[id] = { enabled: true, presetId: 'p', values: {}, markers: {} };
     });
-    return { store, histories, preset, post, sent, tools, ctx,
+    return { store, histories, preset, post, sent, tools, ctx, routes,
       async send(sessionId, retries = 1) { for await (const _ of ctx.llm.stream({ sessionId, provider: 'preset-deepseek-chat', model: 'deepseek-chat', reasoningEffort: 'off', messages: histories[sessionId], tools, retries })) {} },
       async close() { await Promise.all(disposers.reverse().map(dispose => dispose())); await store.close(); globalThis.fetch = originalFetch; await rm(dir, { recursive: true, force: true }); },
     };
@@ -135,5 +135,21 @@ test('history patches are reflected identically in draft and actual Raw; continu
       assert.deepEqual(f.histories.a, original);
     }
     assert.equal(calls, 4);
+  } finally { await f.close(); }
+});
+
+
+test('read API mounts on the actual DSH prefix boundary and rejects unauthenticated child paths', async () => {
+  const f = await setup(() => 'body');
+  try {
+    const pathname = '/preset-enhance/api/v1/current';
+    const route = [...f.routes.values()].find(route => route.kind === 'prefix' &&
+      (pathname === route.path || pathname.startsWith(route.path + '/')));
+    assert.ok(route, 'DSH prefix matching must reach the read API');
+    let status, result;
+    await route.handler({ method: 'GET', url: pathname, headers: {} }, {
+      writeHead: value => { status = value; }, end: value => { result = JSON.parse(value); },
+    });
+    assert.equal(status, 401); assert.equal(result.error.code, 'access_required');
   } finally { await f.close(); }
 });
