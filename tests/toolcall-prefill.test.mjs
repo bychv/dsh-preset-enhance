@@ -490,3 +490,42 @@ test('a body-written call is captured under output extraction even next to a thi
   assert.deepEqual(JSON.parse(result.calls[0].function.arguments), { pattern: '*' });
   assert.equal(result.shown.includes('DSML'), false, 'the captured call must not stay visible in a channel');
 });
+
+test('a call written into the thinking channel is captured when the stream ends without a finish reason', async () => {
+  // Reported shape: during prefix continuation the model sometimes writes the whole call
+  // into its thinking channel and never switches to the body. If the connection then ends
+  // with no finish_reason and no [DONE], the buffered call used to be flushed as text.
+  const call = dsmlWrap(dsmlInvoke('glob', [['pattern', '*']]));
+  for (const metadata of [{}, { extractOutput: true }]) {
+    const result = await streamResult([
+      sseFrame({ id: 'eof', choices: [{ index: 0, delta: { role: 'assistant', reasoning_content: '想一下。' + call }, finish_reason: null }] }),
+    ], metadata);
+    assert.equal(result.calls.length, 1, 'the complete call is delivered even without a terminator');
+    assert.equal(result.calls[0].function.name, 'glob');
+    assert.deepEqual(JSON.parse(result.calls[0].function.arguments), { pattern: '*' });
+    const choice = result.choices.find(item => Array.isArray(item.delta?.tool_calls));
+    assert.equal(choice.finish_reason, 'tool_calls');
+    assert.equal(result.shown.includes('DSML'), false, 'the call text must not leak into a channel');
+  }
+});
+
+test('a split call in the thinking channel survives a stream that just stops', async () => {
+  const call = dsmlWrap(dsmlInvoke('glob', [['pattern', '*']]));
+  const frames = [...call].map((reasoning_content, index) => sseFrame({
+    id: 'eof-split',
+    choices: [{ index: 0, delta: index === 0 ? { role: 'assistant', reasoning_content } : { reasoning_content }, finish_reason: null }],
+  }));
+  const result = await streamResult(frames, { extractOutput: true });
+  assert.equal(result.calls.length, 1);
+  assert.equal(result.calls[0].function.name, 'glob');
+  assert.equal(result.shown.includes('DSML'), false);
+});
+
+test('an unterminated stream still never fabricates a call from truncated markup', async () => {
+  const truncated = dsmlWrap(dsmlInvoke('glob', [['pattern', 'a-long-enough-pattern-value']])).slice(0, 60);
+  const result = await streamResult([
+    sseFrame({ id: 'eof-short', choices: [{ index: 0, delta: { reasoning_content: truncated }, finish_reason: null }] }),
+  ], { extractOutput: true });
+  assert.equal(result.calls.length, 0, 'incomplete markup must stay text');
+  assert.ok(result.shown.length > 0, 'and it must remain visible rather than vanish');
+});

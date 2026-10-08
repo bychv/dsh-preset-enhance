@@ -753,18 +753,34 @@ class ChoiceState {
     result.delta = delta;
     return result;
   }
-  drainRaw(): { content: string; reasoning: string } {
+  /**
+   * End a choice that never reported a finish reason, for example a stream that simply
+   * stops after its last delta. Buffered text is still parsed, so a call that arrived
+   * complete before the connection ended is delivered as a tool call instead of being
+   * flushed as visible text. Incomplete markup stays text: parseToolCallsFromText only
+   * returns calls it can prove complete.
+   */
+  finalize(): { content: string; reasoning: string; toolCalls: ParsedToolCall[] } {
     let reasoning = '';
     let visible = '';
     if (this.extractor) {
       const tail = this.extractor.finish();
-      reasoning = tail.reasoning;
-      visible = this.parser.feed(tail.content);
+      reasoning += tail.reasoning;
+      visible += this.parser.feed(tail.content);
     }
-    this.nativeReasoningBuffer = '';
-    reasoning += this.reasoningParser.drainRaw();
-    visible += this.parser.drainRaw();
-    return { content: visible, reasoning };
+    if (this.nativeReasoningBuffer) {
+      reasoning += this.reasoningParser.feed(this.nativeReasoningBuffer);
+      this.nativeReasoningBuffer = '';
+    }
+    const parsedReasoning = this.reasoningParser.finish();
+    reasoning += parsedReasoning.content;
+    const parsedBody = this.parser.finish();
+    visible += parsedBody.content;
+    return {
+      content: visible,
+      reasoning,
+      toolCalls: mergeToolCalls(parsedReasoning.toolCalls, parsedBody.toolCalls),
+    };
   }
 }
 
@@ -858,15 +874,17 @@ function createSseTransform(metadata: ResponseTransformMetadata): TransformStrea
       if (!errored) {
         for (const state of states.values()) {
           if (state.finished) continue;
-          const drained = state.drainRaw();
-          if (drained.content || drained.reasoning) {
+          const drained = state.finalize();
+          const capturedCalls = drained.toolCalls.length > 0;
+          if (drained.content || drained.reasoning || capturedCalls) {
             controller.enqueue(encodeSse(syntheticChunk(state.template, {
               index: state.index,
               delta: {
                 ...(drained.reasoning ? { reasoning_content: drained.reasoning } : {}),
                 ...(drained.content ? { content: drained.content } : {}),
+                ...(capturedCalls ? { tool_calls: drained.toolCalls.map((call, index) => ({ index, ...call })) } : {}),
               },
-              finish_reason: null,
+              finish_reason: capturedCalls ? 'tool_calls' : null,
             })));
           }
         }
