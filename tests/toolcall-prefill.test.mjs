@@ -529,3 +529,53 @@ test('an unterminated stream still never fabricates a call from truncated markup
   assert.equal(result.calls.length, 0, 'incomplete markup must stay text');
   assert.ok(result.shown.length > 0, 'and it must remain visible rather than vanish');
 });
+
+test('a call written without any newlines is captured on every path and split granularity', async () => {
+  // Models often emit the whole call as one line, with the wrapper, the invoke and every
+  // parameter immediately adjacent. Recognition must not depend on line breaks.
+  const compact = '<' + DSML_PREFIX + 'calls><' + DSML_PREFIX + 'invoke name="lookup_weather">' +
+    '<' + DSML_PREFIX + 'parameter name="city" string="true">上海</' + DSML_PREFIX + 'parameter>' +
+    '<' + DSML_PREFIX + 'parameter name="days" string="false">2</' + DSML_PREFIX + 'parameter>' +
+    '</' + DSML_PREFIX + 'invoke></' + DSML_PREFIX + 'calls>';
+  // Non-streaming: both with and without extraction.
+  for (const metadata of [{}, { extractOutput: true }]) {
+    const choice = transformToolCallJson({
+      choices: [{ message: { role: 'assistant', content: compact }, finish_reason: 'stop' }],
+    }, metadata).choices[0];
+    assert.equal(choice.finish_reason, 'tool_calls');
+    assert.equal(choice.message.tool_calls[0].function.name, 'lookup_weather');
+    assert.deepEqual(JSON.parse(choice.message.tool_calls[0].function.arguments), { city: '上海', days: 2 });
+    assert.equal(String(choice.message.content ?? '').includes('DSML'), false);
+  }
+  // Streaming: one delta, then one character at a time, in the body and in the thinking
+  // channel, each with a finish reason and again with an EOF that never reports one.
+  const split = (field) => [...compact].map((value, index) => sseFrame({
+    id: 'compact',
+    choices: [{ index: 0, delta: index === 0 ? { role: 'assistant', [field]: value } : { [field]: value }, finish_reason: null }],
+  }));
+  for (const metadata of [{}, { extractOutput: true }]) {
+    for (const field of ['content', 'reasoning_content']) {
+      const terminated = await streamResult([
+        ...split(field),
+        sseFrame({ id: 'compact', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }),
+        sseFrame('[DONE]'),
+      ], metadata);
+      const unterminated = await streamResult(split(field), metadata);
+      for (const [shape, result] of [['terminated', terminated], ['unterminated', unterminated]]) {
+        assert.equal(result.calls.length, 1, shape + '/' + field + ' delivers one call');
+        assert.equal(result.calls[0].function.name, 'lookup_weather', shape + '/' + field);
+        assert.deepEqual(JSON.parse(result.calls[0].function.arguments), { city: '上海', days: 2 }, shape + '/' + field);
+        assert.equal(result.shown.includes('DSML'), false, shape + '/' + field + ' leaks nothing');
+      }
+    }
+  }
+  // Two adjacent invokes inside one wrapper on a single line.
+  const pair = '<' + DSML_PREFIX + 'calls><' + DSML_PREFIX + 'invoke name="a">' +
+    '<' + DSML_PREFIX + 'parameter name="x" string="true">1</' + DSML_PREFIX + 'parameter></' + DSML_PREFIX + 'invoke>' +
+    '<' + DSML_PREFIX + 'invoke name="b"><' + DSML_PREFIX + 'parameter name="y" string="true">2</' + DSML_PREFIX + 'parameter>' +
+    '</' + DSML_PREFIX + 'invoke></' + DSML_PREFIX + 'calls>';
+  const double = transformToolCallJson({
+    choices: [{ message: { role: 'assistant', content: pair }, finish_reason: 'stop' }],
+  }, {}).choices[0];
+  assert.deepEqual(double.message.tool_calls.map(call => call.function.name), ['a', 'b']);
+});
