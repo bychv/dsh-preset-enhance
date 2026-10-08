@@ -2,6 +2,8 @@
 
 Status: proposed
 
+本记录的分析基线为 next-ver / `ec559bb`；当前项目目录可能位于其他分支，实施前先核对差异。指向该基线源码的链接不代表当前分支已有相同文件。
+
 ## 问题
 
 DSH 会压缩当前可见聊天历史，插件则在模型请求阶段注入提示词、处理历史和变量。两者操作的层次不同，需要确认压缩能否正确继续会话，以及哪些预设状态不应被压缩或重试改变。
@@ -25,7 +27,7 @@ DSH 会压缩当前可见聊天历史，插件则在模型请求阶段注入提�
 
 ## 已有保护
 
-1. [请求入口](../../../../src/index.mts)的 injectStream 遇到 options.purpose 直接放行。因此常规摘要请求不重新编译预设，不运行动态解析器，也不主动套用预填充或覆盖预设变量。
+1. [请求入口](https://github.com/bychv/dsh-preset-enhance/blob/ec559bb14d67c1443ce98599804171e0d27b873b/src/index.mts)的 injectStream 遇到 options.purpose 直接放行。因此常规摘要请求不重新编译预设，不运行动态解析器，也不主动套用预填充或覆盖预设变量。
 2. 编译输入采用本次 options.messages，草稿预览采用 deriveMessages。压缩完成后使用检查点及保留尾部，不主动从原始事件日志复活被替换的旧历史。
 3. 编译缓存包含输入消息；压缩改变消息时会失效。预设定义、会话绑定及变量保存在插件自己的状态中，宿主压缩不会直接删除它们。
 4. 工具结果裁剪与图片卸载由宿主维护投影；插件应继续接受投影后的消息，不恢复被裁剪的内容。原生压缩保证的工具配对边界仍应保留。
@@ -36,9 +38,9 @@ DSH 会压缩当前可见聊天历史，插件则在模型请求阶段注入提�
 
 ### 1. 检查点被当成用户输入或可编辑的普通历史
 
-**已确认行为。** [宏编译](../../../../src/lib/preset.mts)和[动态解析](../../../../src/lib/dynamic-templates.mts)寻找最后一条 user 时，没有排除 compact-checkpoint。如果摘要之后没有保留真实用户消息，lastusermessage、latestUser 和 userText 会得到摘要。普通请求中有保留用户消息时不会触发这一条件。
+**已确认行为。** [宏编译](https://github.com/bychv/dsh-preset-enhance/blob/ec559bb14d67c1443ce98599804171e0d27b873b/src/lib/preset.mts)和[动态解析](https://github.com/bychv/dsh-preset-enhance/blob/ec559bb14d67c1443ce98599804171e0d27b873b/src/lib/dynamic-templates.mts)寻找最后一条 user 时，没有排除 compact-checkpoint。如果摘要之后没有保留真实用户消息，lastusermessage、latestUser 和 userText 会得到摘要。普通请求中有保留用户消息时不会触发这一条件。
 
-[历史修改](../../../../src/lib/history-patches.mts)仅保护工具结果，允许 replace-text/append-text 指向检查点；提示词正则同样没有专门的检查点边界。宽泛规则或按固定深度写入可能改坏摘要。
+[历史修改](https://github.com/bychv/dsh-preset-enhance/blob/ec559bb14d67c1443ce98599804171e0d27b873b/src/lib/history-patches.mts)仅保护工具结果，允许 replace-text/append-text 指向检查点；提示词正则同样没有专门的检查点边界。宽泛规则或按固定深度写入可能改坏摘要。
 
 **建议：** 统一按 source.kind 识别检查点，不能通过正文里的标签字符串猜测。最新用户输入选择排除检查点，但完整 history 仍保留它供模型和历史型解析器读取。默认禁止对检查点做破坏性文本修改、跳过普通用户输入正则；深度插入仍可发生在其前后。若未来需要显式处理摘要，再增加清晰的独立能力，不静默改变其身份。
 
@@ -76,7 +78,7 @@ DSH 会压缩当前可见聊天历史，插件则在模型请求阶段注入提�
 
 ### 5. 同会话辅助请求可能误用活跃的 fetch 设置
 
-**匹配机制已复现，并发可达性待验证。** [兼容桥](../../../../src/lib/deepseek-beta.mts)按会话及前缀激活；请求参数存在同会话 fallback，fetch 本身看不到 options.purpose。只要该会话仍有活跃配置，另一条无预填充的辅助请求也可能被覆盖 stream/max_tokens。
+**匹配机制已复现，并发可达性待验证。** [兼容桥](https://github.com/bychv/dsh-preset-enhance/blob/ec559bb14d67c1443ce98599804171e0d27b873b/src/lib/deepseek-beta.mts)按会话及前缀激活；请求参数存在同会话 fallback，fetch 本身看不到 options.purpose。只要该会话仍有活跃配置，另一条无预填充的辅助请求也可能被覆盖 stream/max_tokens。
 
 纯函数复现使用真实头名 x-deepseek-harness-session-id：活跃条目设置 1234/false，辅助请求原为 8192/true，改写后成为 1234/false。普通压缩通常在主请求收尾后执行，不能据此声称每次压缩都会误改；需要验证调用顺序、并发与清理路径。
 
