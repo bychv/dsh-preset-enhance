@@ -38,3 +38,7 @@ alpha 的通用提示词序列处理链与独立显示包尚未合入本分支�
 - [模板、序列处理及脚本接口方案](plans/PLUGIN_TEMPLATE_CONTRACT_PLAN.md)：插件解耦与后续扩展。
 - [显示分包方案](plans/DISPLAY_REGEX_PACKAGE_PLAN.md)：显示侧正则、组件和独立状态。
 - [工具分组约定](plans/TOOL_GROUPS_IMPLEMENTATION.md)：工具配置分组及保存规则。
+
+## Agent 协作
+
+[工作指引](../AGENTS.md)提供代码入口与验证约定；[Agent Notes](../.agents/notes/README.md)记录跨任务需要保留的决策依据。使用手册与接口契约仍以本目录为准。

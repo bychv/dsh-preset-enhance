@@ -20,9 +20,11 @@
       "default": "./templates.mjs"
     },
     "./package.json": "./package.json",
-    "./locale/*": "./locale/*"
+    "./locale/*": "./locale/*",
+    "./icon": "./icon.svg"
   },
   "files": [
+    "icon.svg",
     "index.mjs",
     "mode.mjs",
     "client.js",
@@ -71,5 +73,6 @@
   "devDependencies": {
     "@types/node": "^26.6.2",
     "typescript": "^7.0.2"
-  }
+  },
+  "icon": "./icon.svg"
 }
