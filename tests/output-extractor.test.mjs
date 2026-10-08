@@ -360,3 +360,67 @@ test('SSE reasoning tool capture also works without output extraction', async ()
   assert.equal(toolChoice.finish_reason, 'tool_calls');
   assert.equal(toolChoice.delta.tool_calls[0].function.name, 'lookup_weather');
 });
+
+test('a body-written DSML call classified as thinking is captured, never shown as thinking', async () => {
+  // The reported shape: the call text arrives in the body channel, extraction decides the
+  // body is really thinking, and the call used to be forwarded verbatim into the thinking
+  // region without any recognition - the text was visible and no tool call was produced.
+  const call = TOOL_CALLS_OPEN + invoke + TOOL_CALLS_CLOSE;
+  const frames = [...call].map((content, index) => 'data: ' + JSON.stringify({
+    id: 'body-call', choices: [{ index: 0, delta: index === 0 ? { role: 'assistant', content } : { content }, finish_reason: null }],
+  }) + '\n\n');
+  frames.push('data: ' + JSON.stringify({ id: 'body-call', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }) + '\n\n', 'data: [DONE]\n\n');
+  const encoder = new TextEncoder();
+  const transformed = await transformToolCallResponse(new Response(new ReadableStream({
+    start(controller) { controller.enqueue(encoder.encode(frames.join(''))); controller.close(); },
+  }), { headers: { 'content-type': 'text/event-stream' } }), { extractOutput: true });
+  const payloads = (await transformed.text()).split(/\n\n/u).filter(Boolean).map(event => event.replace(/^data: /u, ''));
+  const choices = payloads.filter(payload => payload !== '[DONE]').map(JSON.parse).flatMap(chunk => chunk.choices ?? []);
+  const shown = choices.map(choice => (choice.delta?.reasoning_content ?? '') + (choice.delta?.content ?? '')).join('');
+  const toolChoice = choices.find(choice => Array.isArray(choice.delta?.tool_calls));
+  assert.doesNotMatch(shown, /DSML|invoke|parameter/u, 'the call text must not leak into the visible channels');
+  assert.equal(toolChoice.finish_reason, 'tool_calls');
+  assert.equal(toolChoice.delta.tool_calls[0].function.name, 'lookup_weather');
+  assert.deepEqual(JSON.parse(toolChoice.delta.tool_calls[0].function.arguments), { city: '上海' });
+});
+
+test('a reasoning call split across deltas is captured under output extraction', async () => {
+  const wrapped = '先核对参数。' + TOOL_CALLS_OPEN + invoke + TOOL_CALLS_CLOSE;
+  const frames = [];
+  for (let index = 0; index < wrapped.length; index += 3) {
+    frames.push('data: ' + JSON.stringify({ id: 'reasoning-extracted', choices: [{
+      index: 0, delta: { ...(index === 0 ? { role: 'assistant' } : {}), reasoning_content: wrapped.slice(index, index + 3) }, finish_reason: null,
+    }] }) + '\n\n');
+  }
+  frames.push('data: ' + JSON.stringify({ id: 'reasoning-extracted', choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] }) + '\n\n', 'data: [DONE]\n\n');
+  const encoder = new TextEncoder();
+  const transformed = await transformToolCallResponse(new Response(new ReadableStream({
+    start(controller) { controller.enqueue(encoder.encode(frames.join(''))); controller.close(); },
+  }), { headers: { 'content-type': 'text/event-stream' } }), { extractOutput: true });
+  const payloads = (await transformed.text()).split(/\n\n/u).filter(Boolean).map(event => event.replace(/^data: /u, ''));
+  const choices = payloads.filter(payload => payload !== '[DONE]').map(JSON.parse).flatMap(chunk => chunk.choices ?? []);
+  const reasoning = choices.map(choice => choice.delta?.reasoning_content ?? '').join('');
+  const toolChoice = choices.find(choice => Array.isArray(choice.delta?.tool_calls));
+  assert.match(reasoning, /先核对参数/u, 'unrelated thinking still streams');
+  assert.doesNotMatch(reasoning, /DSML|invoke/u, 'the captured call is withheld from the thinking region');
+  assert.equal(toolChoice.finish_reason, 'tool_calls');
+  assert.equal(toolChoice.delta.tool_calls[0].function.name, 'lookup_weather');
+});
+
+test('reasoning calls are delivered on a stream that ends with [DONE] and no finish reason', async () => {
+  const wrapped = TOOL_CALLS_OPEN + invoke + TOOL_CALLS_CLOSE;
+  const frames = [...wrapped].map((reasoning_content, index) => 'data: ' + JSON.stringify({
+    id: 'no-finish', choices: [{ index: 0, delta: index === 0 ? { role: 'assistant', reasoning_content } : { reasoning_content }, finish_reason: null }],
+  }) + '\n\n');
+  frames.push('data: [DONE]\n\n');
+  const encoder = new TextEncoder();
+  const transformed = await transformToolCallResponse(new Response(new ReadableStream({
+    start(controller) { controller.enqueue(encoder.encode(frames.join(''))); controller.close(); },
+  }), { headers: { 'content-type': 'text/event-stream' } }), {});
+  const payloads = (await transformed.text()).split(/\n\n/u).filter(Boolean).map(event => event.replace(/^data: /u, ''));
+  const choices = payloads.filter(payload => payload !== '[DONE]').map(JSON.parse).flatMap(chunk => chunk.choices ?? []);
+  const toolChoice = choices.find(choice => Array.isArray(choice.delta?.tool_calls));
+  assert.equal(toolChoice.finish_reason, 'tool_calls');
+  assert.equal(toolChoice.delta.tool_calls[0].function.name, 'lookup_weather');
+  assert.equal(payloads.at(-1), '[DONE]', 'the call is delivered before the stream ends');
+});

@@ -397,3 +397,96 @@ test('self-closing parameters never leak the trailing slash into a value', () =>
   const slashValue = callsOpen + invokeOpen + '<' + prefix + ' parameter name="path" string="true">/tmp/x/</' + prefix + ' parameter>' + invokeClose + callsClose;
   assert.deepEqual(argsOf(slashValue), { path: '/tmp/x/' });
 });
+
+/* ---------------------------------------------------------------- stream delivery */
+
+const BAR_CHAR = '｜';
+const DSML_PREFIX = BAR_CHAR + BAR_CHAR + 'DSML' + BAR_CHAR + BAR_CHAR;
+const sseFrame = value => 'data: ' + (typeof value === 'string' ? value : JSON.stringify(value)) + '\n\n';
+const dsmlInvoke = (name, parameters) => '<' + DSML_PREFIX + 'invoke name="' + name + '">' +
+  parameters.map(([key, value]) => '<' + DSML_PREFIX + 'parameter name="' + key + '" string="true">' + value +
+    '</' + DSML_PREFIX + 'parameter>').join('') + '</' + DSML_PREFIX + 'invoke>';
+const dsmlWrap = body => '<' + DSML_PREFIX + 'tool_calls>' + body + '</' + DSML_PREFIX + 'tool_calls>';
+
+async function streamResult(frames, metadata) {
+  const encoder = new TextEncoder();
+  const transformed = await transformToolCallResponse(new Response(new ReadableStream({
+    start(controller) { controller.enqueue(encoder.encode(frames.join(''))); controller.close(); },
+  }), { status: 200, headers: { 'content-type': 'text/event-stream' } }), metadata);
+  const payloads = (await transformed.text()).split(/\n\n/u).filter(Boolean)
+    .map(event => event.replace(/^data: /u, ''));
+  const chunks = payloads.filter(payload => payload !== '[DONE]').map(JSON.parse);
+  const choices = chunks.flatMap(chunk => chunk.choices ?? []);
+  return {
+    payloads,
+    choices,
+    calls: choices.flatMap(choice => choice.delta?.tool_calls ?? []),
+    shown: choices.map(choice => (choice.delta?.content ?? '') + (choice.delta?.reasoning_content ?? '')).join(''),
+  };
+}
+
+test('two identical calls written once each are both delivered, not deduplicated', async () => {
+  // Only a repeat a previous channel already delivered is a duplicate. The same call
+  // written twice in one channel is a deliberate sequence (note: 2026-10-07).
+  const result = await streamResult([
+    sseFrame({ id: 'dup', choices: [{ index: 0, delta: { content: dsmlWrap(dsmlInvoke('glob', [['pattern', '*']]) + dsmlInvoke('glob', [['pattern', '*']])) }, finish_reason: null }] }),
+    sseFrame({ id: 'dup', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }),
+    sseFrame('[DONE]'),
+  ], {});
+  assert.equal(result.calls.length, 2);
+  assert.deepEqual(result.calls.map(call => call.function.name), ['glob', 'glob']);
+  assert.equal(result.shown.includes('DSML'), false);
+});
+
+test('one call written into both channels is delivered exactly once', async () => {
+  const call = dsmlWrap(dsmlInvoke('glob', [['pattern', '*']]));
+  const result = await streamResult([
+    sseFrame({ id: 'both', choices: [{ index: 0, delta: { reasoning_content: call }, finish_reason: null }] }),
+    sseFrame({ id: 'both', choices: [{ index: 0, delta: { content: call }, finish_reason: null }] }),
+    sseFrame({ id: 'both', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }),
+    sseFrame('[DONE]'),
+  ], {});
+  assert.equal(result.calls.length, 1);
+  assert.equal(result.calls[0].function.name, 'glob');
+});
+
+test('a truncated call is never turned into a tool call, and unrelated text still streams', async () => {
+  const truncated = dsmlWrap(dsmlInvoke('glob', [['pattern', 'a-much-longer-pattern-value']])).slice(0, 58);
+  const result = await streamResult([
+    sseFrame({ id: 'short', choices: [{ index: 0, delta: { content: truncated }, finish_reason: null }] }),
+    sseFrame({ id: 'short', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }),
+    sseFrame('[DONE]'),
+  ], {});
+  assert.equal(result.calls.length, 0, 'incomplete markup must not be faked into a call');
+  assert.ok(result.shown.length > 0, 'the incomplete text is surfaced rather than silently swallowed');
+  const plain = await streamResult([
+    sseFrame({ id: 'plain', choices: [{ index: 0, delta: { content: '普通正文' }, finish_reason: null }] }),
+    sseFrame({ id: 'plain', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }),
+    sseFrame('[DONE]'),
+  ], {});
+  assert.equal(plain.calls.length, 0);
+  assert.equal(plain.shown, '普通正文');
+});
+
+test('an error after a complete call does not deliver a fabricated tool call', async () => {
+  const result = await streamResult([
+    sseFrame({ id: 'err', choices: [{ index: 0, delta: { reasoning_content: dsmlWrap(dsmlInvoke('glob', [['pattern', '*']])) }, finish_reason: null }] }),
+    sseFrame({ error: { message: 'upstream failed' } }),
+    sseFrame('[DONE]'),
+  ], {});
+  assert.equal(result.calls.length, 0);
+  assert.equal(result.shown.includes('DSML'), false);
+});
+
+test('a body-written call is captured under output extraction even next to a thinking close tag', async () => {
+  const call = dsmlWrap(dsmlInvoke('glob', [['pattern', '*']]));
+  const result = await streamResult([
+    sseFrame({ id: 'after-think', choices: [{ index: 0, delta: { content: '思考内容</thinking>' + call }, finish_reason: null }] }),
+    sseFrame({ id: 'after-think', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }),
+    sseFrame('[DONE]'),
+  ], { extractOutput: true });
+  assert.equal(result.calls.length, 1);
+  assert.equal(result.calls[0].function.name, 'glob');
+  assert.deepEqual(JSON.parse(result.calls[0].function.arguments), { pattern: '*' });
+  assert.equal(result.shown.includes('DSML'), false, 'the captured call must not stay visible in a channel');
+});
