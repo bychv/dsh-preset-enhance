@@ -8,7 +8,7 @@
 - **工具管理**：模式默认、会话覆盖、工具预设、用户分组与 MCP 分组。
 - **插件接入**：外部动态模板、酒馆 marker 关联、历史消息处理与预设只读查询。
 
-> 本文对应 **0.3.5-alpha.1**，通过 npm `alpha` 通道提供。当前分支已验证 DSH `0.2.1-alpha.1`，详见 [兼容记录](docs/compatibility/DSH_0.2.1_COMPATIBILITY.md)。
+> 本文对应 **0.3.5-alpha.1**，通过 npm `alpha` 通道提供。兼容声明覆盖 DSH `0.2.1` 全系列（alpha、rc、正式版）；实际宿主验证基线为 `0.2.1-alpha.1`，详见 [兼容记录](docs/compatibility/DSH_0.2.1_COMPATIBILITY.md)。
 
 ## 安装与上手
 
