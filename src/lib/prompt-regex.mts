@@ -7,6 +7,7 @@
  *    untouched and never executed, and the workbench states why;
  *  - tool names, arguments, results, images, attachments and reasoning blocks are never rewritten.
  */
+import { COMPACT_CHECKPOINT_KIND } from './compaction.mjs';
 import { renderMacros } from './macros.mjs';
 import type {
   ContentBlock, HostMessage, MacroContext, PromptRegexOptions, PromptRegexTarget, RegexScript,
@@ -309,7 +310,9 @@ export function applyPromptRegex(
 /* ------------------------------------------------------- request integration */
 
 /** Host rows that are never chat text: tool plumbing plus prompt/runtime snapshots. */
-const NON_CHAT_SOURCES = new Set(['tool', 'system-prompt', 'runtime-context']);
+// A compaction checkpoint is user-role but not user-authored: prompt regex must not rewrite
+// a summary the model wrote, so it is excluded here alongside host plumbing.
+const NON_CHAT_SOURCES = new Set(['tool', 'system-prompt', 'runtime-context', COMPACT_CHECKPOINT_KIND]);
 
 /**
  * Chat role one history row contributes, or undefined when it is not chat text.

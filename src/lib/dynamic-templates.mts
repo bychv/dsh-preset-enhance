@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { isUserAuthored } from './compaction.mjs';
 import { validateHistoryPatches } from './history-patches.mjs';
 import type { DynamicTemplateResultV1 } from '../template-api.mjs';
 import { getOrder } from './preset.mjs';
@@ -38,7 +39,9 @@ export async function prepareDynamicTemplates(registry: ReturnType<typeof create
   }));
   const needsHistory = work.some(id => catalog.providers.find(p => p.providerId === refs[id].providerId)?.templates.find(t => t.id === refs[id].templateId && t.version === refs[id].templateVersion)?.dynamic?.input === 'history');
   const copied = needsHistory ? freeze(structuredClone(history)) : undefined;
-  const latest = (copied ?? history).findLast(m => m.role === 'user' && m.source?.kind !== 'tool' && !m.content?.some(b => b.type === 'tool-result'));
+  // A compaction checkpoint is not user input: latestUser/userText must not become a
+  // summary. The checkpoint stays in the history a 'history' resolver receives.
+  const latest = (copied ?? history).findLast(m => isUserAuthored(m) && !m.content?.some(b => b.type === 'tool-result'));
   const latestUser = latest ? copied ? latest : freeze(structuredClone(latest)) : undefined;
   const userText = latestUser?.content?.filter(b => b.type === 'text').map(b => b.text ?? '').join('\n') ?? '';
   const variables = freeze(structuredClone({ local: options.local ?? {}, global: options.global ?? {}, values: options.values ?? {} }));

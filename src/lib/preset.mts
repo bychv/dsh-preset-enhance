@@ -1,3 +1,4 @@
+import { isCompactionCheckpoint, isUserAuthored } from './compaction.mjs';
 import { DSH_TEMPLATE_ID, validateDshTemplates } from './dsh-system-template.mjs';
 import { validateRequestSettings } from './request-settings.mjs';
 import { applyHistoryPatches, historyInsertionIndex, validateHistoryPatches } from './history-patches.mjs';
@@ -71,12 +72,18 @@ function textOf(message: HostMessage | undefined): string {
   return message?.content?.filter(b => b.type === 'text').map(b => b.text).join('\n') ?? '';
 }
 
+
+
 /** Compile only preset text; history, attachments and tool blocks pass through intact. */
 export function compilePreset(preset: SillyTavernPreset, history: HostMessage[] = [], options: CompilePresetOptions = {}): CompiledPreset {
   validatePreset(preset);
   const resolved = resolveTemplateBindings(preset, options.templateCatalog, new Set(getOrder(preset, options.characterId).filter(item => item.enabled).map(item => item.identifier)), options.dynamicBodies ?? {});
   preset = resolved.preset;
-  const last = (role: 'user' | 'assistant') => textOf(history.findLast(m => m.role === role && (role !== 'user' || m.source?.kind !== 'tool')));
+  // A compaction checkpoint is not a user turn: excluding it keeps lastusermessage, and the
+  // dynamic values derived from it, pointing at what the user actually wrote. The checkpoint
+  // still stays in history for the model and for history-reading resolvers.
+  const last = (role: 'user' | 'assistant') => textOf(history.findLast(m =>
+    m.role === role && (role !== 'user' || isUserAuthored(m))));
   const ctx = createMacroContext({ local: options.local, global: options.global, seed: options.seed ?? 'preview', values: {
       user: 'User', char: 'Assistant', lastusermessage: last('user'), lastcharmessage: last('assistant'),
       lastmessage: textOf(history.at(-1)), ...options.values, ...options.dshSystemTemplate?.values,

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { createMacroContext, renderMacros } from '../lib/macros.mjs';
+import { validateHistoryPatches } from '../lib/history-patches.mjs';
 import { compilePreset, dshSystemPromptEnabled, validatePreset } from '../lib/preset.mjs';
 import { PresetStore } from '../lib/store.mjs';
 import { installDeepSeekBetaBridge, rewriteDeepSeekPrefixFetch } from '../lib/deepseek-beta.mjs';
@@ -1164,4 +1165,48 @@ test('adapter tool settings drive prefix rewriting end to end', async () => {
     globalThis.fetch = previous;
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+/* ------------------------------------------------- compaction checkpoints (proposal A) */
+
+const checkpoint = (id, text) => ({ id, role: 'user', content: [{ type: 'text', text }], source: { kind: 'compact-checkpoint', compactionId: id } });
+
+test('a compaction checkpoint is not treated as the latest user message', () => {
+  const preset = { prompts: [
+    { identifier: 'p', role: 'system', content: 'last={{lastusermessage}}' },
+  ] };
+  // Real user turn first, checkpoint last: the macro must read what the user wrote.
+  const withUser = compilePreset(preset, [msg('u', 'user', '真实提问'), checkpoint('c1', '这是模型写的摘要')]);
+  assert.equal(withUser.messages[0].content[0].text, 'last=真实提问');
+  // Only a checkpoint: there is no user-authored turn, so the macro must not surface the summary.
+  const onlyCheckpoint = compilePreset(preset, [checkpoint('c1', '这是模型写的摘要')]);
+  assert.equal(onlyCheckpoint.messages[0].content[0].text, 'last=');
+  // The checkpoint itself still reaches the model through history.
+  assert.equal(onlyCheckpoint.messages.some(m => JSON.stringify(m).includes('这是模型写的摘要')), true);
+});
+
+test('a message whose text merely contains the marker word is still a real user turn', () => {
+  const preset = { prompts: [{ identifier: 'p', role: 'system', content: 'last={{lastusermessage}}' }] };
+  const spoken = msg('u', 'user', '我说了 compact-checkpoint 这个词');
+  assert.equal(compilePreset(preset, [spoken]).messages[0].content[0].text, 'last=我说了 compact-checkpoint 这个词');
+});
+
+test('history edits refuse to rewrite a compaction checkpoint', () => {
+  const target = checkpoint('c1', '摘要正文');
+  // Validation rejects the patch with a clear reason rather than silently rewriting it.
+  assert.throws(() => validateHistoryPatches({ patches: [{ operation: 'replace-text', depth: 0, text: '篡改', textIndex: 0 }] }, [target]),
+    /压缩检查点/);
+  // Insertions next to a checkpoint are unaffected.
+  const insertion = validateHistoryPatches({ patches: [{ operation: 'insert', depth: 1, role: 'user', text: '插入' }] }, [target]);
+  assert.equal(insertion.length, 1);
+});
+
+test('prompt regex never rewrites a compaction checkpoint', () => {
+  const preset = { prompts: [], extensions: { 'dsh-preset-enhance': { promptRegex: { enabled: true, scripts: [
+    { scriptName: 'rewrite', findRegex: '/摘要/u', replaceString: '改掉', placement: [1], disabled: false, markdownOnly: false, promptOnly: true, runOnEdit: false, substituteRegex: 0 },
+  ] } } } };
+  const compiled = compilePreset(preset, [checkpoint('c1', '摘要正文'), msg('u', 'user', '摘要正文')], { seed: 's' });
+  const serialized = JSON.stringify(compiled.messages);
+  // The user's own message may be rewritten; the checkpoint's copy must remain intact.
+  assert.equal(serialized.includes('摘要正文'), true, 'the checkpoint text survives');
 });

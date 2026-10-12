@@ -1,4 +1,5 @@
 import type { HistoryPatchV1 } from '../template-api.mjs';
+import { isCompactionCheckpoint } from './compaction.mjs';
 import type { HostMessage } from './types.mjs';
 
 export const isToolResult = (message: HostMessage | undefined) => message?.role === 'tool' ||
@@ -33,6 +34,7 @@ export function validateHistoryPatches(value: unknown, history: HostMessage[]): 
     }
     const target = history[history.length - 1 - depth];
     if (!target || isToolResult(target)) throw new Error('历史修改目标不存在或为工具结果');
+    if (isCompactionCheckpoint(target)) throw new Error('历史修改目标为压缩检查点，摘要内容不可改写');
     const textIndex = raw.textIndex ?? 0;
     const count = target.content?.filter(block => block.type === 'text').length ?? 0;
     if (!Number.isSafeInteger(textIndex) || (textIndex as number) < 0 ||
@@ -54,6 +56,11 @@ export function applyHistoryPatches(history: HostMessage[], patches: HistoryPatc
     }
     const index = history.length - 1 - patch.depth;
     const message = messages[index];
+    // replace-text/append-text must not rewrite a compaction checkpoint: its body is a
+    // model-written summary of the range it replaced, so editing it corrupts the summary
+    // the host will keep feeding the model. The patch is skipped rather than silently
+    // rewriting the checkpoint; insertions around it are unaffected.
+    if (isCompactionCheckpoint(message)) continue;
     const content = [...(message.content ?? [])];
     const positions = content.flatMap((block, i) => block.type === 'text' ? [i] : []);
     const position = positions[patch.textIndex ?? 0];
