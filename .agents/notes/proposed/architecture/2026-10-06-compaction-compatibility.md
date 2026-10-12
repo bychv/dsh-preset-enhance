@@ -10,7 +10,7 @@ DSH 会压缩当前可见聊天历史，插件则在模型请求阶段注入提�
 
 结论：**基础链路可以衔接，但不能认为完全无影响。** 摘要请求已有用途旁路；预设本身不会被删除，后续请求会读取压缩后的历史。但检查点身份、重试变量副作用、输出预算以及仅存在于请求中的上下文有明确边界需要处理。
 
-本笔记是分析与修复提案，未实施下面的修复。
+本笔记是分析与修复提案。第 1 项已实施并验证（见下），其余各项仍未实施：本记录在全部修复落地前保持 proposed。
 
 ## 检查基线与证据
 
@@ -36,13 +36,17 @@ DSH 会压缩当前可见聊天历史，插件则在模型请求阶段注入提�
 
 ## 影响与修复建议
 
-### 1. 检查点被当成用户输入或可编辑的普通历史
+### 1. 检查点被当成用户输入或可编辑的普通历史 —— 已实施
 
 **已确认行为。** [宏编译](https://github.com/bychv/dsh-preset-enhance/blob/ec559bb14d67c1443ce98599804171e0d27b873b/src/lib/preset.mts)和[动态解析](https://github.com/bychv/dsh-preset-enhance/blob/ec559bb14d67c1443ce98599804171e0d27b873b/src/lib/dynamic-templates.mts)寻找最后一条 user 时，没有排除 compact-checkpoint。如果摘要之后没有保留真实用户消息，lastusermessage、latestUser 和 userText 会得到摘要。普通请求中有保留用户消息时不会触发这一条件。
 
 [历史修改](https://github.com/bychv/dsh-preset-enhance/blob/ec559bb14d67c1443ce98599804171e0d27b873b/src/lib/history-patches.mts)仅保护工具结果，允许 replace-text/append-text 指向检查点；提示词正则同样没有专门的检查点边界。宽泛规则或按固定深度写入可能改坏摘要。
 
 **建议：** 统一按 source.kind 识别检查点，不能通过正文里的标签字符串猜测。最新用户输入选择排除检查点，但完整 history 仍保留它供模型和历史型解析器读取。默认禁止对检查点做破坏性文本修改、跳过普通用户输入正则；深度插入仍可发生在其前后。若未来需要显式处理摘要，再增加清晰的独立能力，不静默改变其身份。
+
+**实施结果。** 新增 [检查点识别](../../../../src/lib/compaction.mts)，按 source.kind 判定。宿主在 `@deepseek-ai/dsh-compaction` 中导出 `isCompactCheckpointSource`，但本插件不导入任何宿主包（需兼容多个 DSH 版本），因此按字段比较标记而非从正文猜测；仅正文包含该词的用户消息不受影响。[宏编译](../../../../src/lib/preset.mts)与[动态解析](../../../../src/lib/dynamic-templates.mts)的最新用户选择改经 `isUserAuthored`，检查点不再被当作用户输入，但仍保留在 history 中供模型与历史型解析器读取。[历史修改](../../../../src/lib/history-patches.mts)在验证阶段拒绝指向检查点的改写并明确报错，应用阶段另有防御性跳过；检查点前后的插入不受影响。[提示词正则](../../../../src/lib/prompt-regex.mts)把该标记加入非聊天来源，正则不会改写摘要。
+
+**验证。** 在 alpha 槽位（0.2.1-alpha.2）用宿主自身的 `compactCheckpointSource()` 构造检查点，插件的判定与 `isCompactCheckpointSource` 在所试 8 个用例上全部一致，包括仅正文包含该词、无 source、未知 source.kind、伪造的 kind 名与 assistant 角色消息；行为上：用户消息加检查点时宏读到用户原文，仅检查点时宏为空而摘要仍送给模型，改写检查点被拒绝而改写普通消息仍生效。同一组检查在槽位内已安装的插件快照上通过，插件也能在 headless 剖面下启动并完成真实对话。新增 4 个回归用例，全量 540/540 通过。
 
 深度坐标仍以本次可见历史计数；压缩前后的 depth 不保证指向同一条原消息。超界替换继续报错，不回读旧日志补齐。接口文档需说明这一点。
 
