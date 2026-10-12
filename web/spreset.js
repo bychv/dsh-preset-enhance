@@ -28,8 +28,6 @@ const ST_ONLY_SHORT = '本插件不读取该字段';
 const ST_ONLY_PROMPT_FIELDS = ['hide_from_list', 'system_prompt', 'spreset_condition_script'];
 // 根据条件自动启用 写入的初始表达式（酒馆/SPreset 侧求值；本插件不执行）。
 const DEFAULT_CONDITION_SCRIPT = '({ model, provider, entry, chat }) => true';
-// extensions.SPreset 里本插件不执行的子对象（RegexBinding 另有只读展示）。
-const ST_ONLY_EXTENSION_KEYS = ['ChatSquash', 'MacroNest', 'ToolBindings', 'MessageInjections', 'OutputPreprocessing', 'FixedPresetName'];
 const TRIGGERS = ['normal', 'continue', 'impersonate', 'swipe', 'regenerate', 'quiet'];
 // Tavern's built-in markers, shown as 内置 badges on chain rows.
 const BUILTIN_IDS = new Set(['main', 'jailbreak', 'nsfw', 'enhanceDefinitions', 'personaDescription',
@@ -51,7 +49,6 @@ let roleFilter = '';
 let groupId = '';
 let selection = null;
 let inspectorTab = '内容';
-let plans = null;
 let cancelChainDrag = null;
 let menuAnchor = null;
 // Editor-side entry locks, keyed by preset id (state.sPresetEditor). Never written into a preset:
@@ -168,7 +165,12 @@ async function setLock(source, isTemplate, locked) {
   renderAll();
 }
 function chainIdentifiers() { return new Set(chainOrder().map(item => item.identifier)); }
-function markPreset() { presetDirty = true; status('未保存修改', 'dirty'); }
+let draftVersion = 0, autoSaveTimer, saveChain = Promise.resolve();
+function scheduleEditorSave() {
+  clearTimeout(autoSaveTimer);
+  if ($('regex-auto-save').checked && presetDirty) autoSaveTimer = setTimeout(() => { void savePreset().catch(error => status(error.message, 'error')); }, 700);
+}
+function markPreset() { draftVersion++; presetDirty = true; status('未保存修改', 'dirty'); scheduleEditorSave(); }
 function markSaved(text) { presetDirty = false; templateDirty = false; status(text || '已保存'); }
 
 function renderPresetSelect() {
@@ -182,6 +184,7 @@ function renderPresetSelect() {
   select.value = presetId;
 }
 function loadPreset(id) {
+  clearTimeout(autoSaveTimer); draftVersion++;
   const record = (state.presets ?? []).find(item => item.id === id) ?? (state.presets ?? [])[0];
   if (!record) { status('没有可用预设', 'error'); return false; }
   presetId = record.id;
@@ -781,7 +784,7 @@ function renderInspector() {
   if (inspectorTab === '内容') body.append(contentField, counter);
   else if (inspectorTab === '注入') body.append(isTemplate ? templateInjectionTab(target.entry) : injectionTab(source));
   else if (inspectorTab === '工具') body.append(readOnlyBlock('工具与消息注入（extensions.SPreset.ToolBindings / MessageInjections）',
-    { ToolBindings: plans?.toolBindings ?? null, MessageInjections: plans?.messageInjections ?? null }));
+    { ToolBindings: preset?.extensions?.SPreset?.ToolBindings ?? null, MessageInjections: preset?.extensions?.SPreset?.MessageInjections ?? null }));
   else body.append(structuredTab(target, isTemplate, source));
 
   if (isTemplate) {
@@ -860,195 +863,10 @@ function structuredTab(target, isTemplate, source) {
 
 /* ----------------------------------------------------------------- extras */
 
-async function refreshPlans() {
-  if (!preset) return;
-  const depth = Number($('extras-depth').value);
-  plans = await api({ action: 's-preset-plan', preset, depth: Number.isFinite(depth) ? depth : 0 });
-  renderExtras();
-}
-function markPresetDirty() { markPreset(); }
-
-/** typed input for whatever the file actually holds; never changes a value's type by itself. */
-function typedControl(value, onChange) {
-  if (typeof value === 'boolean') {
-    const box = el('input');
-    box.type = 'checkbox';
-    box.checked = value;
-    box.onchange = () => onChange(box.checked);
-    return box;
-  }
-  if (typeof value === 'number') {
-    const input = el('input');
-    input.type = 'number';
-    input.value = String(value);
-    input.onchange = () => { const next = Number(input.value); if (Number.isFinite(next)) onChange(next); };
-    return input;
-  }
-  const multiline = typeof value === 'string' && (value.length > 80 || value.includes('\n'));
-  const input = el(multiline ? 'textarea' : 'input');
-  if (multiline) input.rows = 4;
-  input.value = value === undefined || value === null ? '' : String(value);
-  input.spellcheck = false;
-  input.oninput = () => onChange(input.value);
-  return input;
-}
-/** JSON editor for the structural SPreset fields: parse on change, keep the text and complain if invalid. */
-function jsonArea(label, value, onChange) {
-  const wrap = el('div', 'field');
-  wrap.append(el('span', '', label));
-  const area = el('textarea');
-  area.rows = 4;
-  area.spellcheck = false;
-  area.value = JSON.stringify(value ?? null, null, 2);
-  const error = el('p', 'hint error', '');
-  area.onchange = () => {
-    try {
-      const parsed = JSON.parse(area.value);
-      onChange(parsed);
-      error.textContent = '';
-      area.value = JSON.stringify(parsed, null, 2);
-    } catch (failure) {
-      error.textContent = 'JSON 无法解析，已保留原值：' + failure.message;
-    }
-  };
-  wrap.append(area, error);
-  return wrap;
-}
-function spresetBlock() {
-  if (!preset.extensions || typeof preset.extensions !== 'object') preset.extensions = {};
-  if (!preset.extensions.SPreset || typeof preset.extensions.SPreset !== 'object') preset.extensions.SPreset = {};
-  return preset.extensions.SPreset;
-}
-function renderRegexBinding(binding) {
-  const wrap = el('div', 'field');
-  wrap.append(el('span', '', 'RegexBinding.regexes（' + ((binding.regexes ?? []).length) + ' 条）'));
-  wrap.append(el('p', 'hint', '只读展示判定结果；判定来自插件正则引擎，本插件不执行这些正则。'));
-  const list = el('div', 'list');
-  (binding.regexes ?? []).forEach((script, index) => {
-    const verdict = (plans?.regexes ?? [])[index];
-    const card = el('div', 'card');
-    const top = el('div', 'card-top');
-    top.append(el('span', 'name', script.scriptName || script.id || ('regex-' + (index + 1))));
-    top.append(el('span', verdict && verdict.runs ? 'badge' : 'badge builtin', verdict ? (verdict.runs ? '会执行' : (verdict.reason || '本版不执行')) : '未判定'));
-    card.append(top);
-    const name = el('input');
-    name.value = script.scriptName ?? '';
-    name.placeholder = 'scriptName';
-    name.oninput = () => { script.scriptName = name.value; markPresetDirty(); };
-    card.append(field('scriptName', name));
-    for (const key of ['findRegex', 'replaceString']) {
-      const input = el('textarea');
-      input.rows = 2;
-      input.spellcheck = false;
-      input.value = script[key] ?? '';
-      input.oninput = () => { script[key] = input.value; markPresetDirty(); };
-      card.append(field(key, input));
-    }
-    const disabled = el('input');
-    disabled.type = 'checkbox';
-    disabled.checked = script.disabled === true;
-    disabled.onchange = () => { script.disabled = disabled.checked; markPresetDirty(); };
-    const row = el('label', 'toggle-row');
-    row.append(el('span', '', 'disabled'), disabled);
-    card.append(row);
-    list.append(card);
-  });
-  wrap.append(list);
-  return wrap;
-}
+let regexEditor = null;
 function renderExtras() {
-  const body = $('extras-body');
-  body.replaceChildren();
-  if (!plans) { body.append(el('p', 'empty', '正在读取…')); return; }
-  const extensions = preset.extensions && typeof preset.extensions === 'object' ? preset.extensions : {};
-  const blockKeys = Object.keys(extensions.SPreset ?? {}).filter(key => key !== 'RegexBinding');
-  const flagged = blockKeys.length + (extensions.SPreset?.RegexBinding ? 1 : 0) + (extensions.tavern_helper ? 1 : 0);
-  if (flagged) {
-    body.append(el('p', 'honesty', '本预设含 ' + flagged + ' 项酒馆/SPreset 侧设置，本插件不会执行，仅原样保存。'));
-  }
-
-  body.append(el('div', 'section-title', '本插件真正读取的预设字段'));
-  const prefill = el('textarea');
-  prefill.rows = 3;
-  prefill.spellcheck = false;
-  prefill.value = preset.assistant_prefill ?? '';
-  prefill.oninput = () => { preset.assistant_prefill = prefill.value; markPresetDirty(); };
-  const systemPrompt = el('input');
-  systemPrompt.type = 'checkbox';
-  systemPrompt.checked = preset.dsh_system_prompt_enabled !== false;
-  systemPrompt.onchange = () => { preset.dsh_system_prompt_enabled = systemPrompt.checked; markPresetDirty(); };
-  body.append(field('assistant_prefill（作为尾部 assistant 预填充发送）', prefill));
-  const sysRow = el('label', 'toggle-row');
-  sysRow.append(el('span', '', 'dsh_system_prompt_enabled'), systemPrompt);
-  body.append(sysRow);
-
-  body.append(el('div', 'section-title', 'RegexBinding.regexes（只读判定）'));
-  body.append(el('p', 'muted', '判定深度 ' + plans.regexDepth + '，点右上角刷新重新判定。'));
-  if ((extensions.SPreset?.RegexBinding?.regexes ?? []).length) body.append(renderRegexBinding(extensions.SPreset.RegexBinding));
-  else body.append(el('p', 'empty', '该预设没有 RegexBinding.regexes。'));
-
-  body.append(el('div', 'section-title', 'extensions.SPreset（可编辑，原样保存）'));
-  body.append(el('p', 'hint', ST_ONLY));
-  body.append(el('p', 'hint', '保存预设时会同步一条 ' + 'SPresetSettings' + ' 提示词（内容为这里的 JSON），保持与酒馆侧的镜像一致；extensions.SPreset 始终是唯一数据源。'));
-  const fixed = el('input');
-  fixed.value = extensions.SPreset?.FixedPresetName ?? '';
-  fixed.oninput = () => { spresetBlock().FixedPresetName = fixed.value; markPresetDirty(); };
-  body.append(field('FixedPresetName', fixed));
-  const macro = el('input');
-  macro.type = 'checkbox';
-  macro.checked = extensions.SPreset?.MacroNest === true;
-  macro.onchange = () => { spresetBlock().MacroNest = macro.checked; markPresetDirty(); };
-  const macroRow = el('label', 'toggle-row');
-  macroRow.append(el('span', '', 'MacroNest'), macro);
-  body.append(macroRow);
-
-  const shell = plans.settings ?? {};
-  const defaults = plans.defaults ?? {};
-  for (const key of ['OutputPreprocessing', 'ChatSquash']) {
-    const stored = extensions.SPreset?.[key];
-    const fallback = defaults[key] ?? {};
-    if (!stored && !Object.keys(fallback).length) continue;
-    body.append(el('div', 'section-title', key));
-    body.append(el('p', 'hint', ST_ONLY));
-    for (const fieldKey of Object.keys(fallback)) {
-      const value = (stored && stored[fieldKey] !== undefined) ? stored[fieldKey]
-        : (shell[key]?.[fieldKey] !== undefined ? shell[key][fieldKey] : fallback[fieldKey]);
-      const control = typedControl(value, next => { spresetBlock()[key][fieldKey] = next; markPresetDirty(); });
-      body.append(field(fieldKey, control));
-    }
-  }
-  {
-    const stored = extensions.SPreset?.ForcedPostProcessing;
-    const value = stored !== undefined ? stored : (shell.ForcedPostProcessing ?? {});
-    body.append(el('div', 'section-title', 'ForcedPostProcessing'));
-    body.append(el('p', 'hint', ST_ONLY));
-    body.append(jsonArea('ForcedPostProcessing（JSON）', value,
-      next => { spresetBlock().ForcedPostProcessing = next; markPresetDirty(); }));
-  }
-  if (extensions.SPreset?.ToolBindings !== undefined) {
-    body.append(el('div', 'section-title', 'ToolBindings'));
-    body.append(el('p', 'hint', ST_ONLY));
-    body.append(jsonArea('ToolBindings（JSON）', extensions.SPreset.ToolBindings,
-      next => { spresetBlock().ToolBindings = next; markPresetDirty(); }));
-  }
-  if (extensions.SPreset?.MessageInjections !== undefined) {
-    body.append(el('div', 'section-title', 'MessageInjections'));
-    body.append(el('p', 'hint', ST_ONLY));
-    body.append(jsonArea('MessageInjections（JSON）', extensions.SPreset.MessageInjections,
-      next => { spresetBlock().MessageInjections = next; markPresetDirty(); }));
-  }
-  if (extensions.tavern_helper !== undefined) {
-    body.append(el('div', 'section-title', 'extensions.tavern_helper'));
-    body.append(el('p', 'hint', ST_ONLY));
-    body.append(jsonArea('tavern_helper（JSON）', extensions.tavern_helper,
-      next => { preset.extensions.tavern_helper = next; markPresetDirty(); }));
-  }
-  const known = new Set(['SPreset', 'tavern_helper']);
-  const otherKeys = Object.keys(extensions).filter(key => !known.has(key));
-  if (otherKeys.length) {
-    body.append(el('div', 'section-title', '其他扩展（本插件不读取，原样保留）'));
-    body.append(el('pre', 'json', JSON.stringify(Object.fromEntries(otherKeys.map(key => [key, extensions[key]])), null, 2)));
-  }
+  regexEditor ??= globalThis.PresetRegexEditor?.mount($('extras-body'), { getPreset: () => preset, onChange: markPreset });
+  regexEditor?.render();
 }
 /* ---------------------------------------------------------------- helpers */
 
@@ -1111,21 +929,28 @@ function openMenu(anchor, items) {
 
 /* ---------------------------------------------------------------- actions */
 
-async function savePreset() {
+function savePreset() {
+  clearTimeout(autoSaveTimer);
+  saveChain = saveChain.catch(() => {}).then(performSavePreset);
+  return saveChain;
+}
+async function performSavePreset() {
   if (!preset) return;
   // mirrorSPreset makes the server project extensions.SPreset into the SPresetSettings prompt
   // (the reference editor's "已与酒馆同步"); extensions.SPreset stays the source of truth.
-  const result = await api({ action: 'save', id: presetId, name: presetName, preset, mirrorSPreset: true });
+  const version = draftVersion, savedId = presetId, savedName = presetName, snapshot = structuredClone(preset);
+  const result = await api({ action: 'save', id: savedId, name: savedName, preset: snapshot, mirrorSPreset: true });
   state.revision = Number.isInteger(result.revision) ? result.revision : state.revision + 1;
   if (result.id) {
     presetId = result.id;
     const record = (state.presets ?? []).find(item => item.id === result.id);
-    if (record) { record.preset = structuredClone(preset); record.name = presetName; }
+    if (record) { record.preset = snapshot; record.name = savedName; }
     const unsaved = (state.presets ?? []).find(item => !item.id);
     if (unsaved) unsaved.preset = structuredClone(preset);
   }
   renderPresetSelect();
-  markSaved('已保存');
+  if (version === draftVersion) markSaved('已保存');
+  else scheduleEditorSave();
 }
 async function saveLibrary(entry, done) {
   const result = await api({ action: 'library-save', entry });
@@ -1162,7 +987,15 @@ function renderAll() {
 
 $('back-workbench').href = '/preset-enhance' + (sessionId ? '?sessionId=' + encodeURIComponent(sessionId) : '');
 $('save-preset').onclick = guard(savePreset);
+try { $('regex-auto-save').checked = localStorage.getItem('dsh-preset-enhance.preset-auto-save') === '1'; } catch {}
+$('regex-auto-save').onchange = () => { try { localStorage.setItem('dsh-preset-enhance.preset-auto-save', $('regex-auto-save').checked ? '1' : '0'); } catch {} scheduleEditorSave(); };
+globalThis.addEventListener?.('storage', event => {
+  if (event.key !== 'dsh-preset-enhance.preset-auto-save') return;
+  $('regex-auto-save').checked = event.newValue === '1';
+  scheduleEditorSave();
+});
 $('preset-select').onchange = guard(async () => {
+  await saveChain.catch(() => {});
   if (presetDirty && !confirm('放弃尚未保存的预设修改？')) { $('preset-select').value = presetId; return; }
   loadPreset($('preset-select').value);
   status('已保存');
@@ -1185,20 +1018,23 @@ $('chain-add').onclick = () => {
   renderAll();
 };
 $('tab-prompt').onclick = () => {
+  $('tab-prompt').setAttribute('aria-selected', 'true');
+  $('tab-extras').setAttribute('aria-selected', 'false');
   $('tab-prompt').classList.add('active');
   $('tab-extras').classList.remove('active');
   $('prompt-view').hidden = false;
   $('extras-view').hidden = true;
 };
 $('tab-extras').onclick = guard(async () => {
+  $('tab-extras').setAttribute('aria-selected', 'true');
+  $('tab-prompt').setAttribute('aria-selected', 'false');
   $('tab-extras').classList.add('active');
   $('tab-prompt').classList.remove('active');
   $('prompt-view').hidden = true;
   $('extras-view').hidden = false;
-  await refreshPlans();
+  renderExtras();
 });
-$('extras-refresh').onclick = guard(refreshPlans);
-$('extras-depth').onchange = guard(refreshPlans);
+
 window.addEventListener('beforeunload', event => {
   if (presetDirty || templateDirty) { event.preventDefault(); event.returnValue = ''; }
 });

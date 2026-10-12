@@ -108,7 +108,7 @@ async function writeStateFile(file: string, state: PresetState): Promise<void> {
  * (published lib/store.mjs and dist/lib/store.mjs) shares one queue and an old
  * instance can never interleave a read-modify-write with a newer one.
  */
-interface StoreQueue { tail: Promise<unknown> }
+interface StoreQueue { tail: Promise<unknown>; listeners?: Set<(state: PresetState) => void> }
 
 const QUEUES_KEY = Symbol.for('dsh-preset-enhance.preset-store-queues');
 
@@ -168,6 +168,13 @@ export class PresetStore {
     }
   }
 
+  /** Post-commit notifications, shared across instances of the same state file. */
+  subscribe(listener: (state: PresetState) => void): () => void {
+    const queue = queueFor(this.#key);
+    (queue.listeners ??= new Set()).add(listener);
+    return () => { queue.listeners?.delete(listener); };
+  }
+
   /**
    * Read-modify-write one state file atomically, serialized across every
    * PresetStore instance that targets the same resolved path. Rejects
@@ -179,6 +186,9 @@ export class PresetStore {
       const state = await this.read();
       const result = await fn(state);
       await writeStateFile(this.file, state);
+      for (const listener of queueFor(this.#key).listeners ?? []) {
+        try { listener(structuredClone(state)); } catch { /* Observers cannot fail a committed write. */ }
+      }
       return result;
     });
   }

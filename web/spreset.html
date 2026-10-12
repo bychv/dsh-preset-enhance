@@ -6,6 +6,7 @@
 <nav class="tabs" role="tablist"><button id="tab-prompt" class="tab active" role="tab" aria-selected="true">提示词</button><button id="tab-extras" class="tab" role="tab" aria-selected="false">附加功能</button></nav>
 <div class="top-actions">
 <select id="preset-select" aria-label="当前预设"></select>
+<label class="inline"><input id="regex-auto-save" type="checkbox">自动保存</label>
 <button id="save-preset" class="primary">保存预设</button>
 <span id="state" class="state" role="status">正在加载</span>
 <a id="back-workbench" class="back" href="/preset-enhance">返回工作台</a>
@@ -40,13 +41,11 @@
 </main>
 
 <section id="extras-view" class="extras" hidden>
-<div class="col-head"><h2>附加功能</h2><span class="muted">extensions.SPreset（只读汇总，正则适用性来自插件正则引擎）</span>
-<label class="inline">规划深度<input id="extras-depth" type="number" value="0" step="1"></label>
-<button id="extras-refresh">刷新</button></div>
 <div id="extras-body"></div>
 </section>
 
 <div id="menu-layer" class="menu-layer" hidden></div>
 <script src="/preset-enhance/plugin-templates.js"></script>
+<script src="/preset-enhance/regex-editor.js"></script>
 <script type="module" src="/preset-enhance/spreset.js"></script>
 </body></html>

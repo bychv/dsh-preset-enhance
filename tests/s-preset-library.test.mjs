@@ -357,20 +357,24 @@ test('the editor page is served with its own chrome and three columns', async ()
     const script = await harness.fetchAsset('/preset-enhance/spreset.js');
     assert.equal(script.statusCode, 200);
     assert.match(script.headers['content-type'], /javascript/);
-    assert.ok(script.body.includes('s-preset-plan'), 'the page script talks to the plugin api');
+    assert.ok(script.body.includes('PresetRegexEditor'), 'the extras view mounts the functional regex editor');
     assert.ok(script.body.includes('library-save'), 'the script talks to the library actions');
     assert.ok(script.body.includes("const UNCATEGORIZED = '未分类'"), 'the library groups under 未分类');
     assert.ok(script.body.includes("category + '模板（'"), 'the section title is 未分类模板（N）');
     for (const label of ['在酒馆原生列表中隐藏', '根据条件自动启用', '锁定正文', '提示词正文', '字符 ·', '内容', '注入', '工具', '结构化']) {
       assert.ok(script.body.includes(label), 'the inspector should render ' + label);
     }
-    for (const key of ['ChatSquash', 'RegexBinding', 'MacroNest', 'ToolBindings', 'MessageInjections',
-      'OutputPreprocessing', 'FixedPresetName']) {
-      assert.ok(script.body.includes(key), 'the extras tab should cover ' + key);
+    const regex = await harness.fetchAsset('/preset-enhance/regex-editor.js');
+    assert.equal(regex.statusCode, 200);
+    assert.match(regex.headers['content-type'], /javascript/);
+    for (const label of ['新建正则', '查找表达式', '替换内容', '正文显示', '发送提示词', '试运行']) {
+      assert.ok(regex.body.includes(label), 'the regex view contains ' + label);
     }
+    assert.ok(page.body.includes('/preset-enhance/regex-editor.js'));
+    assert.equal((await harness.fetchAsset('/preset-enhance/regex-worker.js')).statusCode, 200);
+    assert.equal((await harness.fetchAsset('/preset-enhance/regex/display-regex.mjs')).statusCode, 200);
     assert.ok(script.body.includes('本插件不读取'), 'controls with no plugin-side effect carry a visible hint');
     assert.ok(script.body.includes('spreset_condition_script'), '根据条件自动启用 edits the condition script');
-    assert.ok(script.body.includes('ForcedPostProcessing'), 'the extras tab covers ForcedPostProcessing');
     assert.ok(script.body.includes('SPresetSettings'), 'saving explains the settings mirror');
     assert.ok(script.body.includes('mirrorSPreset: true'), 'the editor asks the server for the mirror');
     const css = await harness.fetchAsset('/preset-enhance/spreset.css');

@@ -1,0 +1,5 @@
+- insert:
+    - id: preset-enhance
+      name: dsh-preset-enhance
+    - id: preset-display-regex
+      name: dsh-preset-display-regex

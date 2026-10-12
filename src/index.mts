@@ -1,3 +1,4 @@
+import { installDisplayConfig } from './lib/display-config.mjs';
 import { readDshSystemTemplate, withoutDshPrompt } from './lib/dsh-system-template.mjs';
 import { readRequestSettings } from './lib/request-settings.mjs';
 import { createPresetReader, PRESET_READ_BASE } from './lib/preset-reader.mjs';
@@ -477,8 +478,14 @@ const chatConnection = () => {
     } finally { finish(); }
   });
 
+  installDisplayConfig(ctx, store, () => !startupError && !lifecycle.closing,
+    (state, sessionId) => ownGet(state.bindings, sessionId) ?? defaultBinding(state));
+
   const assets = new Map<string, [string, string]>([
     [BASE, ['web/index.html', 'text/html']],
+    [`${BASE}/regex-editor.js`, ['web/regex-editor.js', 'text/javascript']],
+    [`${BASE}/regex-worker.js`, ['web/regex-worker.js', 'text/javascript']],
+    ...['display-regex', 'prompt-regex', 'macros', 'compaction'].map(file => [`${BASE}/regex/${file}.mjs`, [`lib/${file}.mjs`, 'text/javascript']] as [string, [string, string]]),
     [`${BASE}/editor.js`, ['web/editor.js', 'text/javascript']],
     [`${BASE}/tool-labels.js`, ['web/tool-labels.js', 'text/javascript']],
     [`${BASE}/editor.css`, ['web/editor.css', 'text/css']],

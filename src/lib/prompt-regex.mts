@@ -256,7 +256,7 @@ export interface RegexRunResult {
 }
 
 /** Run one rule over one text. Macro expansion happens last, over the replacement result. */
-export function runRegexScriptDetailed(text: string, script: RegexScript, ctx: MacroContext): RegexRunResult {
+export function runRegexScriptDetailed(text: string, script: RegexScript, ctx: MacroContext, limits?: { maxReplacements: number; maxOutputChars: number }): RegexRunResult {
   const find = typeof script.findRegex === 'string' ? script.findRegex : '';
   if (script.disabled === true || !find || text === '') return { text, matched: false, replacements: 0 };
   const pattern = expandPattern(find, script.substituteRegex, ctx);
@@ -269,7 +269,15 @@ export function runRegexScriptDetailed(text: string, script: RegexScript, ctx: M
   if (regex.global || regex.sticky) regex.lastIndex = 0;
   let matched = false;
   let replacements = 0;
-  const replaced = text.replace(regex, (...args: unknown[]) => { matched = true; replacements += 1; return renderReplacement(template, matchOf(args), trim); });
+  let produced = 0;
+  const replaced = text.replace(regex, (...args: unknown[]) => {
+    matched = true; replacements += 1;
+    if (limits && replacements > limits.maxReplacements) throw new Error('正则替换次数超过上限');
+    const value = renderReplacement(template, matchOf(args), trim);
+    produced += value.length;
+    if (limits && produced > limits.maxOutputChars) throw new Error('正则输出超过上限');
+    return value;
+  });
   // Only a real replacement pulls in the macro pass: expanding macros inside untouched chat text
   // is not what the request copy is for.
   return { text: matched ? renderMacros(replaced, ctx) : text, matched, replacements };

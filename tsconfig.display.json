@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "packages/display-regex/src",
+    "outDir": "dist/display-package"
+  },
+  "include": [
+    "packages/display-regex/src/**/*.mts"
+  ]
+}

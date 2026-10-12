@@ -1,0 +1,3 @@
+- insert:
+    - id: preset-display-regex
+      name: dsh-preset-display-regex

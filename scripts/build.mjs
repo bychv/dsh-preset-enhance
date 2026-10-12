@@ -55,6 +55,8 @@ try {
     throw new Error('build: TypeScript compilation failed; published files were not changed', { cause: error });
   }
 
+  execFileSync(process.execPath, [join(root, 'node_modules', 'typescript', 'bin', 'tsc'), '-p', join(root, 'tsconfig.display.json')], { cwd: root, stdio: 'inherit' });
+
   const emit = async (from, to) => {
     await mkdir(dirname(to), { recursive: true });
     await cp(from, to, { force: true });
@@ -65,6 +67,12 @@ try {
       await emit(join(dist, entry.name), join(root, entry.name));
     }
   }
+  await emit(join(dist, 'display-package', 'index.mjs'), join(root, 'packages', 'display-regex', 'index.mjs'));
+  for (const file of ['display-regex', 'prompt-regex', 'macros', 'compaction']) {
+    await emit(join(dist, 'lib', file + '.mjs'), join(root, 'packages', 'display-regex', 'regex', file + '.mjs'));
+  }
+  await emit(join(root, 'web', 'regex-worker.js'), join(root, 'packages', 'display-regex', 'worker.js'));
+  await emit(join(root, 'LICENSE'), join(root, 'packages', 'display-regex', 'LICENSE'));
   // The public template contract is self-contained: consumers need no host/internal types.
   await emit(join(root, 'src', 'template-api.d.mts'), join(root, 'templates.d.mts'));
   for (const entry of await readdir(join(dist, 'lib'), { withFileTypes: true })) {
