@@ -399,3 +399,25 @@ test('s-preset-plan answers for a draft preset and needs no stored preset', asyn
     assert.deepEqual(payload.regexes[0].targets, ['user']);
   } finally { await harness.cleanup(); }
 });
+
+
+test('saving a removed prompt clears only its stale editor lock', async () => {
+  const harness = await createHarness();
+  try {
+    const preset = samplePreset();
+    const saved = await harness.post({ action: 'save', id: null, name: 'A', preset });
+    const presetId = saved.payload.id;
+    await harness.post({ action: 's-preset-lock', presetId, identifier: 'sys', locked: true });
+    await harness.post({ action: 's-preset-lock', presetId, identifier: 'chatHistory', locked: true });
+    await harness.post({ action: 's-preset-lock', presetId: 'another-preset', identifier: 'sys', locked: true });
+    const remaining = structuredClone(preset);
+    remaining.prompts = remaining.prompts.filter(p => p.identifier !== 'sys');
+    for (const group of remaining.prompt_order) group.order = group.order.filter(p => p.identifier !== 'sys');
+    const result = await harness.post({ action: 'save', id: presetId, name: 'A', preset: remaining });
+    assert.equal(result.statusCode, 200, result.payload?.error);
+    const state = (await harness.get()).payload;
+    assert.deepEqual(state.sPresetEditor.locks[presetId], ['chatHistory']);
+    assert.deepEqual(state.sPresetEditor.locks['another-preset'], ['sys']);
+    assert.equal(state.presets.find(p => p.id === presetId).preset.prompts.some(p => p.identifier === 'sys'), false);
+  } finally { await harness.cleanup(); }
+});

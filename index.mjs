@@ -1047,6 +1047,12 @@ export async function apply(ctx, config = {}) {
                             state.presets[state.presets.indexOf(old)] = record;
                         else
                             state.presets.push(record);
+                        // Deleted prompt bodies must not leave editor guards attached to stale identifiers.
+                        const promptIds = new Set(record.preset.prompts.map((prompt) => prompt.identifier));
+                        for (const identifier of presetLocks(state.sPresetEditor, record.id)) {
+                            if (!promptIds.has(identifier))
+                                state.sPresetEditor = setPresetLock(state.sPresetEditor, record.id, identifier, false);
+                        }
                         return selectPreset(record);
                     }
                     if (body.action === 'delete-preset') {

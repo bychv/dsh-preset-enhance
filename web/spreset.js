@@ -4,6 +4,20 @@ const sessionId = new URLSearchParams(location.search).get('sessionId') || '';
 const ROLES = [['system', 'System'], ['user', 'User'], ['assistant', 'Assistant'], ['model', 'Model']];
 const ROLE_LABEL = { system: 'SYSTEM', user: 'USER', assistant: 'ASSISTANT', model: 'MODEL' };
 const ROLE_NAME = Object.fromEntries(ROLES);
+const QUICK_ROLES = [['system', '系统'], ['user', '用户'], ['assistant', '助手']];
+const ICONS = {
+  system: '<path d="M5 6h14M5 18h14M5 12h14"/><circle cx="9" cy="6" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="9" cy="18" r="2"/>',
+  user: '<circle cx="12" cy="7" r="4"/><path d="M5 21v-2a7 7 0 0 1 14 0v2"/>',
+  assistant: '<rect x="4" y="7" width="16" height="13" rx="3"/><path d="M12 3v4M8 12v3M16 12v3M1 12h3M20 12h3"/>',
+  power: '<path d="M12 2v10M6 5a9 9 0 1 0 12 0"/>',
+  more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
+  up: '<path d="m5 10 7-7 7 7M12 3v18"/>',
+  down: '<path d="m5 14 7 7 7-7M12 3v18"/>',
+  unused: '<path d="m10 5-7 7 7 7M3 12h18"/>',
+  template: '<path d="m12 3 3 6 7 1-5 5 1 7-6-3-6 3 1-7-5-5 7-1z"/>',
+  copy: '<rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V3H3v13h5"/>',
+  delete: '<path d="M3 6h18M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7M14 10v7"/>',
+};
 const UNCATEGORIZED = '未分类';
 const TABS = ['内容', '注入', '工具', '结构化'];
 const NOT_IMPLEMENTED = '本插件未实现（数据原样保留）';
@@ -39,6 +53,7 @@ let selection = null;
 let inspectorTab = '内容';
 let plans = null;
 let cancelChainDrag = null;
+let menuAnchor = null;
 // Editor-side entry locks, keyed by preset id (state.sPresetEditor). Never written into a preset:
 // the preset field forbid_overrides is mirrored for round-tripping, but the guard reads this.
 let editorLocks = { locks: {} };
@@ -55,6 +70,31 @@ function button(label, title, onClick, cls) {
   node.type = 'button';
   node.onclick = event => { if (event) event.stopPropagation(); onClick(event); };
   return node;
+}
+function actionIcon(name) {
+  const node = el('span', 'action-icon');
+  node.setAttribute('aria-hidden', 'true');
+  node.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">' + ICONS[name] + '</svg>';
+  return node;
+}
+function iconButton(icon, label, onClick, cls = '') {
+  const node = button('', label, onClick, 'action-button ' + cls);
+  node.setAttribute('aria-label', label);
+  node.append(actionIcon(icon));
+  return node;
+}
+function roleReadOnlyReason(prompt) {
+  if (!prompt) return '提示词不存在';
+  if (isLinkedTemplate(prompt.identifier)) return '插件模板的角色只读';
+  if (prompt.marker === true || prompt.identifier === 'chatHistory') return '占位符的角色由内容来源决定';
+  return '';
+}
+function copyReadOnlyReason(prompt) {
+  if (!prompt) return '提示词不存在';
+  if (prompt.marker === true || prompt.identifier === 'chatHistory') return '占位符不能复制为普通提示词';
+  if (isLinkedTemplate(prompt.identifier)) return '请先解除插件关联，再复制';
+  if (isBodyLocked(prompt, false)) return '请先解锁正文，再复制';
+  return '';
 }
 function field(labelText, control) {
   const wrap = el('label', 'field');
@@ -127,16 +167,6 @@ async function setLock(source, isTemplate, locked) {
   status(locked ? '已锁定，防止误编辑；解锁后可编辑' : '已解锁，可以编辑正文');
   renderAll();
 }
-/** Open an entry for editing; a locked entry is refused with a visible reason. */
-function openForEdit(identifier) {
-  const prompt = promptOf(identifier);
-  if (prompt && isBodyLocked(prompt, false)) {
-    status('「' + (prompt.name || identifier) + '」的正文已锁定，先在 INSPECTOR 里解锁再编辑', 'error');
-    return;
-  }
-  selection = { kind: 'chain', id: identifier };
-  renderAll();
-}
 function chainIdentifiers() { return new Set(chainOrder().map(item => item.identifier)); }
 function markPreset() { presetDirty = true; status('未保存修改', 'dirty'); }
 function markSaved(text) { presetDirty = false; templateDirty = false; status(text || '已保存'); }
@@ -204,7 +234,7 @@ function renderLibrary() {
 
   if (segment === 'unused') {
     const rows = unusedPrompts()
-      .map(prompt => ({ kind: 'prompt', id: prompt.identifier, title: prompt.name || prompt.identifier, role: prompt.role || 'system', content: prompt.content || '', prompt }))
+      .map(prompt => ({ kind: 'prompt', id: prompt.identifier, title: prompt.name || prompt.identifier, role: prompt.role === 'model' ? 'assistant' : prompt.role || 'system', content: prompt.content || '', prompt }))
       .filter(matches);
     list.append(el('div', 'section-title', '未使用（' + rows.length + '）'));
     if (!rows.length) list.append(el('p', 'empty', '没有匹配的未使用条目。'));
@@ -289,6 +319,7 @@ function renderChainRow(item, index) {
   row.title = '点击在 INSPECTOR 中查看';
   row.tabIndex = 0;
   row.onkeydown = event => {
+    if (event.target !== row) return;
     if (event.key !== 'Enter' && event.key !== ' ') return;
     event.preventDefault();
     select();
@@ -297,27 +328,42 @@ function renderChainRow(item, index) {
   row.append(el('span', 'handle', '⠿'));
   const main = el('div', 'chain-main');
   const top = el('div', 'chain-top');
-  top.append(el('span', 'name', prompt.name || item.identifier), el('span', 'badge role', ROLE_LABEL[prompt.role] || String(prompt.role || 'system').toUpperCase()));
+  top.append(el('span', 'name', prompt.name || item.identifier));
   if (prompt.marker === true) top.append(el('span', 'badge marker', '占位符'));
   if (BUILTIN_IDS.has(item.identifier)) top.append(el('span', 'badge builtin', '内置'));
   if (prompt.injection_position === 1) top.append(el('span', 'badge', '注入'));
   main.append(top, el('p', 'preview', short(prompt.content, 90) || '（空内容）'));
-  const toggle = el('label', 'switch mini');
-  const box = el('input');
-  box.type = 'checkbox';
-  box.checked = item.enabled !== false;
-  box.title = '在当前预设中启用';
-  box.onchange = () => { item.enabled = box.checked; markPreset(); renderChain(); };
-  toggle.append(box, el('span', 'slider'));
   const actions = el('span', 'row-actions');
+  const roles = el('span', 'role-switch');
+  roles.setAttribute('role', 'group');
+  roles.setAttribute('aria-label', '消息角色');
+  const roleReason = roleReadOnlyReason(promptOf(item.identifier));
+  for (const [value, label] of QUICK_ROLES) {
+    const active = (prompt.role === 'model' ? 'assistant' : prompt.role || 'system') === value;
+    const node = iconButton(value, label + '消息', () => changePromptRole(item.identifier, value), active ? 'active' : '');
+    node.dataset.role = value;
+    node.setAttribute('aria-pressed', String(active));
+    node.disabled = !!roleReason;
+    if (roleReason) node.title = roleReason;
+    roles.append(node);
+  }
+  const power = iconButton('power', item.enabled === false ? '启用' : '停用', () => {
+    item.enabled = item.enabled === false;
+    markPreset(); renderChain(); renderInspector();
+  }, 'power' + (item.enabled === false ? '' : ' active'));
+  power.setAttribute('aria-pressed', String(item.enabled !== false));
   actions.append(
-    button('复制', '复制条目', () => copyChainItem(index)),
-    button('编辑', '在检视器中编辑（正文锁定时会被拒绝）', () => openForEdit(item.identifier)),
-    button('⏻', item.enabled === false ? '启用' : '停用', () => { item.enabled = item.enabled === false; markPreset(); renderChain(); }),
-    button('…', '更多', event => openMenu(event.currentTarget, chainMenu(index))),
+    roles, power,
+    iconButton('more', '更多操作', event => openMenu(event.currentTarget, chainMenu(index))),
   );
-  row.append(main, toggle, actions);
+  row.append(main, actions);
   return row;
+}
+function changePromptRole(identifier, role) {
+  const prompt = promptOf(identifier);
+  if (roleReadOnlyReason(prompt) || !QUICK_ROLES.some(([value]) => value === role)) return;
+  prompt.role = role;
+  markPreset(); renderLibrary(); renderChain(); renderInspector();
 }
 /** Pointer sorting keeps the lifted row opaque and moves its gap immediately. */
 function beginChainDrag(event, row, identifier) {
@@ -400,14 +446,38 @@ function beginChainDrag(event, row, identifier) {
 }
 
 function chainMenu(index) {
-  const item = chainOrder()[index];
-  const prompt = promptOf(item?.identifier) ?? {};
+  const order = chainOrder(), item = order[index];
+  const prompt = promptOf(item?.identifier);
+  const copyReason = copyReadOnlyReason(prompt);
+  const deleteReason = deleteReadOnlyReason(prompt);
   return [
-    ['上移', () => moveChain(index, index - 1)],
-    ['下移', () => moveChain(index, index + 1)],
-    ['存为资源库模板', () => savePromptToLibrary(prompt)],
-    ['从链路移除', () => removeChainItem(index)],
+    ['上移', () => moveChain(index, index - 1), { icon: 'up', disabled: index === 0, reason: '已在最前' }],
+    ['下移', () => moveChain(index, index + 1), { icon: 'down', disabled: index === order.length - 1, reason: '已在最后' }],
+    ['移到未使用', () => removeChainItem(index), { icon: 'unused' }],
+    ['复制为模板', () => savePromptToLibrary(prompt), { icon: 'template', disabled: !!copyReason, reason: copyReason }],
+    ['创建副本', () => copyChainItem(index), { icon: 'copy', disabled: !!copyReason, reason: copyReason }],
+    ['删除', () => deleteChainPrompt(item?.identifier), { icon: 'delete', danger: true, disabled: !!deleteReason, reason: deleteReason }],
   ];
+}
+function deleteReadOnlyReason(prompt) {
+  if (!prompt) return '提示词不存在';
+  if (prompt.marker === true || prompt.identifier === 'chatHistory') return '占位符请移到未使用或停用';
+  if (isBodyLocked(prompt, false)) return '请先解锁正文，再删除';
+  return '';
+}
+function deleteChainPrompt(identifier) {
+  const prompt = promptOf(identifier);
+  const reason = deleteReadOnlyReason(prompt);
+  if (reason) { status(reason, 'error'); return; }
+  const groups = chainGroups().filter(group => group.order.some(item => item.identifier === identifier)).length;
+  if (!confirm('删除「' + (prompt.name || identifier) + '」及其在 ' + groups + ' 个顺序组中的引用？提示词本体将删除。')) return;
+  preset.prompts = preset.prompts.filter(item => item.identifier !== identifier);
+  for (const group of chainGroups()) group.order = group.order.filter(item => item.identifier !== identifier);
+  const settings = preset.extensions?.['dsh-preset-enhance'];
+  if (settings?.templateBindings) delete settings.templateBindings[identifier];
+  if (Array.isArray(settings?.autoTemplateDisabled)) settings.autoTemplateDisabled = settings.autoTemplateDisabled.filter(id => id !== identifier);
+  if (selection && selection.kind !== 'library' && selection.id === identifier) selection = null;
+  markPreset(); renderAll();
 }
 function moveChain(from, to) {
   const order = chainOrder();
@@ -420,7 +490,8 @@ function moveChain(from, to) {
 function copyChainItem(index) {
   const order = chainOrder();
   const source = promptOf(order[index]?.identifier);
-  if (!source) return;
+  const reason = copyReadOnlyReason(source);
+  if (reason) { status(reason, 'error'); return; }
   const identifier = uid();
   preset.prompts.push({ ...structuredClone(source), identifier, name: (source.name || identifier) + ' 副本' });
   order.splice(index + 1, 0, { identifier, enabled: order[index].enabled !== false });
@@ -434,6 +505,8 @@ function removeChainItem(index) {
   if (!item) return;
   if (!confirm('从顺序流程移除「' + (promptOf(item.identifier)?.name || item.identifier) + '」？（提示词本体保留在预设里）')) return;
   order.splice(index, 1);
+  if (selection?.kind === 'chain' && selection.id === item.identifier) selection = { kind: 'prompt', id: item.identifier };
+  segment = 'unused';
   markPreset();
   renderAll();
 }
@@ -471,10 +544,11 @@ function insertIntoChain(row) {
   status('模板已加入提示词链', 'dirty');
 }
 async function savePromptToLibrary(prompt) {
-  if (!prompt) return;
+  const reason = copyReadOnlyReason(prompt);
+  if (reason) { status(reason, 'error'); return; }
   const entry = {
     title: prompt.name || prompt.identifier || '未命名条目',
-    role: prompt.role || 'system',
+    role: prompt.role === 'model' ? 'assistant' : prompt.role || 'system',
     content: prompt.content || '',
     injectionPosition: prompt.injection_position === 1 ? 1 : 0,
   };
@@ -513,7 +587,7 @@ function inspectorTarget() {
 function promptToLibraryShape(prompt) {
   return {
     title: prompt.name || prompt.identifier || '未命名条目',
-    role: prompt.role || 'system',
+    role: prompt.role === 'model' ? 'assistant' : prompt.role || 'system',
     content: prompt.content || '',
     injectionPosition: prompt.injection_position === 1 ? 1 : 0,
     injectionDepth: prompt.injection_depth,
@@ -584,12 +658,13 @@ function renderInspector() {
   }
   role.value = ROLE_NAME[source.role] ? source.role : 'system';
   role.onchange = () => {
-    if (linked) return;
+    if (!isTemplate && roleReadOnlyReason(source)) return;
     if (isTemplate) { source.role = role.value; templateDirty = true; status('模板未保存', 'dirty'); }
-    else { source.role = role.value; markPreset(); renderChainRowInPlace(selection.id); }
+    else { source.role = role.value; markPreset(); renderLibrary(); renderChain(); }
   };
   body.append(field('角色', role));
-  role.disabled = linked;
+  role.disabled = !isTemplate && !!roleReadOnlyReason(source);
+  if (role.disabled) role.title = roleReadOnlyReason(source);
 
   const position = isTemplate ? (source.injectionPosition === 1 ? 1 : 0) : (source.injection_position === 1 ? 1 : 0);
   const segmentRow = el('div', 'segment');
@@ -988,17 +1063,50 @@ function downloadJson(value, filename) {
   anchor.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
-function openMenu(anchor, items) {
+function closeMenu(restoreFocus = true) {
   const layer = $('menu-layer');
+  layer.hidden = true;
   layer.replaceChildren();
+  if (restoreFocus && menuAnchor?.isConnected !== false) menuAnchor?.focus?.();
+  menuAnchor = null;
+}
+function openMenu(anchor, items) {
+  closeMenu(false);
+  menuAnchor = anchor;
+  const layer = $('menu-layer');
   layer.hidden = false;
   const menu = el('div', 'menu');
-  const rect = anchor.getBoundingClientRect();
-  menu.style.left = Math.max(8, rect.right - 170) + 'px';
-  menu.style.top = (rect.bottom + 4) + 'px';
-  for (const [label, run] of items) menu.append(button(label, '', () => { layer.hidden = true; layer.replaceChildren(); run(); }));
+  menu.setAttribute('role', 'menu');
+  for (const [label, run, options = {}] of items) {
+    const node = button('', options.disabled ? options.reason : '', guard(async () => {
+      if (options.disabled) return;
+      closeMenu();
+      await run();
+    }), options.danger ? 'danger' : '');
+    if (options.icon) node.append(actionIcon(options.icon));
+    node.append(el('span', '', label));
+    node.setAttribute('role', 'menuitem');
+    node.disabled = options.disabled === true;
+    menu.append(node);
+  }
   layer.append(menu);
-  layer.onclick = () => { layer.hidden = true; layer.replaceChildren(); };
+  const rect = anchor.getBoundingClientRect(), bounds = menu.getBoundingClientRect();
+  const width = window.innerWidth ?? 1024, height = window.innerHeight ?? 768;
+  menu.style.maxHeight = Math.max(80, height - 16) + 'px';
+  menu.style.left = Math.max(8, Math.min(rect.right - bounds.width, width - bounds.width - 8)) + 'px';
+  menu.style.top = Math.max(8, Math.min(rect.bottom + 4, height - bounds.height - 8)) + 'px';
+  const buttons = [...menu.querySelectorAll('button')].filter(node => !node.disabled);
+  buttons[0]?.focus?.();
+  layer.onclick = () => closeMenu();
+  layer.onkeydown = event => {
+    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeMenu(); return; }
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End', 'Tab'].includes(event.key) || !buttons.length) return;
+    event.preventDefault(); event.stopPropagation();
+    const index = buttons.indexOf(document.activeElement);
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1
+      : (index + (event.key === 'ArrowUp' || event.key === 'Tab' && event.shiftKey ? -1 : 1) + buttons.length) % buttons.length;
+    buttons[next].focus?.();
+  };
 }
 
 /* ---------------------------------------------------------------- actions */

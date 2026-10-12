@@ -12,7 +12,7 @@ import { runInNewContext } from 'node:vm';
  */
 function element(tag) {
   const node = {
-    tagName: tag, children: [], parentNode: null, dataset: {}, style: {},
+    tagName: tag, children: [], parentNode: null, dataset: {}, style: {}, attributes: {},
     onclick: null, oninput: null, onchange: null, ondragstart: null, ondragend: null,
     ondragover: null, ondrop: null, onkeydown: null,
     checked: false, value: '', disabled: false, hidden: false, className: '', _text: '',
@@ -30,7 +30,7 @@ function element(tag) {
     replaceWith(kid) { const parent = node.parentNode; parent.insertBefore(kid, node); parent.children = parent.children.filter(n => n !== node); node.parentNode = null; },
     closest(selector) { return selector.split(',').some(part => matches(node, part)) ? node : node.parentNode?.closest(selector) ?? null; },
     replaceChildren(...kids) { node.children = []; node.append(...kids); },
-    setAttribute() {}, removeAttribute() {}, addEventListener() {},
+    setAttribute(key, value) { node.attributes[key] = String(value); }, getAttribute(key) { return node.attributes[key]; }, removeAttribute(key) { delete node.attributes[key]; }, addEventListener() {},
     getBoundingClientRect() { return { top: 0, right: 0, bottom: 0, left: 0, width: 0, height: 0 }; },
     scrollIntoView() {},
     querySelectorAll(selector) {
@@ -40,7 +40,7 @@ function element(tag) {
       return out;
     },
     querySelector(selector) { return node.querySelectorAll(selector)[0] ?? null; },
-    click() { return bubble(node, 'onclick'); },
+    click() { return node.disabled ? false : bubble(node, 'onclick'); },
   };
   Object.defineProperty(node, 'textContent', {
     get() { return (node._text + ' ' + node.children.map(child => child.textContent).join(' ')).trim(); },
@@ -90,26 +90,28 @@ const PRESET = {
   extensions: { SPreset: { MacroNest: false } },
 };
 
-function editor() {
+function editor(options = {}) {
   const nodes = new Map();
-  const get = id => { if (!nodes.has(id)) nodes.set(id, element('div')); return nodes.get(id); };
+  const create = tag => { const node = element(tag); node.focus = () => { context.document.activeElement = node; }; return node; };
+  const get = id => { if (!nodes.has(id)) nodes.set(id, create('div')); return nodes.get(id); };
   const state = {
     revision: 1,
-    presets: [{ id: 'p1', name: '测试预设', preset: structuredClone(PRESET) }],
+    presets: [{ id: 'p1', name: '测试预设', preset: structuredClone(options.preset ?? PRESET) }],
     selectedPresetId: 'p1',
     binding: { presetId: 'p1' },
     sPresetLibrary: { entries: [
       { id: 't1', title: '人设模板', role: 'system', content: '模板正文', kind: 'template', builtin: true, createdAt: 1, updatedAt: 1 },
     ] },
-    sPresetEditor: { locks: {} },
+    sPresetEditor: { locks: options.locks ?? {} },
   };
   const requests = [];
-  const fetch = async (url, options) => {
+  const fetch = async (url, requestOptions) => {
     // The page always passes an options object; only a body means a POST.
-    if (!options || !options.body) return { ok: true, json: async () => structuredClone(state) };
-    const body = JSON.parse(options.body);
+    if (!requestOptions || !requestOptions.body) return { ok: true, json: async () => structuredClone(state) };
+    const body = JSON.parse(requestOptions.body);
     requests.push(body);
     if (body.action === 'library-save') {
+      if (options.failLibrary) return { ok: false, json: async () => ({ error: '模板保存失败' }) };
       const entry = { ...body.entry, id: body.entry.id || 'new-id' };
       state.sPresetLibrary.entries = [...state.sPresetLibrary.entries.filter(item => item.id !== entry.id), entry];
       return { ok: true, json: async () => ({ revision: 2, entry, created: true, entries: state.sPresetLibrary.entries }) };
@@ -125,11 +127,12 @@ function editor() {
         chatSquash: {}, outputPreprocessing: {}, toolBindings: null, messageInjections: null,
         fixedPresetName: '', macroNest: false, tavernHelperScripts: 0 }) };
     }
+    if (body.action === 'save') state.presets[0].preset = structuredClone(body.preset);
     return { ok: true, json: async () => ({ revision: 2, id: 'p1' }) };
   };
   const script = readFileSync(new URL('../web/spreset.js', import.meta.url), 'utf8');
   const context = {
-    URLSearchParams, structuredClone, console, fetch, setTimeout, clearTimeout, confirm: () => true,
+    URLSearchParams, structuredClone, console, fetch, setTimeout, clearTimeout, confirm: options.confirm ?? (() => true),
     crypto: { randomUUID: () => 'uuid-' + Math.random().toString(16).slice(2) },
     navigator: { clipboard: { writeText: async () => {} } },
     CSS: { escape: value => String(value) },
@@ -137,8 +140,9 @@ function editor() {
     Blob: function () {},
     location: { search: '?sessionId=s' },
     window: { addEventListener() {}, open() {}, matchMedia: () => ({ matches: false, addEventListener() {} }) },
-    document: { getElementById: get, addEventListener() {}, createElement: element, createTextNode: text => ({ textContent: text, children: [] }) },
+    document: { getElementById: get, addEventListener() {}, createElement: create, createTextNode: text => ({ textContent: text, children: [] }) },
   };
+  context.PresetPluginTemplates = options.pluginTemplates ? { mount: () => null, bindings: () => ({}), ...options.pluginTemplates } : undefined;
   context.globalThis = context;
   // Test hook: the editor keeps its working copy in a module-level variable, which loadPreset
   // clones from the record, so assertions must read the draft, not state.presets[0].preset.
@@ -222,11 +226,12 @@ test('锁定正文 blocks editing until it is unlocked, and persists through the
   assert.equal(draftPrompt().forbid_overrides, true, 'the reference field is mirrored for round-tripping');
   assert.equal(ui.requests.some(body => body.action === 's-preset-lock' && body.locked === true), true);
 
-  // The 编辑 action is refused while locked.
-  const editButton = byText(ui.get('chain-list'), 'Main Prompt').querySelectorAll('button').find(button => button.textContent === '编辑');
-  editButton.click();
-  await flush();
-  assert.match(ui.get('state').textContent, /已锁定/, 'the edit action explains the refusal');
+  // Row selection remains available for viewing and unlocking a read-only body.
+  byText(ui.get('chain-list'), 'Main Prompt').click();
+  assert.equal(bodyArea(ui).disabled, true, 'selecting the row never bypasses the lock');
+  byText(ui.get('chain-list'), 'Main Prompt').querySelectorAll('button').find(node => node.title === '更多操作').click();
+  assert.equal(ui.get('menu-layer').querySelectorAll('button').find(node => node.textContent === '创建副本').disabled, true);
+  ui.get('menu-layer').click();
 
   // Unlock from the inspector.
   const unlock = inspectorOf(ui).querySelectorAll('button').find(button => button.textContent === '解锁');
@@ -273,7 +278,7 @@ test('a row action button does not change the selection accidentally', async () 
   await flush();
   const row = byText(ui.get('chain-list'), 'Main Prompt');
   const buttons = row.querySelectorAll('button');
-  const toggle = buttons.find(node => node.textContent === '⏻');
+  const toggle = buttons.find(node => node.classList.contains('power'));
   assert.ok(toggle, 'the enable action exists');
   ui.get('inspector-body').replaceChildren();
   ui.get('inspector-title').textContent = 'INSPECTOR';
@@ -311,4 +316,164 @@ test('pointer sorting reorders before release, stays opaque and supports cancell
   events.get('keydown')({ key: 'Escape', preventDefault() {} });
   assert.deepEqual(Array.from(ui.draft().prompt_order[1].order, p => p.identifier), ['main', 'other'], 'cancel restores the prior order');
   assert.equal(events.has('pointermove'), false);
+});
+
+const chainRow = (ui, id) => ui.get('chain-list').children.find(node => node.dataset.id === id);
+const openRowMenu = (ui, id) => {
+  chainRow(ui, id).querySelectorAll('button').find(node => node.title === '更多操作').click();
+  return ui.get('menu-layer').querySelectorAll('button');
+};
+const menuAction = (ui, id, label) => openRowMenu(ui, id).find(node => node.textContent === label);
+const inspectorRole = ui => inspectorOf(ui).querySelectorAll('select')[0];
+
+test('row roles and power stay in sync with the inspector and survive a save/reload', async () => {
+  const ui = editor(); await flush();
+  chainRow(ui, 'main').click();
+  chainRow(ui, 'main').querySelectorAll('button').find(node => node.dataset.role === 'assistant').click();
+  assert.equal(ui.draft().prompts.find(p => p.identifier === 'main').role, 'assistant');
+  assert.equal(inspectorRole(ui).value, 'assistant');
+  assert.equal(chainRow(ui, 'main').querySelectorAll('button').find(node => node.dataset.role === 'assistant').getAttribute('aria-pressed'), 'true');
+  const role = inspectorRole(ui); role.value = 'user'; role.onchange();
+  assert.equal(chainRow(ui, 'main').querySelectorAll('button').find(node => node.dataset.role === 'user').getAttribute('aria-pressed'), 'true');
+  chainRow(ui, 'main').querySelector('.power').click();
+  assert.match(ui.get('chain-count').textContent, /0\/1/);
+  assert.equal(nameBadges(inspectorOf(ui)).includes('已启用'), false);
+  assert.ok(chainRow(ui, 'main'), 'disabled rows stay used');
+  assert.equal(ui.draft().prompt_order[1].order.find(p => p.identifier === 'main').enabled, false);
+  ui.get('save-preset').click(); await flush();
+  ui.get('preset-select').value = 'p1'; ui.get('preset-select').onchange(); await flush();
+  assert.equal(ui.draft().prompts.find(p => p.identifier === 'main').role, 'user');
+  assert.equal(ui.draft().prompt_order[0].order[0].enabled, false);
+});
+
+test('menu distinguishes moving to unused, copying a template and independent duplicates', async () => {
+  const source = structuredClone(PRESET);
+  source.prompts[1].injection_depth = 3;
+  source.prompts[1].injection_trigger = ['normal'];
+  source.prompts[1].unknown = { kept: [1] };
+  const ui = editor({ preset: source }); await flush();
+  const menu = openRowMenu(ui, 'main');
+  assert.deepEqual(menu.map(node => node.textContent), ['上移', '下移', '移到未使用', '复制为模板', '创建副本', '删除']);
+  assert.equal(menu[0].disabled, true); assert.equal(menu[1].disabled, true);
+  menu.find(node => node.textContent === '复制为模板').click(); await flush();
+  const saved = ui.requests.find(body => body.action === 'library-save');
+  assert.equal(saved.entry.content, '主提示词正文');
+  assert.equal(saved.entry.injectionDepth, 3);
+  assert.equal(ui.draft().prompts.length, 3, 'template copy does not change preset prompts');
+  chainRow(ui, 'main').querySelector('.power').click();
+  menuAction(ui, 'main', '创建副本').click(); await flush();
+  const order = ui.draft().prompt_order[0].order;
+  const duplicate = ui.draft().prompts.find(p => p.identifier === order[1].identifier);
+  assert.notEqual(duplicate.identifier, 'main');
+  assert.equal(order[1].enabled, false, 'duplicate inherits current group power');
+  assert.equal(duplicate.injection_depth, 3);
+  duplicate.unknown.kept.push(2);
+  assert.deepEqual(Array.from(ui.draft().prompts[1].unknown.kept), [1], 'nested fields are independent');
+  menuAction(ui, 'main', '移到未使用').click(); await flush();
+  assert.equal(ui.draft().prompts.some(p => p.identifier === 'main'), true);
+  assert.equal(ui.draft().prompt_order[1].order.some(p => p.identifier === 'main'), true, 'other group is preserved');
+  assert.equal(ui.draft().prompt_order[0].order.some(p => p.identifier === 'main'), false);
+  assert.match(ui.get('library-list').textContent, /Main Prompt/);
+});
+
+test('delete removes all order references and only its own template metadata after confirmation', async () => {
+  const source = structuredClone(PRESET);
+  source.extensions['dsh-preset-enhance'] = {
+    templateBindings: { main: { mode: 'linked', providerId: 'demo' }, other: { keep: true } },
+    autoTemplateDisabled: ['main', 'other'], unknown: { preserved: true },
+  };
+  let accept = false, question = '';
+  const ui = editor({ preset: source, confirm: text => { question = text; return accept; } }); await flush();
+  chainRow(ui, 'main').click();
+  menuAction(ui, 'main', '删除').click(); await flush();
+  assert.match(question, /2 个顺序组/);
+  assert.equal(ui.draft().prompts.some(p => p.identifier === 'main'), true, 'cancel is non-mutating');
+  accept = true;
+  menuAction(ui, 'main', '删除').click(); await flush();
+  assert.equal(ui.draft().prompts.some(p => p.identifier === 'main'), false);
+  assert.equal(ui.draft().prompt_order.some(g => g.order.some(p => p.identifier === 'main')), false);
+  const meta = ui.draft().extensions['dsh-preset-enhance'];
+  assert.equal(Object.hasOwn(meta.templateBindings, 'main'), false);
+  assert.equal(meta.templateBindings.other.keep, true);
+  assert.deepEqual(Array.from(meta.autoTemplateDisabled), ['other']);
+  assert.equal(meta.unknown.preserved, true);
+  assert.match(inspectorOf(ui).textContent, /选择一个条目/);
+  ui.get('save-preset').click(); await flush();
+  ui.context.loadPreset('p1');
+  assert.equal(ui.draft().prompts.some(p => p.identifier === 'main'), false);
+});
+
+test('marker, linked and locked entries cannot be copied through row shortcuts or direct actions', async () => {
+  const source = structuredClone(PRESET);
+  source.prompt_order[0].order.push({ identifier: 'chatHistory', enabled: true }, { identifier: 'other', enabled: true });
+  const ui = editor({ preset: source, locks: { p1: ['main'] }, pluginTemplates: {
+    linked: (_preset, id) => id === 'other',
+  } }); await flush();
+  for (const id of ['main', 'chatHistory', 'other']) {
+    assert.equal(menuAction(ui, id, '创建副本').disabled, true);
+    ui.context.copyChainItem(ui.draft().prompt_order[0].order.findIndex(p => p.identifier === id));
+    await ui.context.savePromptToLibrary(ui.draft().prompts.find(p => p.identifier === id));
+  }
+  assert.equal(ui.draft().prompts.length, 3);
+  assert.equal(ui.requests.some(body => body.action === 'library-save'), false);
+  for (const id of ['chatHistory', 'other']) {
+    const roles = chainRow(ui, id).querySelectorAll('button').filter(node => node.dataset.role);
+    assert.equal(roles.every(node => node.disabled), true);
+    ui.context.changePromptRole(id, 'assistant');
+    assert.equal(ui.draft().prompts.find(p => p.identifier === id).role, 'user');
+    chainRow(ui, id).click();
+    assert.equal(inspectorRole(ui).disabled, true);
+  }
+  assert.equal(menuAction(ui, 'main', '删除').disabled, true);
+  assert.equal(menuAction(ui, 'chatHistory', '删除').disabled, true);
+  assert.equal(menuAction(ui, 'other', '删除').disabled, false, 'an unlocked linked prompt can be deleted without deleting the provider');
+});
+
+test('menu keyboard navigation skips disabled items, restores focus and catches failed template saves', async () => {
+  const ui = editor({ failLibrary: true }); await flush();
+  const row = chainRow(ui, 'main');
+  const anchor = row.querySelectorAll('button').find(node => node.title === '更多操作');
+  const menu = openRowMenu(ui, 'main');
+  assert.equal(ui.context.document.activeElement, menu[2]);
+  const key = (key, shiftKey = false) => ui.get('menu-layer').onkeydown({ key, shiftKey, preventDefault() {}, stopPropagation() {} });
+  key('End'); assert.equal(ui.context.document.activeElement, menu[5]);
+  key('ArrowDown'); assert.equal(ui.context.document.activeElement, menu[2]);
+  key('Tab', true); assert.equal(ui.context.document.activeElement, menu[5]);
+  key('Escape'); assert.equal(ui.get('menu-layer').hidden, true);
+  assert.equal(ui.context.document.activeElement, anchor);
+  menuAction(ui, 'main', '复制为模板').click(); await flush();
+  assert.match(ui.get('state').textContent, /模板保存失败/);
+  assert.equal(ui.get('state').classList.contains('error'), true);
+  assert.equal(ui.draft().prompts.length, 3);
+});
+
+test('row shortcut keyboard and pointer events do not select or drag the row', async () => {
+  const ui = editor(); await flush();
+  const row = chainRow(ui, 'main'), role = row.querySelectorAll('button').find(node => node.dataset.role === 'user');
+  row.onkeydown({ target: role, key: 'Enter', preventDefault() { throw new Error('row intercepted button'); } });
+  row.onpointerdown({ target: role, button: 0 });
+  role.click();
+  assert.equal(ui.draft().prompts.find(p => p.identifier === 'main').role, 'user');
+  assert.match(inspectorOf(ui).textContent, /选择一个条目/, 'role change does not select the row');
+});
+
+
+test('menu move actions update the current order without changing other groups', async () => {
+  const ui = editor(); await flush(); await selectGroup(ui, 100002);
+  const before = JSON.stringify(ui.draft().prompt_order[0]);
+  menuAction(ui, 'main', '上移').click(); await flush();
+  assert.deepEqual(Array.from(ui.draft().prompt_order[1].order, p => p.identifier), ['main', 'other']);
+  assert.deepEqual(ui.get('chain-list').children.map(p => p.dataset.id), ['main', 'other']);
+  menuAction(ui, 'main', '下移').click(); await flush();
+  assert.deepEqual(Array.from(ui.draft().prompt_order[1].order, p => p.identifier), ['other', 'main']);
+  assert.equal(JSON.stringify(ui.draft().prompt_order[0]), before);
+});
+
+test('model alias displays as assistant and copies to the library with its canonical role', async () => {
+  const source = structuredClone(PRESET); source.prompts[1].role = 'model';
+  const ui = editor({ preset: source }); await flush();
+  assert.equal(chainRow(ui, 'main').querySelectorAll('button').find(b => b.dataset.role === 'assistant').getAttribute('aria-pressed'), 'true');
+  assert.equal(ui.draft().prompts[1].role, 'model', 'rendering does not rewrite an imported alias');
+  menuAction(ui, 'main', '复制为模板').click(); await flush();
+  assert.equal(ui.requests.find(body => body.action === 'library-save').entry.role, 'assistant');
 });
