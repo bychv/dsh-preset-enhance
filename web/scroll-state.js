@@ -1,6 +1,6 @@
 const SCROLL_IDS = ['used-prompts', 'unused-prompts', 'regex-list', 'tool-tablist', 'tool-group-panels', 'group-list'];
 const PREFIX = 'dsh-preset-enhance:scroll:';
-/** The workbench iframe is recreated when its host view changes. Keep its viewport locally. */
+/** Keep a viewport snapshot for full navigation and refresh; host view switches retain the iframe. */
 export function rememberWorkbenchScroll(root, identity, storage) {
     if (!storage) {
         try {
@@ -14,6 +14,7 @@ export function rememberWorkbenchScroll(root, identity, storage) {
     let frame = 0;
     let restoring = false;
     let stopped = false;
+    let preserve = false;
     const save = () => {
         if (timer !== undefined) {
             clearTimeout(timer);
@@ -32,7 +33,7 @@ export function rememberWorkbenchScroll(root, identity, storage) {
     };
     const onScroll = (event) => {
         const target = event.target;
-        if (restoring || stopped || (target !== root && target !== scrollRoot() &&
+        if (restoring || stopped || preserve || (target !== root && target !== scrollRoot() &&
             !SCROLL_IDS.some(id => target === root.getElementById(id))))
             return;
         if (timer !== undefined)
@@ -40,7 +41,8 @@ export function rememberWorkbenchScroll(root, identity, storage) {
         timer = setTimeout(save, 180);
     };
     root.addEventListener('scroll', onScroll, true);
-    const onPageHide = () => save();
+    const onPageHide = () => { if (!preserve)
+        save(); };
     window.addEventListener('pagehide', onPageHide);
     let saved;
     try {
@@ -65,12 +67,21 @@ export function rememberWorkbenchScroll(root, identity, storage) {
         restore();
         frame = window.requestAnimationFrame(() => { frame = window.requestAnimationFrame(restore); });
     }
-    return () => {
+    const dispose = (() => {
         stopped = true;
         if (frame)
             window.cancelAnimationFrame(frame);
-        save();
+        if (!preserve)
+            save();
         root.removeEventListener('scroll', onScroll, true);
         window.removeEventListener('pagehide', onPageHide);
+    });
+    dispose.preserveOnNavigation = () => {
+        preserve = true;
+        if (timer !== undefined) {
+            clearTimeout(timer);
+            timer = undefined;
+        }
     };
+    return dispose;
 }

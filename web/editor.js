@@ -22,6 +22,7 @@ let presetAutoSaveTimer = null;
 let presetAutoSaveChain = Promise.resolve();
 let globalConfigAutoSaveTimer = null;
 let globalConfigAutoSaveChain = Promise.resolve();
+let workbenchScroll;
 let prefillSettingsDirty = false;
 let prefillSettingsVersion = 0;
 let autoModesDirty = false;
@@ -2981,6 +2982,7 @@ $('regex-test-target').onchange = () => {
 // 在工作台自己的 iframe 内切换页面，保留宿主导航。
 $('spreset-open').onclick = () => {
   const url = '/preset-enhance/editor' + (sessionId ? '?sessionId=' + encodeURIComponent(sessionId) : '');
+  workbenchScroll?.preserveOnNavigation();
   window.location.assign(url);
 };
 $('preset-auto-save').checked = storageGet(PRESET_AUTO_SAVE_KEY, '1') !== '0';
@@ -3035,7 +3037,7 @@ pluginTemplatePanel = globalThis.PresetPluginTemplates?.mount($('plugin-template
   onChange: (draft, id) => { preset = draft; ensureGroups(); selectedPrompt = id; markDirty(); renderList(); renderEditor(); },
 });
 await guard(() => reload())();
-if (typeof rememberWorkbenchScroll === 'function') rememberWorkbenchScroll(document, () => encodeURIComponent(sessionId || 'global') + ':' + encodeURIComponent(selectedId || 'new'));
+if (typeof rememberWorkbenchScroll === 'function') workbenchScroll = rememberWorkbenchScroll(document, () => encodeURIComponent(sessionId || 'global') + ':' + encodeURIComponent(selectedId || 'new'));
 
 observeDisplayAvailability(value => { displayAvailable = value.available; renderRegexPanel(); });
 // The subscription releases on pagehide and reconnects on pageshow (including BFCache).

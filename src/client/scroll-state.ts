@@ -2,9 +2,10 @@ type ScrollStorage = Pick<Storage, 'getItem' | 'setItem'>;
 
 const SCROLL_IDS = ['used-prompts', 'unused-prompts', 'regex-list', 'tool-tablist', 'tool-group-panels', 'group-list'];
 const PREFIX = 'dsh-preset-enhance:scroll:';
+type ScrollController = (() => void) & { preserveOnNavigation(): void };
 
-/** The workbench iframe is recreated when its host view changes. Keep its viewport locally. */
-export function rememberWorkbenchScroll(root: Document, identity: () => string, storage?: ScrollStorage): () => void {
+/** Keep a viewport snapshot for full navigation and refresh; host view switches retain the iframe. */
+export function rememberWorkbenchScroll(root: Document, identity: () => string, storage?: ScrollStorage): ScrollController {
   if (!storage) { try { storage = window.sessionStorage; } catch { /* Keep scrolling usable. */ } }
   const key = () => PREFIX + identity();
   const scrollRoot = () => root.scrollingElement ?? root.documentElement;
@@ -12,6 +13,7 @@ export function rememberWorkbenchScroll(root: Document, identity: () => string, 
   let frame = 0;
   let restoring = false;
   let stopped = false;
+  let preserve = false;
 
   const save = () => {
     if (timer !== undefined) { clearTimeout(timer); timer = undefined; }
@@ -24,13 +26,13 @@ export function rememberWorkbenchScroll(root: Document, identity: () => string, 
   };
   const onScroll = (event: Event) => {
     const target = event.target;
-    if (restoring || stopped || (target !== root && target !== scrollRoot() &&
+    if (restoring || stopped || preserve || (target !== root && target !== scrollRoot() &&
       !SCROLL_IDS.some(id => target === root.getElementById(id)))) return;
     if (timer !== undefined) clearTimeout(timer);
     timer = setTimeout(save, 180);
   };
   root.addEventListener('scroll', onScroll, true);
-  const onPageHide = () => save();
+  const onPageHide = () => { if (!preserve) save(); };
   window.addEventListener('pagehide', onPageHide);
 
   let saved: Record<string, unknown> | undefined;
@@ -53,11 +55,16 @@ export function rememberWorkbenchScroll(root: Document, identity: () => string, 
     frame = window.requestAnimationFrame(() => { frame = window.requestAnimationFrame(restore); });
   }
 
-  return () => {
+  const dispose = (() => {
     stopped = true;
     if (frame) window.cancelAnimationFrame(frame);
-    save();
+    if (!preserve) save();
     root.removeEventListener('scroll', onScroll, true);
     window.removeEventListener('pagehide', onPageHide);
+  }) as ScrollController;
+  dispose.preserveOnNavigation = () => {
+    preserve = true;
+    if (timer !== undefined) { clearTimeout(timer); timer = undefined; }
   };
+  return dispose;
 }

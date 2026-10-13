@@ -20,7 +20,7 @@ function fixture(saved = new Map(), identity = () => 'session:preset') {
     requestAnimationFrame: () => 1, cancelAnimationFrame() {},
   };
   const cleanup = rememberWorkbenchScroll(root, identity, storage);
-  return { root, elements, listeners, windowListeners, saved, cleanup: () => { cleanup(); globalThis.window = original; } };
+  return { root, elements, listeners, windowListeners, saved, preserveOnNavigation: () => cleanup.preserveOnNavigation(), cleanup: () => { cleanup(); globalThis.window = original; } };
 }
 
 test('scroll positions survive iframe remount and stay scoped to the active preset', () => {
@@ -59,4 +59,16 @@ test('scroll state tolerates blocked storage and removes lifecycle listeners', (
     assert.equal(listeners.size, 0);
     assert.equal(windowListeners.size, 0);
   } finally { globalThis.window = original; }
+});
+
+test('opening the editor preserves the last workbench position when navigation scrolls to its top button', () => {
+  const saved = new Map();
+  const ui = fixture(saved);
+  ui.root.scrollingElement.scrollTop = 701;
+  ui.windowListeners.get('pagehide')();
+  ui.root.scrollingElement.scrollTop = 0;
+  ui.preserveOnNavigation();
+  ui.windowListeners.get('pagehide')();
+  ui.cleanup();
+  assert.equal(JSON.parse([...saved.values()][0]).page, 701);
 });

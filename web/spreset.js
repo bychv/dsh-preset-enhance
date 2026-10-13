@@ -987,11 +987,11 @@ function renderAll() {
 
 $('back-workbench').href = '/preset-enhance' + (sessionId ? '?sessionId=' + encodeURIComponent(sessionId) : '');
 $('save-preset').onclick = guard(savePreset);
-try { $('regex-auto-save').checked = localStorage.getItem('dsh-preset-enhance.preset-auto-save') === '1'; } catch {}
+try { $('regex-auto-save').checked = localStorage.getItem('dsh-preset-enhance.preset-auto-save') !== '0'; } catch {}
 $('regex-auto-save').onchange = () => { try { localStorage.setItem('dsh-preset-enhance.preset-auto-save', $('regex-auto-save').checked ? '1' : '0'); } catch {} scheduleEditorSave(); };
 globalThis.addEventListener?.('storage', event => {
   if (event.key !== 'dsh-preset-enhance.preset-auto-save') return;
-  $('regex-auto-save').checked = event.newValue === '1';
+  $('regex-auto-save').checked = event.newValue !== '0';
   scheduleEditorSave();
 });
 $('preset-select').onchange = guard(async () => {

@@ -21,3 +21,7 @@ Status: implemented
 浏览器会话验证读取已有虚构测试会话，没有调用模型、修改真实预设或发送消息。已更新 alpha 快照并重启本会话启动的沙盒，服务保持供人工测试。未在真实宿主重跑插件启停、热重载及所有多视图组合；共享样式引用计数清理由客户端回归覆盖。
 
 记录见[工作台 UI 验证](../../../../docs/testing/2026-10-13-WORKBENCH_UI.md)。
+
+## 页面保留后的调整
+
+宿主切换视图现在只卸载定位占位元素，iframe 隐藏并保留。宽度手柄样式以 `data-preset-enhance-frame-host` 占位元素为条件，离开后立即失效，不依赖 iframe 移除。详见[滚动与页面保留](2026-10-13-workbench-scroll-and-slider-theme.md)。

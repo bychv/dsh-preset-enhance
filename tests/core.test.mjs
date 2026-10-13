@@ -219,18 +219,19 @@ test('client hides conversation width handles locally while keeping sidebar resi
       sessionId: 'conversation-session',
       useSessions(selector) { return selector({ current: 'other-session' }); },
     });
-    assert.equal(conversationFrame.props.src, '/preset-enhance?sessionId=conversation-session');
+    assert.equal(conversationFrame.type, 'div');
+    assert.equal(conversationFrame.props['data-preset-enhance-frame-host'], '');
     const frame = registered.find(entry => entry.options.name === 'main').component({
       useSessions(selector) { return selector({ current: 'current-session' }); },
     });
-    assert.equal(frame.type, 'iframe');
-    assert.equal(frame.props.src, '/preset-enhance?sessionId=current-session');
+    assert.equal(frame.type, 'div');
+    assert.equal(frame.props['data-preset-enhance-frame-host'], '');
     assert.equal(rootAttributes.has('data-preset-enhance-workbench'), false);
     assert.equal(styles.length, 1);
     assert.match(styles[0].textContent, /data-width-handle/);
     assert.match(styles[0].textContent, /data-conversation-content/);
     assert.doesNotMatch(styles[0].textContent, /data-side|html\[/);
-    assert.equal(conversationFrame.props['data-preset-enhance-frame'], '');
+    assert.equal(conversationFrame.props['data-preset-enhance-frame-host'], '');
     assert.match(styles[0].textContent, /display:none!important/);
 
     cleanups.shift()();
