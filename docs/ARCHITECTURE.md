@@ -35,7 +35,7 @@ flowchart TD
 
 | 模块 | 职责 |
 | --- | --- |
-| 客户端入口及正则、Raw、折叠偏好源码 `src/client/`；其余工作台 `web/` | 侧边栏与会话入口，预设编辑、预览、工具管理和保存交互 |
+| 客户端入口及正则、Raw、折叠与滚动偏好源码 `src/client/`；其余工作台 `web/` | 侧边栏与会话入口，预设编辑、预览、工具管理和保存交互 |
 | `src/index.mts`、`src/mode.mts` | 插件入口、API、命令、请求拦截、预设模式与生命周期管理 |
 | `src/lib/store.mts`、`src/lib/preset-package.mts` | 状态持久化、版本校验、单文件导入导出 |
 | `src/lib/dsh-system-template.mts`、`src/lib/request-settings.mts`、`src/lib/buffered-response.mts` | 模式系统模板、动态 DSH 宏、请求参数与非流式响应接入 |
@@ -45,6 +45,12 @@ flowchart TD
 | `src/lib/deepseek-beta.mts`、`src/lib/toolcall-prefill.mts`、`src/lib/output-extractor.mts` | 请求匹配、预填充兼容、DSML 转换和实验性正文提取 |
 
 宿主侧以 `src/**/*.mts` 为源码，构建后生成发布包使用的 `index.mjs`、`mode.mjs` 和 `lib/*.mjs`；正文包的客户端、共享 Worker 和主包正则编辑模块使用 TypeScript，构建生成原路径下的 JavaScript；工作台其余客户端代码逐步迁移。包内文件入口见[包地图](../packages/README.md)。
+
+### 工作台页面生命周期
+
+`src/client/entry.ts` 将 iframe 保留在宿主 document.body，以插槽占位元素定位和裁剪。切换宿主页面只隐藏 iframe，返回时复用原文档；按会话及入口隔离，最多缓存四个闲置实例，插件生命周期结束时清理。宽度手柄隐藏规则依赖当前占位元素，离开预设页即恢复。
+
+`disclosures.ts` 保存固定区域的折叠偏好；`scroll-state.ts` 为工作台完整导航和刷新保存滚动快照。进入 SPreset 时保留上次快照，避免导航按钮引起的临时滚动覆盖返回位置。这些界面状态不写入分享文件。
 
 ### 启动与运行时启停
 

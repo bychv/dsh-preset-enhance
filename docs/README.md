@@ -29,7 +29,7 @@
 | [DSH 0.2.1 兼容记录](compatibility/DSH_0.2.1_COMPATIBILITY.md) | 初始适配基线与后续验证入口 |
 | [2026-10-04 接入验证](testing/2026-10-04-ALPHA_INTEGRATION.md) | 真实宿主、HTTP、工具及插件生命周期 |
 | [2026-10-04 系统模板验证](testing/2026-10-04-SYSTEM_TEMPLATE.md) | 524 项回归、真实提示词服务及输入后切换模式的页面验证 |
-| [2026-10-13 工作台 UI 验证](testing/2026-10-13-WORKBENCH_UI.md) | 折叠偏好、会话正文手柄隐藏与恢复 |
+| [2026-10-13 工作台 UI 验证](testing/2026-10-13-WORKBENCH_UI.md) | 折叠偏好、页面实例与滚动保留、正文手柄隐藏与恢复 |
 | [2026-10-13 包与启停验证](testing/2026-10-13-PACKAGE_LIFECYCLE.md) | TypeScript 文件整理、原主包入口升级、同页分包与正文开关联动 |
 | [2026-10-12 正则验证](testing/2026-10-12-DISPLAY_REGEX.md) | 编辑、Worker、流式正文与配置生命周期 |
 | [2026-10-12 alpha.2 编辑器验证](testing/2026-10-12-SPRESET_ACTIONS.md) | 真实安装、快捷操作、保存与宿主重启持久化 |

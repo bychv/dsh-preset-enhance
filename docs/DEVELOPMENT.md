@@ -19,7 +19,7 @@ node tests/fixtures/protocol-server.mjs
 
 ## 正文显示子包
 
-根目录 `npm run build` 检查主包宿主、子包宿主及浏览器 TypeScript 项目，再生成主包与显示包的运行产物。`src/client/` 保存正则编辑器、Raw 预览、可用性订阅和共享 Worker；正文包浏览器源码在 `packages/display-regex/src/client/`。既有资源 URL 保持不变，无需另装共享运行包。其余旧 JavaScript 按模块继续迁移。
+根目录 `npm run build` 检查主包宿主、子包宿主及浏览器 TypeScript 项目，再生成主包与显示包的运行产物。`src/client/` 保存客户端入口、折叠与滚动状态、正则编辑器、Raw 预览、可用性订阅和共享 Worker；正文包浏览器源码在 `packages/display-regex/src/client/`。既有资源 URL 保持不变，无需另装共享运行包。其余旧 JavaScript 按模块继续迁移。
 
 主包现在携带正文包，无需换装组合入口。子包未发布时，上述安装命令用本地子包满足依赖，沙盒使用本地 tarball 或构建快照；发布 manifest 保持精确版本。分别在根目录、`packages/display-regex` 和 `packages/bundle` 执行 `npm pack --dry-run` 检查清单。安装边界和发布顺序见[正文正则](api/DISPLAY_REGEX.md#安装与升级)。
 
