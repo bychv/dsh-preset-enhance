@@ -1,9 +1,15 @@
+import { randomUUID } from 'node:crypto';
+import { PRESET_DISPLAY_SERVICE, PRESET_DISPLAY_EVENT } from './display-api.mjs';
 import { readFile } from 'node:fs/promises';
 export const name = 'preset-display-regex';
 export const inject = ['webServer'];
-export function apply(ctx) {
+export async function apply(ctx) {
     const files = ['runtime.mjs', 'executor.mjs', 'worker.js',
         ...['display-regex', 'prompt-regex', 'macros', 'compaction'].map(n => 'regex/' + n + '.mjs')];
+    // Validate shipped resources before advertising the capability.
+    await Promise.all(files.map(file => readFile(new URL(file, import.meta.url))));
+    const capability = { apiVersion: 1, instance: randomUUID(), ready: false };
+    ctx.provide(PRESET_DISPLAY_SERVICE, capability);
     for (const file of files)
         ctx.effect(() => ctx.webServer.register({
             kind: 'exact', path: '/preset-enhance-display/' + file,
@@ -27,7 +33,12 @@ export function apply(ctx) {
                 return;
             }
             res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-            res.end('{"apiVersion":1}');
+            res.end(JSON.stringify(capability));
         },
     }), 'preset-display: status');
+    ctx.effect(() => {
+        capability.ready = true;
+        ctx.emit(PRESET_DISPLAY_EVENT, capability);
+        return () => { capability.ready = false; ctx.emit(PRESET_DISPLAY_EVENT, capability); };
+    }, 'preset-display: availability');
 }

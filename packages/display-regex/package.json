@@ -2,14 +2,19 @@
   "name": "dsh-preset-display-regex",
   "version": "0.3.5-alpha.1",
   "type": "module",
-  "description": "Optional assistant display regex for dsh-preset-enhance",
+  "description": "可选的助手正文正则显示替换",
   "author": "bychv <89071107+bychv@users.noreply.github.com>",
   "license": "MIT",
   "main": "./index.mjs",
   "exports": {
     ".": "./index.mjs",
     "./client": "./client.js",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./display-api": {
+      "types": "./display-api.d.mts",
+      "default": "./display-api.mjs"
+    },
+    "./locale/*": "./locale/*"
   },
   "files": [
     "index.mjs",
@@ -20,7 +25,11 @@
     "regex",
     "cordis.patch.yml",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "display-api.mjs",
+    "display-api.d.mts",
+    "icon.svg",
+    "locale"
   ],
   "dsh": {
     "bundle": {
@@ -43,5 +52,11 @@
   "engines": {
     "node": ">=22.19.0",
     "dsh": ">=0.2.1-0 <0.2.2"
+  },
+  "icon": "./icon.svg",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bychv/dsh-preset-enhance.git",
+    "directory": "packages/display-regex"
   }
 }

@@ -13,7 +13,7 @@
 
 ## 修改与验证
 
-宿主源码在 `src/**/*.mts`，发布产物在根目录及 `lib/`、`vendor/`。修改源码后运行 `npm run build` 更新产物，不只修改生成文件。客户端入口和工作台使用 `client.js`、`web/` 中的 JavaScript。
+宿主源码在 `src/**/*.mts`，发布产物在根目录及 `lib/`、`vendor/`。修改源码后运行 `npm run build` 更新产物，不只修改生成文件。正文包客户端、共享 Worker 和正则编辑模块源码位于各包的 `src/client/`；构建生成原路径产物。其余客户端入口和工作台仍包含 `client.js`、`web/` 中的手写 JavaScript。新增实现代码使用 TypeScript（`.ts` / `.mts`，需要 JSX 时使用 `.tsx`），包括宿主、客户端与 Worker；JavaScript 作为构建产物。修改已有 JavaScript 时按涉及模块逐步迁移，避免为局部改动一次性重写全仓。保留现有分包，优先整理包内文件；文件整理与迁移约定见 [文件整理与 TypeScript](.agents/notes/implemented/architecture/2026-10-12-package-layout-typescript.md)。
 
 选择能覆盖行为变化的测试；简单文档和图标调整检查链接、格式及打包即可，不必重复整套运行测试。跨协议、会话状态或生命周期改动应覆盖对应边界；使用沙盒时确认槽位，避免影响日常 DSH。
 

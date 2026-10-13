@@ -105,3 +105,10 @@
 .dsh-template-macros { max-height: 320px; overflow: auto; }
 .dsh-template-macros summary { overflow-wrap: anywhere; }
 .dsh-template-macros pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+
+.preview-raw .json-branch { margin: 0; padding: 0; border: 0; }
+.preview-raw .json-branch > summary, .preview-raw .json-leaf { padding: 2px 4px; }
+.preview-raw .json-toolbar { display: flex; gap: 8px; margin-bottom: 8px; }
+.preview-raw .json-toolbar button { padding: 3px 8px; font-size: 12px; }
+.preview-raw .json-more { padding: 1px 5px; margin: 0 5px; }
+.preview-raw summary:focus-visible, .preview-raw button:focus-visible { outline: 2px solid #44b5af; outline-offset: 2px; }

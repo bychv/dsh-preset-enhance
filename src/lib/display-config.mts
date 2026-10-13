@@ -1,3 +1,4 @@
+import { PRESET_DISPLAY_SERVICE, PRESET_DISPLAY_EVENT, type PresetDisplayCapability } from '../display-api.mjs';
 import { randomUUID, createHash } from 'node:crypto';
 import { buildChatDepths, readRegexScripts } from './prompt-regex.mjs';
 import type { PresetStore } from './store.mjs';
@@ -8,6 +9,20 @@ import type { PluginContext, HostRequest, HostResponse } from '../host-types.mjs
 export function installDisplayConfig(ctx: PluginContext, store: PresetStore,
   available: () => boolean, bindingOf: (state: PresetState, sessionId: string) => PresetBinding | undefined) {
   const instance = randomUUID();
+  const capability = () => {
+    const service = ctx.get?.<PresetDisplayCapability>(PRESET_DISPLAY_SERVICE);
+    return { apiVersion: 1 as const, available: available() && service?.apiVersion === 1 && service.ready === true,
+      instance: service?.instance ?? null };
+  };
+  const statusListeners = new Set<() => void>();
+  const notifyStatus = () => { for (const notify of statusListeners) notify(); };
+  ctx.on(PRESET_DISPLAY_EVENT, notifyStatus);
+  // Cordis exposes provided services only after their fiber activates. The
+  // optional dependency scope supplies the committed activation notification.
+  ctx.inject?.([PRESET_DISPLAY_SERVICE], scoped => {
+    notifyStatus();
+    scoped.effect(() => () => notifyStatus(), 'preset-enhance: display capability scope');
+  });
   const closers = new Set<() => void>();
   const snapshot = (state: PresetState, sessionId: string) => {
     const session = ctx.sessions.get(sessionId);
@@ -17,7 +32,8 @@ export function installDisplayConfig(ctx: PluginContext, store: PresetStore,
     const namespace = (record?.preset.extensions as Record<string, any> | undefined)?.['dsh-preset-enhance'] as Record<string, any> | undefined;
     const cached = state.sessions[sessionId];
     const value = { apiVersion: 1, instance, sessionId, presetId: record?.id ?? null,
-      enabled: namespace?.displayRegex?.enabled === true,
+      enabled: capability().available && namespace?.displayRegex?.enabled === true,
+      configuredEnabled: namespace?.displayRegex?.enabled === true, available: capability().available,
       scripts: record ? readRegexScripts(record.preset) : [],
       local: cached?.presetId === record?.id ? cached?.result.local ?? {} : {}, global: state.global,
       values: { user: 'User', char: 'Assistant', ...binding?.values },
@@ -47,12 +63,28 @@ export function installDisplayConfig(ctx: PluginContext, store: PresetStore,
           if (value.revision !== last) { last = value.revision; res.write!('data: ' + JSON.stringify(value) + '\n\n'); }
         } catch { close(); }
       };
+      const notify = () => { void store.read().then(send).catch(close); };
+      statusListeners.add(notify);
       const unsubscribe = store.subscribe(send);
       const timer = setInterval(() => { if (!available()) close(); else res.write!(': keepalive\n\n'); }, 15000);
-      const close = () => { if (closed) return; closed = true; clearInterval(timer); unsubscribe(); closers.delete(close); res.end(); };
+      const close = () => { if (closed) return; closed = true; clearInterval(timer); unsubscribe(); statusListeners.delete(notify); closers.delete(close); res.end(); };
       closers.add(close); res.on?.('close', close);
       try { send(await store.read()); } catch { close(); }
     },
   }), 'preset-enhance: display configuration');
+  for (const streaming of [false, true]) ctx.effect(() => ctx.webServer.register({
+    kind: 'exact', path: '/preset-enhance/api/display-status' + (streaming ? '-events' : ''),
+    handler: (req: HostRequest, res: HostResponse) => {
+      if (req.method !== 'GET') return json(res, 405, { error: 'Method not allowed' });
+      if (!streaming || !res.write) return json(res, 200, capability());
+      res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', 'x-accel-buffering': 'no' });
+      let closed = false;
+      const send = () => { if (!closed) res.write!('data: ' + JSON.stringify(capability()) + '\n\n'); };
+      const timer = setInterval(() => { if (!closed) res.write!(': keepalive\n\n'); }, 15000);
+      const close = () => { if (closed) return; closed = true; clearInterval(timer); statusListeners.delete(send); closers.delete(close); res.end(); };
+      statusListeners.add(send); closers.add(close); res.on?.('close', close); send();
+    },
+  }), 'preset-enhance: display availability');
   ctx.effect(() => () => { for (const close of [...closers]) close(); }, 'preset-enhance: display cleanup');
+  return { status: capability, subscribe(notify: () => void) { statusListeners.add(notify); return () => { statusListeners.delete(notify); }; } };
 }

@@ -67,32 +67,37 @@ class WorkerRegexRunner implements RegexRunner {
   }
 
   run(preparation: RegexPreparation): RegexPreparationResult {
+    const limits = preparation.channel === 'display' ? { ...this.limits,
+      timeoutMs: Math.min(this.limits.timeoutMs, 1500), maxRules: Math.min(this.limits.maxRules, 200),
+      maxTotalChars: Math.min(this.limits.maxTotalChars, 524288), maxOutputChars: Math.min(this.limits.maxOutputChars, 2097152),
+    } : this.limits;
     const scripts = preparation.scripts;
+    if (preparation.channel === 'display' && JSON.stringify(scripts).length > 2097152) throw new Error('正则配置超过上限');
     if (scripts.length === 0) {
       return { texts: preparation.segments.map(segment => segment.text), applied: [], local: { ...preparation.local },
         global: { ...preparation.global }, draws: preparation.draws, warnings: [], replacements: 0 };
     }
-    if (scripts.length > this.limits.maxRules) throw new Error('正则规则数 ' + scripts.length + ' 超过上限 ' + this.limits.maxRules);
+    if (scripts.length > limits.maxRules) throw new Error('正则规则数 ' + scripts.length + ' 超过上限 ' + limits.maxRules);
     if (preparation.seed === undefined) throw new Error('没有确定性种子，无法在 worker 中重放宏随机状态，因此不执行正则规则');
     let total = 0;
     for (const segment of preparation.segments) {
-      if (segment.text.length > this.limits.maxSegmentChars) throw new Error('单条文本超过 ' + this.limits.maxSegmentChars + ' 字符，未执行正则规则');
+      if (segment.text.length > limits.maxSegmentChars) throw new Error('单条文本超过 ' + limits.maxSegmentChars + ' 字符，未执行正则规则');
       total += segment.text.length;
     }
-    if (total > this.limits.maxTotalChars) throw new Error('文本总量超过 ' + this.limits.maxTotalChars + ' 字符，未执行正则规则');
+    if (total > limits.maxTotalChars) throw new Error('文本总量超过 ' + limits.maxTotalChars + ' 字符，未执行正则规则');
 
     const control = new Int32Array(new SharedArrayBuffer(CONTROL_SLOTS * 4));
     Atomics.store(control, 0, 0);
     Atomics.store(control, 1, -1);
     const { port1, port2 } = new MessageChannel();
-    const task: RegexWorkerTask = { ...preparation, limits: this.limits, control: control.buffer as SharedArrayBuffer };
+    const task: RegexWorkerTask = { ...preparation, limits: limits, control: control.buffer as SharedArrayBuffer };
     try {
       this.ensureWorker().postMessage({ task, port: port2 }, [port2 as unknown as ArrayBuffer]);
     } catch (error) {
       this.discard();
       throw new Error('正则执行未能启动：' + (error instanceof Error ? error.message : String(error)));
     }
-    const status = Atomics.wait(control, 0, 0, this.limits.timeoutMs);
+    const status = Atomics.wait(control, 0, 0, limits.timeoutMs);
     const reply = receiveMessageOnPort(port1)?.message as RegexWorkerReply | undefined;
     port1.close();
     if (status === 'timed-out') {
@@ -102,7 +107,7 @@ class WorkerRegexRunner implements RegexRunner {
         ? running.scriptName.trim()
         : (index >= 0 ? '第 ' + (index + 1) + ' 条规则' : '未知规则');
       this.discard();
-      throw new Error('正则执行超时（超过 ' + this.limits.timeoutMs + 'ms）：规则「' + name + '」，已终止本次处理且未发送改写结果');
+      throw new Error('正则执行超时（超过 ' + limits.timeoutMs + 'ms）：规则「' + name + '」，已终止本次处理且未发送改写结果');
     }
     if (reply === undefined) {
       this.discard();

@@ -1,10 +1,12 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
-    "rootDir": "packages/display-regex/src",
-    "outDir": "dist/display-package"
+    "rootDir": ".",
+    "outDir": "dist/display-package",
+    "declaration": true
   },
   "include": [
-    "packages/display-regex/src/**/*.mts"
+    "packages/display-regex/src/index.mts",
+    "packages/bundle/src/index.mts"
   ]
 }

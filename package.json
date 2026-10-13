@@ -21,7 +21,11 @@
     },
     "./package.json": "./package.json",
     "./locale/*": "./locale/*",
-    "./icon": "./icon.svg"
+    "./icon": "./icon.svg",
+    "./display-api": {
+      "types": "./display-api.d.mts",
+      "default": "./display-api.mjs"
+    }
   },
   "files": [
     "icon.svg",
@@ -38,7 +42,9 @@
     "README.md",
     "PRESET_FORMAT.md",
     "locale",
-    "docs"
+    "docs",
+    "display-api.mjs",
+    "display-api.d.mts"
   ],
   "dsh": {
     "bundle": {
@@ -56,11 +62,11 @@
   },
   "engines": {
     "node": ">=22.19.0",
-    "dsh": ">=0.1.5-rc.2 <0.1.6 || =0.1.6-alpha.2 || =0.1.7-alpha.1 || =0.1.7-alpha.2 || =0.1.7-rc.1 || =0.1.7-rc.2 || >=0.2.0-rc.1 <=0.2.1 || >=0.2.1-0 <0.2.2"
+    "dsh": ">=0.2.1-0 <0.2.2"
   },
   "scripts": {
     "build": "node scripts/build.mjs",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.display.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.display.json --noEmit && tsc -p tsconfig.browser.json --noEmit",
     "verify": "npm run typecheck && npm run build && node --test tests/*.test.mjs",
     "test": "node --test tests/*.test.mjs",
     "prepack": "npm run build",
@@ -74,5 +80,8 @@
     "@types/node": "^26.6.2",
     "typescript": "^7.0.2"
   },
-  "icon": "./icon.svg"
+  "icon": "./icon.svg",
+  "dependencies": {
+    "dsh-preset-display-regex": "0.3.5-alpha.1"
+  }
 }

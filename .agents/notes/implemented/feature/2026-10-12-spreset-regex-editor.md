@@ -21,3 +21,7 @@ Status: implemented
 ## 验证
 
 入口代码见 [regex-editor.js](../../../../web/regex-editor.js) 与 [spreset.js](../../../../web/spreset.js)；行为和实际宿主验证见[使用说明](../../../../docs/guides/WORKBENCH.md)与[测试记录](../../../../docs/testing/2026-10-12-DISPLAY_REGEX.md)。
+
+## 工作台补充
+
+工作台原有提示词正则卡片改为统一「正则配置」，提供提示词/正文总开关、规则通道复选框，以及切换通道的适用性和试运行。两个编辑器共用原有字段与保存路径；不是两份独立规则。regex-test 默认提示词，正文通道复用显示计划与受限 Worker，不保存变量；切换通道后忽略迟到结果。

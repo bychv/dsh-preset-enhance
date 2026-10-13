@@ -162,7 +162,7 @@ Raw 展示当前所选快照的完整请求 body，以实际交给传输层的 J
 
 2026-10-04：动态注册、普通/marker 绑定、配置与失败策略、锁外解析、取消/超时和字面槽位已实现。工作台加入 Raw、原文复制、同快照通知、工具续轮选择，以及默认最近两条和延迟 DOM 展开。准备失败会生成“未发送”记录，不显示旧请求冒充本次。
 
-代码入口：src/lib/dynamic-templates.mts、src/lib/request-preview.mts、web/request-preview.js；注册与引用沿用原模块。src/index.mts 接入准备流程和快照 API；已有 DeepSeek fetch bridge 在改写之后观察出站正文，没有叠加第二个 fetch 包装。
+代码入口：src/lib/dynamic-templates.mts、src/lib/request-preview.mts、src/client/request-preview.ts（构建到 web/request-preview.js）；注册与引用沿用原模块。src/index.mts 接入准备流程和快照 API；已有 DeepSeek fetch bridge 在改写之后观察出站正文，没有叠加第二个 fetch 包装。
 
 DeepSeek-预设增强的文本草稿共用实际序列化和 Beta 纯转换，并在可用时通过宿主 resolveCallConfig 读取默认生成参数。官方 Messages 和其他适配器未提供通用的无副作用序列化入口，发送前明确显示“适配器输入”，不复制一套猜测的官方序列化器；发送后可捕获 Chat/Messages 的最终正文。附件上传、尚未生成的宿主提示词和绕过当前 fetch 桥接的第三方传输仍以实际发送阶段为准；未捕获时不声称已确认出站。
 

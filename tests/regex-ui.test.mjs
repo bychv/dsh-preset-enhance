@@ -220,9 +220,10 @@ function editor(presetValue = basePreset(), fetchImpl) {
     return { ok: true, json: async () => ({ revision: 1 }) };
   });
   const script = readFileSync(new URL('../web/request-preview.js', import.meta.url), 'utf8') + '\n' + readFileSync(new URL('../web/editor.js', import.meta.url), 'utf8')
-    .replace(/^import .*;\r?\n/, '').replace('await guard(() => reload())();', '');
+    .replace(/^import .*;\r?\n/gm, '').replace('await guard(() => reload())();', '');
   const context = {
     URLSearchParams, structuredClone, console, fetch, __initialPreset: presetValue,
+    observeDisplayAvailability: notify => { context.notifyAvailability = notify; notify({ available: true }); return () => {}; },
     location: { search: '?sessionId=s' },
     localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
     setTimeout: () => 1, clearTimeout() {},
@@ -263,7 +264,7 @@ function editor(presetValue = basePreset(), fetchImpl) {
       previewWarnings: result => { show(result); return $('warnings').textContent; },
     };
   `, context);
-  return { ...context.regexUi, get, requests, nodes };
+  return { ...context.regexUi, get, requests, nodes, availability: value => context.notifyAvailability({ available: value }) };
 }
 
 test('the regex list shows name, order, enabled state, target and depth range', () => {
@@ -374,8 +375,8 @@ test('findRegex and replaceString are edited directly, the rest sits under 高�
   ] } }));
   ui.load(ui.preset());
   const box = ui.editorBox();
-  const find = box.children[4].children[1];
-  const replace = box.children[5].children[1];
+  const find = box.children.find(n => textOf(n.children[0] ?? {}) === '查找式 findRegex').children[1];
+  const replace = box.children.find(n => textOf(n.children[0] ?? {}) === '替换串 replaceString').children[1];
   assert.equal(find.value, 'x');
   assert.equal(replace.value, 'y');
   find.value = 'foo(';
@@ -402,7 +403,7 @@ test('regex edits ride the existing preset save', async () => {
   assert.equal(saved.preset.extensions.regex_scripts[0].scriptName, '新规则 1');
 });
 
-test('the request preview shows the same regex summary, and the card states the send-only scope', async () => {
+test('the request preview shows the prompt summary, and the card states both channels', async () => {
   const ui = editor();
   const warnings = ui.previewWarnings({
     messages: [], warnings: ['已有提示'],
@@ -412,9 +413,9 @@ test('the request preview shows the same regex summary, and the card states the 
   assert.match(warnings, /提示词正则：已启用 · 规则 3 条 · 本次命中：清理/);
   assert.match(warnings, /已有提示/);
   const html = readFileSync(new URL('../web/index.html', import.meta.url), 'utf8');
-  assert.match(html, /提示词正则只改写发送给模型的请求副本/);
-  assert.match(html, /不会改变聊天界面|聊天界面里已显示的内容不会变化/);
-  assert.match(html, /整段聊天正文不会写入服务端日志/);
+  assert.match(html, /提示词正则处理请求副本/);
+  assert.match(html, /正文正则处理聊天显示/);
+  assert.match(html, /id="regex-display-enabled"/);
   assert.match(html, /id="regex-test-text"/);
   assert.match(html, /id="regex-skipped"/);
 });
@@ -493,4 +494,68 @@ test('changing modes displays its own default or edited template without overwri
   ui.openDsh(info('plugin-mode')); assert.equal(ui.get('content').value, 'Edited plugin');
   ui.openDsh(info('untouched')); assert.equal(ui.get('content').value, 'Default untouched');
   assert.equal(ui.preset().dsh_system_prompt_templates.untouched, undefined);
+});
+
+
+test('workbench persists independent prompt/display switches and shared rule channels', async () => {
+  const p = basePreset({extensions:{regex_scripts:[rule({markdownOnly:false})],
+    'dsh-preset-enhance':{promptRegex:{enabled:true,includePrefill:true},displayRegex:{enabled:false,keep:'future'}},untouched:{keep:true}}});
+  const ui=editor(p);ui.load(ui.preset());
+  assert.equal(ui.get('regex-enabled').checked,true);assert.equal(ui.get('regex-display-enabled').checked,false);
+  ui.get('regex-display-enabled').checked=true;ui.get('regex-display-enabled').onchange();
+  const controls=ui.editorBox().children.find(n=>n.children.some(c=>c.children?.[1]?.id==='regex-rule-display'));
+  const display=controls.children.find(n=>n.children[1].id==='regex-rule-display').children[1];
+  const prompt=controls.children.find(n=>n.children[1].id==='regex-rule-prompt').children[1];
+  display.checked=true;display.onchange();prompt.checked=false;prompt.onchange();
+  await ui.savePreset();const saved=ui.requests.find(r=>r.action==='save');
+  assert.equal(saved.preset.extensions.regex_scripts[0].markdownOnly,true);
+  assert.equal(saved.preset.extensions.regex_scripts[0].promptOnly,false);
+  assert.equal(saved.preset.extensions['dsh-preset-enhance'].promptRegex.includePrefill,true);
+  assert.equal(saved.preset.extensions['dsh-preset-enhance'].promptRegex.enabled,true);
+  assert.equal(saved.preset.extensions['dsh-preset-enhance'].displayRegex.enabled,true);
+  assert.equal(saved.preset.extensions['dsh-preset-enhance'].displayRegex.keep,'future');
+  ui.load(saved.preset);assert.equal(ui.get('regex-display-enabled').checked,true);
+});
+
+test('workbench display trial selects assistant and discards a reply after changing channels', async () => {
+  let finish;const ui=editor(basePreset({extensions:{regex_scripts:[rule({markdownOnly:true})]}}),async()=>new Promise(resolve=>{finish=()=>resolve({ok:true,json:async()=>({channel:'display',depth:0,target:'assistant',notes:[],rules:[],result:{before:'a',after:'b',applied:[],changed:true}})});}));
+  ui.load(ui.preset());ui.get('regex-test-target').value='prefill';ui.get('regex-test-depth').value='-1';
+  ui.get('regex-test-channel').value='display';ui.get('regex-test-channel').onchange();
+  assert.equal(ui.get('regex-test-target').value,'assistant');assert.equal(ui.get('regex-test-target').disabled,true);assert.equal(ui.get('regex-test-depth').value,'0');
+  const pending=ui.get('regex-test-run').onclick();
+  ui.get('regex-test-channel').value='prompt';ui.get('regex-test-channel').onchange();finish();await pending;
+  assert.equal(ui.get('regex-test-target').disabled,false);assert.equal(ui.get('regex-test-note').textContent,'');
+});
+
+test('display regex-test uses display applicability without executing prompt-only rules or mutating variables', async () => {
+  const harness=await createHarness();try {
+    const p=presetWith([rule({id:'d',scriptName:'正文',findRegex:'/foo/g',replaceString:'bar',promptOnly:false,markdownOnly:true,placement:2}),rule({id:'p',scriptName:'提示词',findRegex:'bar',replaceString:'wrong',markdownOnly:false})],{enabled:false});
+    p.extensions['dsh-preset-enhance'].displayRegex={enabled:true};
+    const result=await test$(harness,p,{channel:'display',text:'foo',target:'user'});
+    assert.equal(result.statusCode,200);assert.equal(result.payload.channel,'display');assert.equal(result.payload.target,'assistant');assert.equal(result.payload.enabled,true);
+    assert.equal(result.payload.result.after,'bar');assert.deepEqual(result.payload.result.applied,['正文']);assert.equal(result.payload.rules[0].applicable,true);assert.equal(result.payload.rules[1].applicable,false);
+    assert.equal(result.payload.rules[1].reason,'未选择正文显示');assert.deepEqual(result.payload.notes,[]);
+    const prompt=await test$(harness,p,{channel:'prompt',target:'assistant',text:'foo'});assert.equal(prompt.payload.result.after,'foo');
+    p.extensions['dsh-preset-enhance'].displayRegex.enabled=false;
+    const off=await test$(harness,p,{channel:'display',text:'foo',depth:0});assert.equal(off.payload.result.after,'bar');assert.equal(off.payload.enabled,false);assert.match(off.payload.notes[0],/正文总开关/);
+  } finally {await harness.cleanup();}
+});
+
+ test('unavailable display package disables the switch without changing the persisted preference', async () => {
+  const p = basePreset({ extensions: { regex_scripts: [], 'dsh-preset-enhance': { displayRegex: { enabled: true }, promptRegex: { enabled: true } } } });
+  const ui = editor(p); ui.load(ui.preset());
+  ui.availability(false);
+  assert.equal(ui.get('regex-display-enabled').checked, false);
+  assert.equal(ui.get('regex-display-enabled').disabled, true);
+  assert.equal(ui.preset().extensions['dsh-preset-enhance'].displayRegex.enabled, true);
+  assert.equal(ui.get('regex-enabled').checked, true);
+  assert.equal(ui.dirty(), false);
+  ui.get('regex-display-enabled').checked = true; ui.get('regex-display-enabled').onchange();
+  assert.equal(ui.get('regex-display-enabled').checked, false);
+  ui.availability(true);
+  assert.equal(ui.get('regex-display-enabled').checked, true);
+  assert.equal(ui.get('regex-display-enabled').disabled, false);
+  ui.preset().extensions['dsh-preset-enhance'].displayRegex.enabled = false;
+  ui.availability(false); ui.availability(true);
+  assert.equal(ui.get('regex-display-enabled').checked, false);
 });

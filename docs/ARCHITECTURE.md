@@ -35,7 +35,7 @@ flowchart TD
 
 | 模块 | 职责 |
 | --- | --- |
-| `client.js`、`web/` | 侧边栏与会话入口，预设编辑、预览、工具管理和保存交互 |
+| `client.js`、`web/`，正则与 Raw 预览模块源码 `src/client/` | 侧边栏与会话入口，预设编辑、预览、工具管理和保存交互 |
 | `src/index.mts`、`src/mode.mts` | 插件入口、API、命令、请求拦截、预设模式与生命周期管理 |
 | `src/lib/store.mts`、`src/lib/preset-package.mts` | 状态持久化、版本校验、单文件导入导出 |
 | `src/lib/dsh-system-template.mts`、`src/lib/request-settings.mts`、`src/lib/buffered-response.mts` | 模式系统模板、动态 DSH 宏、请求参数与非流式响应接入 |
@@ -44,7 +44,7 @@ flowchart TD
 | `src/lib/connection.mts`、`src/lib/protocol.mts`、`src/lib/messages.mts` | 读取实际连接协议、记录协议观察结果、Messages 消息适配 |
 | `src/lib/deepseek-beta.mts`、`src/lib/toolcall-prefill.mts`、`src/lib/output-extractor.mts` | 请求匹配、预填充兼容、DSML 转换和实验性正文提取 |
 
-宿主侧以 `src/**/*.mts` 为源码，构建后生成发布包使用的 `index.mjs`、`mode.mjs` 和 `lib/*.mjs`；工作台与客户端入口使用 JavaScript。
+宿主侧以 `src/**/*.mts` 为源码，构建后生成发布包使用的 `index.mjs`、`mode.mjs` 和 `lib/*.mjs`；正文包的客户端、共享 Worker 和主包正则编辑模块使用 TypeScript，构建生成原路径下的 JavaScript；工作台其余客户端代码逐步迁移。包内文件入口见[包地图](../packages/README.md)。
 
 ### 启动与运行时启停
 
@@ -55,4 +55,6 @@ flowchart TD
 
 ## 可选正文显示包
 
-主包的 `display-config` 提供同登录边界的有效配置查询和保存后 SSE 更新，Store 仅在成功提交后通知；`display-regex` 与浏览器试运行复用无状态计算。`packages/display-regex` 独立注册客户端，读取 ChatSnapshot，匹配可见助手正文节点，在 Worker 中替换并借用宿主 MarkdownText 展示。显示根及订阅随生命周期释放，无法对应节点时回到宿主原文。`packages/bundle` 只负责组合安装。接口及边界见 [正文正则](api/DISPLAY_REGEX.md)。
+主包的 `display-config` 提供同登录边界的有效配置查询和保存后 SSE 更新，Store 仅在成功提交后通知；`display-regex` 与浏览器试运行复用无状态计算。`packages/display-regex` 独立注册客户端，读取 ChatSnapshot，匹配可见助手正文节点，在 Worker 中替换并借用宿主 MarkdownText 展示。显示根及订阅随生命周期释放，无法对应节点时回到宿主原文。主包依赖正文包，其 patch 在同一插件详情页注册两个运行条目，保留旧安装入口及数据。`packages/bundle` 保留为兼容入口。接口及边界见 [正文正则](api/DISPLAY_REGEX.md)。
+
+正文包通过公开的 `presetDisplayRegex` 能力及 `preset-display/availability` 事件报告资源就绪和生命周期退出。主包读取当前能力、推送可用性，工作台和 SPreset 的有效正文开关由可用性与预设偏好共同决定。分包退出先撤回就绪状态，客户端卸载恢复原文并终止 Worker；暂时停用不写回预设偏好。

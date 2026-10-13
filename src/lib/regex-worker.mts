@@ -1,11 +1,12 @@
 /**
- * Terminable worker entry for prompt-side regex.
+ * Terminable worker entry for request and workbench regex.
  *
  * Runs pure computation only: it never touches the store, the host services or the session log.
  * The main thread blocks on a shared control word, so a runaway rule can be terminated with
  * worker.terminate() instead of freezing the host.
  */
 import { parentPort } from 'node:worker_threads';
+import { planDisplayRegex } from './display-regex.mjs';
 import { createMacroContext } from './macros.mjs';
 import { planRegexScript, regexName, runRegexScriptDetailed } from './prompt-regex.mjs';
 import type { MacroContext, RegexScript, RegexWorkerReply, RegexWorkerTask } from './types.mjs';
@@ -41,10 +42,10 @@ function handle(message: { task: RegexWorkerTask; port: ReplyPort }): void {
       for (let index = 0; index < task.segments.length; index++) {
         const segment = task.segments[index];
         if (segment === undefined) continue;
-        const plan = planRegexScript(script, segment.depth);
+        const plan = task.channel === 'display' ? planDisplayRegex(script, segment.depth) : planRegexScript(script, segment.depth);
         if (!plan.runs || !plan.targets.includes(segment.target)) continue;
         const before = texts[index] ?? '';
-        const result = runRegexScriptDetailed(before, script, ctx);
+        const result = runRegexScriptDetailed(before, script, ctx, task.channel === 'display' ? { maxReplacements: task.limits.maxReplacements - replacements, maxOutputChars: task.limits.maxOutputChars } : undefined);
         if (!result.matched) continue;
         replacements += result.replacements;
         if (replacements > task.limits.maxReplacements) throw new Error('替换次数超过上限 ' + task.limits.maxReplacements);

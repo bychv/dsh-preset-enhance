@@ -1,3 +1,4 @@
+import { OUTPUT_EXTRACTION_PROMPT_TEMPLATE } from './output-extractor.mjs';
 import { validatePreset } from './preset.mjs';
 import { validateToolsSection } from './tool-presets.mjs';
 import type {
@@ -149,4 +150,21 @@ export function applyPackagePrefill(state: PresetState, record: PresetRecord): v
   state.prefixNonOfficialRemoveTools = prefill.removeNonOfficialTools;
   state.postToolPrefixMode = prefill.postToolPrefix.mode;
   state.postToolPrefixText = prefill.postToolPrefix.text;
+}
+
+/** Add a missing format prompt without overwriting an author's existing entry. */
+export function ensurePackageExtractionTemplate(preset: SillyTavernPreset, enabled: boolean, prefillOnly = false): boolean {
+  const identifier = 'dsh-output-extraction-template';
+  if (!enabled || preset.prompts.some(prompt => prompt.identifier === identifier)) return false;
+  if (prefillOnly && !preset.assistant_prefill && !(preset.prompt_order?.length ? preset.prompt_order : [{order:preset.prompts.map(p => ({identifier:p.identifier,enabled:p.enabled !== false}))}]).some(group => { const last = group.order.findLast(item => item.enabled !== false); return ['assistant','model'].includes(preset.prompts.find(p => p.identifier === last?.identifier)?.role ?? ''); })) return false;
+  preset.prompts.push({ identifier, name: '正文/工具调用提取格式（实验）', role: 'user',
+    content: OUTPUT_EXTRACTION_PROMPT_TEMPLATE, injection_position: 0 });
+  if (!preset.prompt_order?.length) preset.prompt_order = [{ character_id: 100001, order: preset.prompts.filter(p => p.identifier !== identifier).map(p => ({identifier:p.identifier, enabled:p.enabled !== false})) }];
+  for (const group of preset.prompt_order) {
+    if (group.order.some(item => item.identifier === identifier)) continue;
+    const history = group.order.findIndex(item => item.identifier === 'chatHistory');
+    const tail = group.order.findLastIndex(item => item.enabled !== false && ['assistant','model'].includes(preset.prompts.find(p => p.identifier === item.identifier)?.role ?? ''));
+    group.order.splice(history >= 0 ? history + 1 : tail >= 0 ? tail : group.order.length, 0, {identifier, enabled:true});
+  }
+  return true;
 }

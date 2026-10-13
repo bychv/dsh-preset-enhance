@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
-const element = tag => ({ tag, children: [], textContent: '', hidden: false,
+const element = tag => ({ tag, tagName: tag.toUpperCase(), querySelectorAll(selector) { return all(this).slice(1).filter(n=>n.tag===selector); }, children: [], textContent: '', hidden: false,
   append(...items) { this.children.push(...items); }, replaceChildren(...items) { this.children = items; },
   removeChild(item) { this.children.splice(this.children.indexOf(item), 1); }, get lastChild() { return this.children.at(-1); },
   get open() { return this._open ?? false; }, set open(value) { this._open = value; this.ontoggle?.(); } });
@@ -19,7 +19,7 @@ test('history collapses around depth injections; Raw structures and copies the s
   view.show({ id: 'one', source: 'wire', raw, messages, choices: [{ id: 'one', attempt: 1 }, { id: 'two', attempt: 1 }] });
   const shown = () => all(dom.output).filter(n => n.tag === 'pre').map(n => n.textContent);
   assert.deepEqual(shown(), ['depth', 'h3', 'h4', 'prefix']);
-  dom.rawButton.onclick(); assert.ok(all(dom.raw).some(n => n.tag === 'summary' && n.textContent === '"messages": 数组 [6]')); assert.equal(dom.output.hidden, true);
+  dom.rawButton.onclick(); assert.ok(all(dom.raw).some(n => n.tag === 'summary' && n.textContent === '"messages": [ 6 ]')); assert.equal(dom.output.hidden, true);
   await dom.copyButton.onclick(); assert.equal(copied, raw);
   dom.rawButton.onclick();
   all(dom.output).find(n => n.tag === 'button' && n.textContent === '展开全部').onclick();
@@ -46,15 +46,13 @@ test('JSON branches are lazy, collapsible and paginated; copying keeps whitespac
   f.view.show({ raw, messages: [] }); f.dom.rawButton.onclick();
   assert.ok(all(f.dom.raw).some(n => n.textContent === '9223372036854775807'));
   const list = all(f.dom.raw).find(n => n.tag === 'details' && n.children[0].textContent.includes('"messages"'));
-  assert.equal(list.children.length, 1);
-  list.open = true;
+  assert.equal(list.open, true);
   assert.equal(all(list).filter(n => n.tag === 'details').length, 51);
   all(list).find(n => n.tag === 'button').onclick();
   assert.equal(all(list).filter(n => n.tag === 'details').length, 101);
   const child = all(list).find(n => n.tag === 'details' && n.children[0].textContent.startsWith('[0]'));
   child.open = true; assert.ok(all(child).some(n => n.textContent === '"message 0"'));
-  list.open = false; assert.equal(list.children.length, 1);
-  list.open = true; assert.equal(all(list).filter(n => n.tag === 'details').length, 51);
+  list.open = false; assert.equal(list.children.length, 1); list.open = true; assert.equal(all(list).filter(n => n.tag === 'details').length, 51);
   await f.dom.copyButton.onclick(); assert.equal(f.copied(), raw);
   f.view.show({ raw: '{"other":true}', messages: [] });
   assert.ok(!all(f.dom.raw).some(n => n.textContent.includes('messages')));
@@ -66,9 +64,9 @@ test('long strings use text nodes, invalid JSON falls back to original text, una
   const literal = '<script>bad()</script>\n' + 'long'.repeat(100);
   const raw = JSON.stringify({ body: literal, values: [false, null, '', {}, []] });
   f.view.show({ raw, messages: [] }); f.dom.rawButton.onclick();
-  const text = all(f.dom.raw).find(n => n.tag === 'details' && n.children[0].textContent.includes('字符串'));
-  assert.equal(text.children.length, 1); text.open = true;
-  assert.equal(text.children[1].textContent, literal);
+  const toggle = all(f.dom.raw).find(n => n.tag === 'button' && n.textContent.startsWith('展开 '));
+  assert.ok(toggle); toggle.onclick();
+  assert.ok(all(f.dom.raw).some(n=>n.textContent===literal));
   await f.dom.copyButton.onclick(); assert.equal(f.copied(), raw);
   f.view.show({ raw: '{ incomplete', messages: [] });
   assert.ok(all(f.dom.raw).some(n => n.tag === 'pre' && n.textContent === '{ incomplete'));
@@ -76,3 +74,19 @@ test('long strings use text nodes, invalid JSON falls back to original text, una
   assert.equal(f.dom.copyButton.disabled, true);
   f.view.clear(); assert.equal(f.dom.raw.children.length, 0);
 });
+
+ test('Raw shows tool schemas, protocol history and controls from the selected snapshot only', async () => {
+  const f=rawFixture();
+  const raw=JSON.stringify({tools:[{type:'function',function:{name:'read',parameters:{type:'object',properties:{path:{type:'string'}}}}}],tool_choice:'auto',parallel_tool_calls:false,messages:[{role:'assistant',tool_calls:[{id:'c1',function:{name:'read',arguments:'{"path":"a"}'}}]},{role:'tool',tool_call_id:'c1',content:'result'}]});
+  f.view.show({raw,messages:[]});f.dom.rawButton.onclick();
+  assert.ok(all(f.dom.raw).some(n=>n.textContent.includes('原生工具 1 个')));
+  assert.ok(all(f.dom.raw).some(n=>n.textContent.includes('· read')));
+  all(f.dom.raw).find(n=>n.tag==='button'&&n.textContent==='展开一层').onclick();
+  assert.ok(all(f.dom.raw).some(n=>n.textContent.includes('parameters')));
+  await f.dom.copyButton.onclick();assert.equal(f.copied(),raw);
+  f.view.show({raw:JSON.stringify({messages:[{role:'user',content:[{type:'tool_result',tool_use_id:'m1',content:'ok'}]}]}),messages:[]});
+  assert.ok(all(f.dom.raw).some(n=>n.textContent.includes('tools 未发送')));
+  assert.ok(!all(f.dom.raw).some(n=>n.textContent.includes('· read')));
+  all(f.dom.raw).find(n=>n.tag==='button'&&n.textContent==='收起全部').onclick();
+  assert.equal(all(f.dom.raw).filter(n=>n.tag==='details').length,1);
+ });

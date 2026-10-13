@@ -56,6 +56,7 @@ export interface RegexLimits {
 
 /** One preparation handed to the worker: every segment of a single compilation. */
 export interface RegexPreparation {
+  channel?: 'prompt' | 'display';
   segments: RegexSegment[];
   scripts: readonly RegexScript[];
   seed?: string;

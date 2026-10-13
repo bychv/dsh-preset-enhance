@@ -170,9 +170,9 @@
     }
     const focus = () => { void refresh(); };
     window.addEventListener('focus', focus);
-    let timer, events;
-    const start = () => { stopped = false; events?.close(); if (typeof EventSource !== 'undefined') { events = new EventSource('/preset-enhance/api/template-events'); events.onmessage = () => { void refresh(); }; } clearInterval(timer); timer = setInterval(() => { if (!document.hidden) void refresh(); }, 30000); void refresh(); };
-    window.addEventListener('pagehide', () => { stopped = true; clearInterval(timer); events?.close(); });
+    let timer, unsubscribeEvents, eventGeneration = 0;
+    const start = () => { stopped = false; unsubscribeEvents?.(); const generation = ++eventGeneration; void import('./display-availability.js').then(({ observeTemplateEvents }) => { if (!stopped && generation === eventGeneration) unsubscribeEvents = observeTemplateEvents(() => { void refresh(); }); }).catch(() => {}); clearInterval(timer); timer = setInterval(() => { if (!document.hidden) void refresh(); }, 30000); void refresh(); };
+    window.addEventListener('pagehide', () => { stopped = true; clearInterval(timer); unsubscribeEvents?.(); });
     window.addEventListener('pageshow', start);
     start();
     render(); void refresh();

@@ -62,7 +62,7 @@ test('store observers see only committed writes, share a path and dispose indepe
 test('authenticated display config excludes message text, streams committed changes and closes',async()=>{
   const dir=await mkdtemp(join(tmpdir(),'display-api-')),store=new PresetStore(join(dir,'state.json'));
   const routes=new Map(),cleanup=[];
-  const ctx={sessions:{get:id=>id==='s'?{deriveMessages:()=>[{id:'m',role:'assistant',content:[{type:'text',text:'PRIVATE_HISTORY'}]}]}:null},webServer:{register:r=>{routes.set(r.path,r.handler);return ()=>routes.delete(r.path);}},effect(fn){const stop=fn();if(stop)cleanup.push(stop);}};
+  const ctx={on(){}, get:()=>({apiVersion:1,instance:'fixture',ready:true}), sessions:{get:id=>id==='s'?{deriveMessages:()=>[{id:'m',role:'assistant',content:[{type:'text',text:'PRIVATE_HISTORY'}]}]}:null},webServer:{register:r=>{routes.set(r.path,r.handler);return ()=>routes.delete(r.path);}},effect(fn){const stop=fn();if(stop)cleanup.push(stop);}};
   await store.transaction(s=>{s.revision=1;s.presets=[{id:'p',name:'fixture',preset:{prompts:[{content:'PRIVATE_PRESET'}],extensions:{regex_scripts:[rule()], 'dsh-preset-enhance':{displayRegex:{enabled:true}}}}}];});
   installDisplayConfig(ctx,store,()=>true,()=>({presetId:'p',enabled:true}));
   const response=()=>{const res=new EventEmitter();res.output='';res.writeHead=(code,headers)=>{res.code=code;res.headers=headers;};res.write=t=>{res.output+=t;};res.end=t=>{res.ended=true;res.output+=t??'';};return res;};

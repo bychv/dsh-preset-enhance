@@ -2,17 +2,18 @@
 import { createMacroContext } from './macros.mjs';
 import { regexPlacement, planRegexScript, runRegexScriptDetailed } from './prompt-regex.mjs';
 export function planDisplayRegex(script, depth) {
+    const placement = regexPlacement(script.placement);
+    const base = { targets: placement.targets.filter(t => t === 'assistant'), unsupportedPlacements: placement.unsupported };
     if (script.disabled === true)
-        return { runs: false, reason: '已停用' };
+        return { ...base, runs: false, supported: true, reason: '已停用' };
     if (script.markdownOnly !== true)
-        return { runs: false, reason: '未选择正文显示' };
-    if (!regexPlacement(script.placement).targets.includes('assistant'))
-        return { runs: false, reason: '正文仅支持模型输出' };
+        return { ...base, runs: false, supported: false, reason: '未选择正文显示' };
+    if (!base.targets.length)
+        return { ...base, runs: false, supported: false, reason: '正文仅支持模型输出' };
     if (depth === undefined && ((script.minDepth ?? -1) >= 0 || (script.maxDepth ?? -1) >= 0))
-        return { runs: false, reason: '历史深度尚不可用' };
+        return { ...base, runs: false, supported: true, reason: '历史深度尚不可用' };
     // Compile validation is shared, while channel selection remains independent.
-    const checked = planRegexScript({ ...script, promptOnly: true }, depth ?? 0);
-    return { runs: checked.runs, reason: checked.reason };
+    return { ...planRegexScript({ ...script, promptOnly: true }, depth ?? 0), ...base };
 }
 export function transformDisplayText(task) {
     if (task.scripts.length > 200 || task.texts.some(t => typeof t !== 'string') || task.texts.reduce((n, t) => n + t.length, 0) > 524288)

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Build the host-side TypeScript sources into the published JavaScript layout.
+// Build host and browser TypeScript sources into the published JavaScript layout.
 //
 // Sources live in src/**/*.mts and compile to dist/**, then this script copies the
 // emitted files back to the package root so the published layout (and every
@@ -57,6 +57,8 @@ try {
 
   execFileSync(process.execPath, [join(root, 'node_modules', 'typescript', 'bin', 'tsc'), '-p', join(root, 'tsconfig.display.json')], { cwd: root, stdio: 'inherit' });
 
+  execFileSync(process.execPath, [join(root, 'node_modules', 'typescript', 'bin', 'tsc'), '-p', join(root, 'tsconfig.browser.json')], { cwd: root, stdio: 'inherit' });
+
   const emit = async (from, to) => {
     await mkdir(dirname(to), { recursive: true });
     await cp(from, to, { force: true });
@@ -67,11 +69,34 @@ try {
       await emit(join(dist, entry.name), join(root, entry.name));
     }
   }
-  await emit(join(dist, 'display-package', 'index.mjs'), join(root, 'packages', 'display-regex', 'index.mjs'));
+  await emit(join(dist, 'display-package', 'packages', 'display-regex', 'src', 'index.mjs'), join(root, 'packages', 'display-regex', 'index.mjs'));
   for (const file of ['display-regex', 'prompt-regex', 'macros', 'compaction']) {
     await emit(join(dist, 'lib', file + '.mjs'), join(root, 'packages', 'display-regex', 'regex', file + '.mjs'));
   }
-  await emit(join(root, 'web', 'regex-worker.js'), join(root, 'packages', 'display-regex', 'worker.js'));
+  const browser = join(dist, 'browser');
+  const { readFile, writeFile } = await import('node:fs/promises');
+  for (const file of ['runtime.mjs', 'executor.mjs', 'client.js']) {
+    const source = join(browser, 'packages', 'display-regex', 'src', 'client', file);
+    let text = await readFile(source, 'utf8');
+    if (file === 'client.js') text = text.replace("import('./runtime.mjs')", "import('/preset-enhance-display/runtime.mjs')").replace(/export \{\};?\s*$/, '');
+    await writeFile(join(root, 'packages', 'display-regex', file), text);
+  }
+  for (const file of ['display-availability.js', 'regex-editor.js', 'request-preview.js']) {
+    await emit(join(browser, 'src', 'client', file), join(root, 'web', file));
+  }
+  // Request preview remains a classic script loaded before the workbench module.
+  await writeFile(join(root, 'web', 'request-preview.js'), (await readFile(join(browser, 'src', 'client', 'request-preview.js'), 'utf8')).replace(/^export \{\};?\s*$/gm, ''));
+  const worker = (await readFile(join(browser, 'src', 'client', 'worker', 'regex-worker.js'), 'utf8')).replace("'../../lib/display-regex.mjs'", "'./regex/display-regex.mjs'");
+  await writeFile(join(root, 'web', 'regex-worker.js'), worker);
+  await writeFile(join(root, 'packages', 'display-regex', 'worker.js'), worker);
+  await emit(join(dist, 'display-package', 'src', 'display-api.d.mts'), join(root, 'display-api.d.mts'));
+  await emit(join(dist, 'display-package', 'src', 'display-api.d.mts'), join(root, 'packages', 'display-regex', 'display-api.d.mts'));
+  await emit(join(dist, 'display-api.mjs'), join(root, 'packages', 'display-regex', 'display-api.mjs'));
+  // The host source's relative import is adjusted to the published package-local contract.
+  const displayEntry = join(root, 'packages', 'display-regex', 'index.mjs');
+  await writeFile(displayEntry, (await readFile(displayEntry, 'utf8')).replace("'../../../src/display-api.mjs'", "'./display-api.mjs'"));
+  await emit(join(dist, 'display-package', 'packages', 'bundle', 'src', 'index.mjs'), join(root, 'packages', 'bundle', 'index.mjs'));
+  for (const pkg of ['bundle', 'display-regex']) await emit(join(root, 'icon.svg'), join(root, 'packages', pkg, 'icon.svg'));
   await emit(join(root, 'LICENSE'), join(root, 'packages', 'display-regex', 'LICENSE'));
   // The public template contract is self-contained: consumers need no host/internal types.
   await emit(join(root, 'src', 'template-api.d.mts'), join(root, 'templates.d.mts'));
@@ -87,7 +112,7 @@ try {
     await cp(vendorDist, join(root, 'vendor'), { recursive: true, force: true });
   }
 
-  console.log('build: emitted index.mjs, mode.mjs, lib/*.mjs and vendor/** from src/**/*.mts (clean typecheck)');
+  console.log('build: emitted host and browser artifacts from TypeScript (clean typecheck)');
 } finally {
   await unlink(lockPath).catch(() => {});
 }

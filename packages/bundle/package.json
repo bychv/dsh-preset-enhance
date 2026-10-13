@@ -8,7 +8,9 @@
     "index.mjs",
     "cordis.patch.yml",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "icon.svg",
+    "locale"
   ],
   "dependencies": {
     "dsh-preset-enhance": "0.3.5-alpha.1",
@@ -18,5 +20,22 @@
     "bundle": {
       "patch": "./cordis.patch.yml"
     }
+  },
+  "description": "预设增强与可选正文正则",
+  "icon": "./icon.svg",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bychv/dsh-preset-enhance.git",
+    "directory": "packages/bundle"
+  },
+  "homepage": "https://github.com/bychv/dsh-preset-enhance",
+  "exports": {
+    ".": "./index.mjs",
+    "./package.json": "./package.json",
+    "./locale/*": "./locale/*"
+  },
+  "engines": {
+    "node": ">=22.19.0",
+    "dsh": ">=0.2.1-0 <0.2.2"
   }
 }

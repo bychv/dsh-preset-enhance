@@ -7,7 +7,7 @@ import { Readable } from 'node:stream';
 import { apply } from '../index.mjs';
 import { PresetStore } from '../lib/store.mjs';
 import { decodePresetDocument, encodePresetPackage, attachPrefillSettings,
-  applyPackagePrefill, validatePresetPackage, validateToolsPackage } from '../lib/preset-package.mjs';
+  applyPackagePrefill, ensurePackageExtractionTemplate, validatePresetPackage, validateToolsPackage } from '../lib/preset-package.mjs';
 import { exportToolsSection, remapToolPackage, TOOL_GROUP_LIMIT, TOOL_PRESET_LIMIT,
   TOOL_GROUP_MEMBER_LIMIT, TOOL_PRESET_RULE_LIMIT } from '../lib/tool-presets.mjs';
 
@@ -274,7 +274,7 @@ test('an explicitly exported tools section carries only the associated preset an
   assert.deepEqual(encodePresetPackage({ name: '分享', preset: prompt() }, state, empty).tools, empty);
 });
 
-test('package API imports, edits and exports durably; applies settings only on explicit action', async () => {
+test('package API imports, edits and exports durably; restores prefill settings atomically on import', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-package-'));
   const file = join(dir, 'state.json'), store = new PresetStore(file), disposers = [];
   let handler;
@@ -302,11 +302,14 @@ test('package API imports, edits and exports durably; applies settings only on e
     const { id } = await request({ action: 'import', document: source, name: 'filename' });
     const imported = await store.read();
     assert.equal(imported.selectedPresetId, id);
-    assert.equal(imported.deepseekBetaPrefix, false);
+    assert.equal(imported.deepseekBetaPrefix, true);
+    assert.equal(imported.prefixOutputExtraction, true);
+    assert.equal(imported.postToolPrefixText, source.prefill.postToolPrefix.text);
+    assert.ok(imported.presets[0].preset.prompts.some(p=>p.identifier==='dsh-output-extraction-template'));
     assert.deepEqual(imported.modeToolPolicies, {});
     assert.deepEqual((await request()).presets[0].sharePackage, source);
     const exported = await request({ action: 'export-package', id });
-    assert.deepEqual(exported, source);
+    assert.deepEqual(exported, {...source,preset:{...source.preset,data:imported.presets[0].preset}});
     assert.equal((await store.read()).revision, imported.revision);
     await request({ action: 'save', id, name: 'Edited', preset: { ...prompt(), assistant_prefill: 'Changed' } });
     const edited = await request({ action: 'export-package', id });
@@ -334,7 +337,9 @@ test('package API imports, edits and exports durably; applies settings only on e
     const withTools = { ...packet(), tools: toolPack() };
     const toolsImport = await request({ action: 'import', document: withTools, name: 'tools-package' });
     assert.deepEqual((await store.read()).presets.find(record => record.id === toolsImport.id).sharePackage, withTools);
-    assert.deepEqual(await request({ action: 'export-package', id: toolsImport.id }), withTools);
+    const toolsExport = await request({ action: 'export-package', id: toolsImport.id });
+    const expectedData = structuredClone(withTools.preset.data);ensurePackageExtractionTemplate(expectedData,true);
+    assert.deepEqual(toolsExport, {...withTools,preset:{...withTools.preset,data:expectedData}});
     const afterToolsImport = await store.read();
     assert.deepEqual(afterToolsImport.toolGroups ?? [], []);
     assert.deepEqual(afterToolsImport.toolPresets ?? [], []);
@@ -355,10 +360,32 @@ test('package API imports, edits and exports durably; applies settings only on e
     const legacy = await request({ action: 'import', document: prompt(), name: 'Legacy' });
     assert.equal((await store.read()).presets.find(record => record.id === legacy.id).sharePackage, undefined);
     const newExport = await request({ action: 'export-package', id: legacy.id });
-    assert.equal(newExport.prefill.postToolPrefix.text, 'Updated');
+    assert.equal(newExport.prefill.postToolPrefix.text, withTools.prefill.postToolPrefix.text);
+    const noPrefill={...packet(),prefill:null};
+    const settingsBefore=(await store.read());
+    await request({action:'import',document:noPrefill});
+    assert.equal((await store.read()).postToolPrefixText,settingsBefore.postToolPrefixText);
+    const disabled={...packet(),prefill:{...packet().prefill,enabled:false,toolCalls:false,extractOutput:false,removeNonOfficialTools:true,postToolPrefix:{mode:'inherit',text:''}}};
+    const off=await request({action:'import',document:disabled});
+    const offState=await new PresetStore(file).read();
+    assert.equal(offState.deepseekBetaPrefix,false);assert.equal(offState.prefixToolCalls,false);assert.equal(offState.prefixOutputExtraction,false);assert.equal(offState.postToolPrefixText,'');
+    assert.deepEqual(offState.presets.find(p=>p.id===off.id).preset,disabled.preset.data);
     assert.deepEqual(newExport.tools.presets, []);
   } finally {
     for (const dispose of disposers.reverse()) dispose();
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('extraction linkage preserves edited templates and package fields through import/save/export', () => {
+ const data=prompt();data.dsh_system_prompt_enabled=false;data.dsh_system_prompt_templates={standard:''};data.dsh_request={max_tokens:0,stream:false};
+ data.extensions={...data.extensions,regex_scripts:[{id:'r',disabled:true,findRegex:'/x/g',future:0}],SPreset:{unknown:1},'dsh-preset-enhance':{displayRegex:{enabled:false},templateBindings:{fixture:{providerId:'fixture',templateId:'body',templateVersion:'1',mode:'linked-dynamic',config:{empty:''}}},autoTemplateDisabled:['fixture']}};
+ const before=structuredClone(data);assert.equal(ensurePackageExtractionTemplate(data,true),true);
+ const format=data.prompts.find(p=>p.identifier==='dsh-output-extraction-template');format.content='edited';
+ assert.equal(ensurePackageExtractionTemplate(data,true),false);assert.equal(format.content,'edited');
+ const encoded=encodePresetPackage({name:'fixture',preset:data},settings());const decoded=decodePresetDocument(encoded);
+ assert.deepEqual(decoded.preset.extensions,before.extensions);assert.deepEqual(decoded.preset.dsh_request,before.dsh_request);assert.deepEqual(decoded.preset.dsh_system_prompt_templates,before.dsh_system_prompt_templates);assert.equal(decoded.preset.dsh_system_prompt_enabled,false);
+ assert.equal(decoded.preset.prompts.filter(p=>p.identifier===format.identifier).length,1);
+ const plain=prompt();delete plain.assistant_prefill;assert.equal(ensurePackageExtractionTemplate(plain,true,true),false);
+ const unordered={prompts:[{identifier:'off',role:'system',enabled:false},{identifier:'prefix',role:'assistant',content:'prefix'}]};assert.equal(ensurePackageExtractionTemplate(unordered,true,true),true);assert.equal(unordered.prompt_order[0].order.find(p=>p.identifier==='off').enabled,false);
 });

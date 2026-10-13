@@ -4,13 +4,14 @@ import { regexPlacement, planRegexScript, runRegexScriptDetailed } from './promp
 import type { RegexScript } from './types.mjs';
 
 export function planDisplayRegex(script: RegexScript, depth?: number) {
-  if (script.disabled === true) return { runs: false, reason: '已停用' };
-  if (script.markdownOnly !== true) return { runs: false, reason: '未选择正文显示' };
-  if (!regexPlacement(script.placement).targets.includes('assistant')) return { runs: false, reason: '正文仅支持模型输出' };
-  if (depth === undefined && ((script.minDepth ?? -1) >= 0 || (script.maxDepth ?? -1) >= 0)) return { runs: false, reason: '历史深度尚不可用' };
+  const placement = regexPlacement(script.placement);
+  const base = { targets: placement.targets.filter(t => t === 'assistant'), unsupportedPlacements: placement.unsupported };
+  if (script.disabled === true) return { ...base, runs: false, supported: true, reason: '已停用' };
+  if (script.markdownOnly !== true) return { ...base, runs: false, supported: false, reason: '未选择正文显示' };
+  if (!base.targets.length) return { ...base, runs: false, supported: false, reason: '正文仅支持模型输出' };
+  if (depth === undefined && ((script.minDepth ?? -1) >= 0 || (script.maxDepth ?? -1) >= 0)) return { ...base, runs: false, supported: true, reason: '历史深度尚不可用' };
   // Compile validation is shared, while channel selection remains independent.
-  const checked = planRegexScript({ ...script, promptOnly: true }, depth ?? 0);
-  return { runs: checked.runs, reason: checked.reason };
+  return { ...planRegexScript({ ...script, promptOnly: true }, depth ?? 0), ...base };
 }
 export interface DisplayTask {
   texts: string[]; scripts: RegexScript[]; channel?: 'prompt' | 'display';

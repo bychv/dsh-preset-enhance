@@ -3,14 +3,14 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 const script = readFileSync(new URL('../web/request-preview.js', import.meta.url), 'utf8') + '\n' + readFileSync(new URL('../web/editor.js', import.meta.url), 'utf8')
-  .replace(/^import .*;\r?\n/, '').replace('await guard(() => reload())();', '');
+  .replace(/^import .*;\r?\n/gm, '').replace('await guard(() => reload())();', '');
 function editor(storage = new Map(), fetch = async () => { throw new Error('offline'); }) {
   const nodes = new Map();
   const node = () => ({ checked: false, value: '', dataset: {}, style: {}, hidden: false,
     classList: { toggle() {}, add() {}, remove() {} }, append() {}, replaceChildren() {},
     addEventListener() {}, querySelector: () => node(), querySelectorAll: () => [], setAttribute() {} });
   const get = id => { if (!nodes.has(id)) nodes.set(id, node()); return nodes.get(id); };
-  const context = { URLSearchParams, structuredClone, console, fetch,
+  const context = { observeDisplayAvailability: notify => { notify({ available: true }); return () => {}; }, URLSearchParams, structuredClone, console, fetch,
     location: { search: '?sessionId=s' },
     localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) },
     setTimeout: () => 1, clearTimeout() {},
@@ -40,7 +40,6 @@ function editor(storage = new Map(), fetch = async () => { throw new Error('offl
     change(value) { toolDraft.policy.read = value; markToolDirty(); },
     setPreset(value) { preset = value; selectedPrompt = order()[0]?.identifier ?? ''; renderList(); },
     prefill(value) { state.prefixOutputExtraction = value; },
-    autoExtraction: () => ensurePrefillExtractionTemplate(),
     showImportNotice: () => showImportedExtractionNotice(),
     hideImportNotice: () => hidePresetNotice(),
     notice: () => ({ hidden: $('preset-notice').hidden, kind: $('preset-notice').dataset.kind }),
@@ -109,56 +108,6 @@ test('failed keepalive keeps a recoverable draft', async () => {
   assert.equal(recovered.draft().dirty, true);
 });
 
-test('importing a prefill preset with extraction on adds and positions the extraction prompt', () => {
-  const ui = editor();
-  ui.prefill(true);
-  ui.setPreset({
-    prompts: [
-      { identifier: 'chatHistory', marker: true },
-      { identifier: 'lead', role: 'system', content: 'sys' },
-      { identifier: 'tail', role: 'assistant', content: 'Continue:' },
-    ],
-    prompt_order: [{ character_id: '100001', order: [
-      { identifier: 'lead', enabled: true },
-      { identifier: 'chatHistory', enabled: true },
-      { identifier: 'tail', enabled: true },
-    ] }],
-  });
-  assert.equal(ui.autoExtraction(), true, 'a prefill preset with extraction on gets the prompt');
-  assert.equal(ui.prompt()?.identifier, 'dsh-output-extraction-template');
-  assert.equal(ui.prompt()?.content, 'format');
-  const ids = ui.identifiers();
-  assert.equal(ids[ids.indexOf('chatHistory') + 1], 'dsh-output-extraction-template',
-    'it is placed right after the chat history');
-  // Idempotent: the same import shape again must not add a second entry.
-  assert.equal(ui.autoExtraction(), false);
-  assert.equal(ui.identifiers().filter(id => id === 'dsh-output-extraction-template').length, 1);
-});
-
-test('the extraction prompt is not added when extraction is off or the preset does not prefill', () => {
-  const off = editor();
-  off.prefill(false);
-  off.setPreset({
-    prompts: [{ identifier: 'chatHistory', marker: true }, { identifier: 'tail', role: 'assistant', content: 'x' }],
-    prompt_order: [{ character_id: '100001', order: [
-      { identifier: 'chatHistory', enabled: true }, { identifier: 'tail', enabled: true },
-    ] }],
-  });
-  assert.equal(off.autoExtraction(), false, 'extraction off means no insertion');
-  assert.equal(off.prompt(), undefined);
-
-  const notPrefill = editor();
-  notPrefill.prefill(true);
-  notPrefill.setPreset({
-    prompts: [{ identifier: 'chatHistory', marker: true }, { identifier: 'u', role: 'user', content: 'x' }],
-    prompt_order: [{ character_id: '100001', order: [
-      { identifier: 'chatHistory', enabled: true }, { identifier: 'u', enabled: true },
-    ] }],
-  });
-  assert.equal(notPrefill.autoExtraction(), false, 'a preset that does not end on an assistant turn is left alone');
-  assert.equal(notPrefill.prompt(), undefined);
-});
-
 test('the auto-inserted extraction prompt is announced to the user', () => {
   const ui = editor();
   // The DOM stub starts elements visible, so drive the clearing path explicitly instead of
@@ -207,4 +156,19 @@ test('reopening the editor shows the session preset before the global default', 
   binding = { enabled: false, presetId: '' };
   await ui.reloadSelection();
   assert.equal(ui.selected(), 'B');
+});
+
+test('import waits for an old global save and reloads restored controls without resaving the package', async () => {
+ const calls=[];let release;const waiting=new Promise(resolve=>{release=resolve;});
+ const ui=editor(new Map(),async(_url,options)=>{
+  const body=options?.body?JSON.parse(options.body):null;calls.push(body);
+  return {ok:true,json:async()=>body?{id:'B',revision:3,prefillApplied:true,extractionTemplateAdded:false}:{revision:3,presets:[],selectedPresetId:'B',binding:{presetId:'B'},deepseekBetaPrefix:true,prefixToolCalls:true,prefixOutputExtraction:true,prefixNonOfficialRemoveTools:false,postToolPrefixMode:'custom',postToolPrefixText:'restored',toolCatalogs:{}}};
+ });
+ ui.selectionSetup(waiting);
+ ui.get('import').files=[{name:'fake.json',size:10,text:async()=>JSON.stringify({format:'dsh-preset-enhance'})}];
+ const pending=ui.get('import').onchange();await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(calls.length,0);release();await pending;
+ assert.deepEqual(calls.filter(Boolean).map(b=>b.action),['import']);
+ assert.equal(ui.get('deepseek-beta-prefix').checked,true);assert.equal(ui.get('prefix-output-extraction').checked,true);
+ assert.equal(ui.get('post-tool-prefix-text').value,'restored');assert.equal(ui.selected(),'B');
 });

@@ -26,7 +26,7 @@
 }
 ```
 
-显示开关默认关闭，与提示词正则、预设注入分别控制。按当前会话绑定选择预设，无绑定时使用全局当前预设。规则取自 `extensions.regex_scripts`，按数组顺序执行；SPreset 的 `RegexBinding` 保留为兼容字段，不另行合并执行。
+工作台「正则配置」面板与 SPreset 附加功能均可编辑这份规则及两套总开关，保存路径一致。显示开关默认关闭，与提示词正则、预设注入分别控制。正文包未安装、停用、加载失败或状态尚未确认时，两处编辑器的正文总开关显示关闭且不可操作；仍可编辑、保存规则。分包恢复就绪后使用预设中保存的开关偏好，临时停用不会被自动保存成预设修改。DSH 插件页启停和热重载会实时同步，无需刷新。按当前会话绑定选择预设，无绑定时使用全局当前预设。规则取自 `extensions.regex_scripts`，按数组顺序执行；SPreset 的 `RegexBinding` 保留为兼容字段，不另行合并执行。
 
 | 字段 | 显示行为 |
 | --- | --- |
@@ -56,10 +56,27 @@
 - `GET /preset-enhance/api/display?sessionId=...`：读取当前显示配置。
 - `GET /preset-enhance/api/display-events?sessionId=...`：SSE，在保存成功且有效配置变化后发送同结构快照，15 秒心跳。
 
-快照字段为 `apiVersion: 1`、`instance`（宿主启动实例）、`revision`（有效配置哈希）、`sessionId`、`presetId`、`enabled`、`scripts`、`local`、`global`、`values`、`depths`。不包含预设提示词正文或聊天历史全文。无效会话返回 400，服务不可用返回 503。消费者必须在断线、不可用或结构无法对应时恢复原文；修订用于去重，不是可排序的版本号。
+快照字段为 `apiVersion: 1`、`instance`（宿主启动实例）、`revision`（有效配置哈希）、`sessionId`、`presetId`、`enabled`（有效开关）、`configuredEnabled`（预设偏好）、`available`（能力就绪）、`scripts`、`local`、`global`、`values`、`depths`。不包含预设提示词正文或聊天历史全文。无效会话返回 400，服务不可用返回 503。消费者必须在断线、不可用或结构无法对应时恢复原文；修订用于去重，不是可排序的版本号。
 
-## 本地构建安装
+### 显示能力生命周期
 
-在仓库根目录执行 `npm run build`，然后将主包目录和 `packages/display-regex` 目录分别安装到同一 DSH profile。只安装主包可编辑和保存正文规则，但不会执行显示替换。
+- `GET /preset-enhance/api/display-status`：无需会话的正文包就绪状态。
+- `GET /preset-enhance/api/display-status-events`：同状态 SSE，监听启停与实例替换。
 
-`packages/bundle` 参考官方组合插件的 patch/dependencies 方式，同时启用两包。它的依赖版本须在正式发布时一起更新，当前新子包未发布，不能直接从 npm 安装这个开发版组合包。
+状态为 `{ apiVersion: 1, available: boolean, instance: string | null }`。内置编辑器复用现有 `template-events` 的 `display` 字段接收该状态，与模板刷新共享一条连接；独立状态 SSE 留给其他消费者。页面隐藏释放订阅，返回时重新连接。接口复用宿主 Web 登录，断线或未知版本按不可用处理。客户端不通过此接口修改插件启停，启停仍由 DSH 插件管理器负责。
+
+两个包通过公开 `./display-api` 导出 `PRESET_DISPLAY_SERVICE`、`PRESET_DISPLAY_EVENT` 和类型。显示包在资源校验完成后提供 `presetDisplayRegex`，就绪或退出时发出 `preset-display/availability`；主包用当前实例的 `ready` 判定有效能力，避免仅凭安装记录显示开启。该能力不包含规则内容或用户数据。
+
+## 工作台试运行
+
+工作台现有 `POST /preset-enhance/api` 的 `regex-test` 操作支持 `channel: "prompt" | "display"`，省略时保持提示词行为。正文通道固定使用助手目标，复用显示计划、表达式与宏规则，在服务端可终止 Worker 中执行；总开关只作为结果中的 enabled/notes 提示，不阻止手工测试。不会保存试运行的正文和宏变量。界面切换通道后丢弃旧通道的迟到结果。
+
+## 安装与升级
+
+安装入口继续使用 `dsh-preset-enhance`。主包通过精确版本的运行依赖携带正文包，并由自己的 Cordis patch 注册 `preset-enhance` 与 `preset-display-regex` 两个条目。DSH 同一插件详情页列出这两个条目，可分别启停；无需改装 `dsh-preset-enhance-bundle`。
+
+旧用户按原通道升级主包并重启宿主即可。包名、主条目 ID、数据路径和预设格式均不变，保留已导入预设、当前选择、会话绑定和配置；新增的正文替换偏好默认关闭。主条目的用户配置及停用 patch 继续按原 ID 生效。此组合版本面向 DSH `0.2.1` 全系列；旧版宿主继续使用对应兼容的旧插件版本，不把新增显示包声明为已适配旧宿主。
+
+`packages/bundle` 保留为开发期组合入口，仍直接装配同样两个条目，不再推荐给原主包用户。DSH 不递归执行依赖包的 bundle patch，因此主包被组合入口引用时不会重复加载正文包。不要在同一 profile 同时选择主包、组合包、正文包三个入口；开发期曾单独安装正文包的 profile 应取消该独立入口，只保留主包。此项不会自动改写用户的 profile。
+
+本地先执行 `npm run build`。子包尚未发布时，用本地 tarball 或构建快照满足主包依赖后在隔离 profile 验证，不能直接从 npm 获取未发布的子包。安装开发依赖时可使用 `npm install --no-save --package-lock=false ./packages/display-regex`，不把本地路径写入发布 manifest。发布时同步三包版本及精确依赖，先发布正文包，确认可下载后再发布主包，最后按需发布兼容组合入口；否则旧用户升级时会遇到缺失依赖。

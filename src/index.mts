@@ -1,3 +1,4 @@
+import { planDisplayRegex } from './lib/display-regex.mjs';
 import { installDisplayConfig } from './lib/display-config.mjs';
 import { readDshSystemTemplate, withoutDshPrompt } from './lib/dsh-system-template.mjs';
 import { readRequestSettings } from './lib/request-settings.mjs';
@@ -15,7 +16,7 @@ import { prepareDynamicTemplates } from './lib/dynamic-templates.mjs';
 import { RequestSnapshots, traceRequest, previewMessages, messageOrigins } from './lib/request-preview.mjs';
 import { PRESET_TEMPLATES_SERVICE } from './templates.mjs';
 import { compilePreset, validatePreset, getOrder, dshSystemPromptEnabled } from './lib/preset.mjs';
-import { decodePresetDocument, encodePresetPackage, attachPrefillSettings, applyPackagePrefill } from './lib/preset-package.mjs';
+import { decodePresetDocument, encodePresetPackage, attachPrefillSettings, applyPackagePrefill, ensurePackageExtractionTemplate } from './lib/preset-package.mjs';
 import {
   deleteLibraryEntry, presetLocks, restoreDefaultTemplates, saveLibraryEntry, setPresetLock,
   summarizeSPreset, syncSPresetMirror,
@@ -478,13 +479,14 @@ const chatConnection = () => {
     } finally { finish(); }
   });
 
-  installDisplayConfig(ctx, store, () => !startupError && !lifecycle.closing,
+  const displayAvailability = installDisplayConfig(ctx, store, () => !startupError && !lifecycle.closing,
     (state, sessionId) => ownGet(state.bindings, sessionId) ?? defaultBinding(state));
 
   const assets = new Map<string, [string, string]>([
     [BASE, ['web/index.html', 'text/html']],
     [`${BASE}/regex-editor.js`, ['web/regex-editor.js', 'text/javascript']],
     [`${BASE}/regex-worker.js`, ['web/regex-worker.js', 'text/javascript']],
+    [`${BASE}/display-availability.js`, ['web/display-availability.js', 'text/javascript']],
     ...['display-regex', 'prompt-regex', 'macros', 'compaction'].map(file => [`${BASE}/regex/${file}.mjs`, [`lib/${file}.mjs`, 'text/javascript']] as [string, [string, string]]),
     [`${BASE}/editor.js`, ['web/editor.js', 'text/javascript']],
     [`${BASE}/tool-labels.js`, ['web/tool-labels.js', 'text/javascript']],
@@ -514,12 +516,13 @@ const chatConnection = () => {
       if (req.method !== 'GET') return respond(res, 405, { error: 'Method not allowed' });
       if (lifecycle.closing || !templateServiceAvailable || !res.write) return respond(res, 503, { error: '模板通知不可用' });
       res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', 'x-accel-buffering': 'no' });
-      const send = (revision: number) => res.write!(`data: ${JSON.stringify({ revision })}\n\n`);
+      const send = (revision: number) => res.write!(`data: ${JSON.stringify({ revision, display: displayAvailability.status() })}\n\n`);
       const unsubscribe = templateRegistry.service.subscribe(send);
+      const unsubscribeDisplay = displayAvailability.subscribe(() => send(templateRegistry.service.list().revision));
       const timer = setInterval(() => res.write!(': keepalive\n\n'), 25000);
-      const close = () => { clearInterval(timer); unsubscribe(); templateEventClosers.delete(close); res.end(); };
+      const close = () => { clearInterval(timer); unsubscribe(); unsubscribeDisplay(); templateEventClosers.delete(close); res.end(); };
       templateEventClosers.add(close);
-      res.on?.('close', () => { clearInterval(timer); unsubscribe(); templateEventClosers.delete(close); });
+      res.on?.('close', () => { clearInterval(timer); unsubscribe(); unsubscribeDisplay(); templateEventClosers.delete(close); });
       send(templateRegistry.service.list().revision);
     },
   }), 'preset-enhance: template event route');
@@ -1016,6 +1019,9 @@ const chatConnection = () => {
               name: String(imported?.name || body.name || '未命名预设').slice(0, 200),
               preset: mirrored.preset,
             };
+            const prefillApplied = !!imported?.sharePackage?.prefill;
+            if (prefillApplied) applyPackagePrefill(state, record);
+            const extractionTemplateAdded = imported ? ensurePackageExtractionTemplate(record.preset, state.prefixOutputExtraction === true, !prefillApplied) : false;
             if (old) state.presets[state.presets.indexOf(old)] = record;
             else state.presets.push(record);
             // Deleted prompt bodies must not leave editor guards attached to stale identifiers.
@@ -1023,7 +1029,7 @@ const chatConnection = () => {
             for (const identifier of presetLocks(state.sPresetEditor, record.id)) {
               if (!promptIds.has(identifier)) state.sPresetEditor = setPresetLock(state.sPresetEditor, record.id, identifier, false);
             }
-            return selectPreset(record);
+            return { ...selectPreset(record), prefillApplied, extractionTemplateAdded };
           }
           if (body.action === 'delete-preset') {
             const index = state.presets.findIndex(preset => preset.id === body.id);
@@ -1063,6 +1069,7 @@ const chatConnection = () => {
             const record = state.presets.find(preset => preset.id === body.id);
             if (!record?.sharePackage) throw new Error('请选择带有接口设置的预设包');
             applyPackagePrefill(state, record);
+            ensurePackageExtractionTemplate(record.preset, state.prefixOutputExtraction === true);
             state.revision++;
             return { id: record.id };
           }
@@ -1092,6 +1099,7 @@ const chatConnection = () => {
             if (body.presetId) {
               const record = state.presets.find(preset => preset.id === body.presetId);
               if (!record) throw new Error('请选择有效的已保存预设');
+              ensurePackageExtractionTemplate(record.preset, state.prefixOutputExtraction === true);
               attachPrefillSettings(record, state);
             }
             state.revision++;
@@ -1583,7 +1591,7 @@ export async function ensurePresetAgentMode(root: string, standard: string | und
 }
 
 /**
- * Plan and run the preset's prompt-side regex over one text for the workbench test box.
+ * Plan and run either shared regex channel over one text for the workbench test box.
  *
  * The request path runs the same engine through compilePreset; a standalone text box has no history
  * to compile, so this entry hands one segment to the shared worker at the depth the user asked for.
@@ -1594,9 +1602,11 @@ export async function ensurePresetAgentMode(root: string, standard: string | und
 function regexTestResult(body: Record<string, any>): Record<string, unknown> {
   const preset = validatePreset(body.preset);
   const options = readPromptRegexOptions(preset);
+  const channel = body.channel === 'display' ? 'display' : 'prompt';
+  const displayEnabled = (preset.extensions as Record<string, any> | undefined)?.['dsh-preset-enhance']?.displayRegex?.enabled === true;
   const scripts = readRegexScripts(preset);
   const requested: 'user' | 'assistant' | 'prefill' =
-    body.target === 'assistant' || body.target === 'prefill' ? body.target : 'user';
+    channel === 'display' ? 'assistant' : body.target === 'assistant' || body.target === 'prefill' ? body.target : 'user';
   const target: PromptRegexTarget = requested === 'prefill' ? 'assistant' : requested;
   const text = typeof body.text === 'string' ? body.text : '';
   const depth = Number.isInteger(body.depth) ? body.depth
@@ -1615,7 +1625,7 @@ function regexTestResult(body: Record<string, any>): Record<string, unknown> {
     },
   });
   const plan = scripts.map((script, index) => {
-    const entry = planRegexScript(script, depth);
+    const entry = channel === 'display' ? planDisplayRegex(script, depth) : planRegexScript(script, depth);
     return {
       index,
       id: typeof script.id === 'string' ? script.id : '',
@@ -1628,11 +1638,13 @@ function regexTestResult(body: Record<string, any>): Record<string, unknown> {
     };
   });
   const notes: string[] = [];
-  if (!options.enabled) notes.push('总开关未开启：真实请求不会执行任何规则，下面是规则本身的效果');
-  if (requested === 'prefill' && !options.includePrefill) notes.push('未开启“同时处理预填充”：真实请求不会处理预填充');
+  if (channel === 'display' && !displayEnabled) notes.push('正文总开关未开启：聊天显示不会替换，下面是规则本身的效果');
+  if (channel === 'prompt' && !options.enabled) notes.push('总开关未开启：真实请求不会执行任何规则，下面是规则本身的效果');
+  if (channel === 'prompt' && requested === 'prefill' && !options.includePrefill) notes.push('未开启“同时处理预填充”：真实请求不会处理预填充');
   // The box always runs the rules so a user can author them; the notes above say whether a real
   // request would run them (the switches are reported, not silently applied).
   const prepared = getRegexRunner().run({
+    channel,
     segments: [{ text, target, depth }],
     scripts,
     seed: ctx.seed,
@@ -1645,7 +1657,8 @@ function regexTestResult(body: Record<string, any>): Record<string, unknown> {
   const rules = plan.map(entry => ({ ...entry, applicable: entry.runs && entry.targets.includes(target),
     hit: ran.applied.includes(entry.name) }));
   return {
-    enabled: options.enabled,
+    channel,
+    enabled: channel === 'display' ? displayEnabled : options.enabled,
     includePrefill: options.includePrefill,
     target: requested,
     depth,

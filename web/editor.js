@@ -1,3 +1,4 @@
+import { observeDisplayAvailability } from './display-availability.js';
 import { mcpTabNames } from './tool-labels.js';
 
 const $ = id => document.getElementById(id);
@@ -5,6 +6,7 @@ const sessionId = new URLSearchParams(location.search).get('sessionId') ?? '';
 let inputModeId = new URLSearchParams(location.search).get('modeId') ?? '';
 let state = { presets: [], revision: 0 }, selectedId = '', selectedPrompt = '', dirty = false;
 let preset = blank();
+let displayAvailable = false;
 let pluginTemplatePanel = null;
 let requestPreview = null, previewController = null, previewGeneration = 0;
 const isLinkedTemplate = id => globalThis.PresetPluginTemplates?.linked(preset, id) === true;
@@ -139,7 +141,7 @@ function loadDraft(id) {
   const packaged = record?.sharePackage;
   $('apply-package-prefill').hidden = !packaged?.prefill;
   $('package-note').textContent = packaged
-    ? '此预设附带分享数据。导入不会改动全局接口设置；可点击应用包内设置。保存接口设置会同时更新当前已保存预设的分享数据。包内工具预设与分组需在“工具预设”卡片中显式导入。'
+    ? '分享包的接口设置在导入时恢复到全局，可再次应用。工具配置需另行导入。'
     : '分享文件为单个 .dsh-preset.json，包含预设与已保存接口设置，并预留工具预设和分组。';
   ensureGroups();
   $('name').value = record?.name ?? '新预设';
@@ -1866,22 +1868,6 @@ function insertOutputExtractionTemplate() {
   renderEditor();
   status('已将格式提示词加入当前预设，可在条目中编辑；保存接口设置时一并保存');
 }
-/**
- * A prefill preset ends on an assistant turn, so the next request continues from what the
- * model already wrote - exactly the case output extraction exists for. Importing one while
- * extraction is enabled adds the format prompt (the caller then saves it) instead of leaving
- * the user to flip the switch and save by hand.
- */
-function ensurePrefillExtractionTemplate() {
-  if (state.prefixOutputExtraction !== true) return false;
-  if (preset.prompts.some(item => item.identifier === 'dsh-output-extraction-template')) return false;
-  const items = order();
-  const lastEnabled = items.findLast(item => item.enabled !== false);
-  const role = preset.prompts.find(prompt => prompt.identifier === lastEnabled?.identifier)?.role;
-  if (!['assistant', 'model'].includes(role)) return false;
-  insertOutputExtractionTemplate();
-  return true;
-}
 /** Clear the import notice: a fresh import must not leave the previous one on screen. */
 function hidePresetNotice() {
   const box = $('preset-notice');
@@ -1899,7 +1885,7 @@ function showImportedExtractionNotice() {
   const title = document.createElement('strong');
   title.textContent = '已自动加入正文提取格式提示词';
   const text = document.createElement('p');
-  text.textContent = '导入的是预填充预设（最后一条是 Assistant 回复），且正文提取已开启，因此自动加入了「正文/工具调用提取格式（实验）」条目并已保存；可在提示词条目中编辑或删除。';
+  text.textContent = '正文提取已开启，已自动加入「正文/工具调用提取格式（实验）」条目并已保存；可在提示词条目中编辑或删除。';
   const dismiss = document.createElement('button');
   dismiss.textContent = '知道了';
   dismiss.onclick = () => hidePresetNotice();
@@ -1988,20 +1974,15 @@ $('import').onchange = guard(async () => {
     if (file.size > 8_000_000) throw new Error('预设文件不能超过 8 MB');
     const parsed = JSON.parse(await file.text());
     const name = file.name.replace(/(?:\.dsh-preset)?\.json$/i, '');
-    const result = await api({ action: 'import', name, document: parsed });
+    cancelGlobalConfigAutoSave();
+    await globalConfigAutoSaveChain;
+    if (presetAutoSaveIsOn()) await runGlobalConfigAutoSave();
+    const result = await configWrite({ action: 'import', name, document: parsed });
     await reload(result.id);
-    // Add the extraction format prompt for an imported prefill preset, and persist it: the
-    // import already saved the preset, so leaving the addition as an unsaved draft would drop
-    // it whenever auto-save is off.
-    const autoExtraction = ensurePrefillExtractionTemplate();
-    if (autoExtraction) {
-      const saved = await persistPresetDraft({ force: true });
-      if (!saved.ok) throw saved.error;
-      await reload(saved.id ?? result.id);
-      showImportedExtractionNotice();
-    }
-    const imported = parsed.format === 'dsh-preset-enhance' ? '预设包已导入并设为当前默认；全局接口设置保持原值' : '预设已导入、全局保存并设为当前默认';
-    status(autoExtraction ? imported + '；已检测到预填充预设并自动加入正文提取格式提示词' : imported);
+    const autoExtraction = result.extractionTemplateAdded === true;
+    if (autoExtraction) showImportedExtractionNotice();
+    const imported = result.prefillApplied ? '预设包已导入；包内接口设置已恢复到全局，对其他会话也生效' : '预设已导入、全局保存并设为当前默认；接口设置保持原值';
+    status(autoExtraction ? imported + '；已自动加入正文提取格式提示词' : imported);
   } finally {
     $('import').value = '';
   }
@@ -2037,7 +2018,9 @@ $('bind').onclick = guard(async () => {
 });
 $('apply-package-prefill').onclick = guard(async () => {
   if (!(await presetDraftReady())) return;
-  await api({ action: 'apply-package-prefill', id: selectedId });
+  cancelGlobalConfigAutoSave();
+  await globalConfigAutoSaveChain;
+  await configWrite({ action: 'apply-package-prefill', id: selectedId });
   await reload(selectedId);
   status('包内接口设置已应用到全局，下一次请求生效');
 });
@@ -2403,11 +2386,9 @@ for (const id of ['user', 'char', 'markers', 'order', 'deepseek-beta-prefix', 'p
   $(id).addEventListener('change', () => { ++previewGeneration; previewController?.abort(); requestPreview.stale(); });
 }
 
-/* ---------- 提示词正则：只改写发送给模型的请求副本 ---------- */
+/* ---------- 共享正则配置：提示词请求副本 / 正文显示副本 ---------- */
 
-// 规则数据沿用酒馆的 extensions.regex_scripts，执行开关放在 extensions['dsh-preset-enhance'].promptRegex。
-// 这里只做数据读写与展示：正则的解析、匹配、替换和深度判定全部走服务端 regex-test（同一条引擎入口），
-// 客户端不实现第二套正则。聊天正文不会写进服务端日志，也不会出现在状态栏里。
+// 共用酒馆规则，通道开关独立保存；适用性和试运行复用服务端 Worker 引擎。
 
 const REGEX_NS = 'dsh-preset-enhance';
 const REGEX_PLACEMENT_USER = 1;
@@ -2418,22 +2399,26 @@ const REGEX_SUBSTITUTE_CHOICES = [['0', 'NONE（默认）'], ['1', 'RAW（先展
 let regexSelected = -1;
 let regexPlan = [];
 let regexTestResult = null;
+let regexTestGeneration = 0;
 let regexPlanTimer = null;
 let regexPlanGeneration = 0;
 
 function regexObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
 }
+function regexChannel() { return $('regex-test-channel').value === 'display' ? 'display' : 'prompt'; }
+function regexDisplayEnabled() { return preset.extensions?.[REGEX_NS]?.displayRegex?.enabled === true; }
 function regexOptions() {
   const namespace = regexObject(regexObject(preset.extensions)?.[REGEX_NS]);
   const raw = regexObject(namespace?.promptRegex);
   return { enabled: raw?.enabled === true, includePrefill: raw?.includePrefill === true };
 }
 /** 合并写入，保留同一个命名空间和其他扩展字段。 */
-function regexWriteOptions(patch) {
+function regexWriteOptions(patch, channel = 'prompt') {
   const extensions = { ...(regexObject(preset.extensions) ?? {}) };
   const namespace = { ...(regexObject(extensions[REGEX_NS]) ?? {}) };
-  namespace.promptRegex = { ...(regexObject(namespace.promptRegex) ?? {}), ...patch };
+  const key = channel === 'display' ? 'displayRegex' : 'promptRegex';
+  namespace[key] = { ...(regexObject(namespace[key]) ?? {}), ...patch };
   extensions[REGEX_NS] = namespace;
   preset.extensions = extensions;
 }
@@ -2491,16 +2476,19 @@ function regexPlanFor(index) {
 function regexMarkChanged(message) {
   markDirty();
   scheduleRegexPlan();
-  if (message) status(message + '，保存预设后下一次请求生效');
+  if (message) status(message + '，保存预设后生效');
 }
 function renderRegexPanel() {
   const options = regexOptions();
   const scripts = regexScripts();
   $('regex-enabled').checked = options.enabled;
+  $('regex-display-enabled').checked = displayAvailable && regexDisplayEnabled();
+  $('regex-display-enabled').disabled = !displayAvailable;
+  $('regex-display-status').textContent = displayAvailable ? '' : '正文显示包未启用';
   $('regex-include-prefill').checked = options.includePrefill;
   $('regex-include-prefill').disabled = !options.enabled;
   $('regex-summary').textContent = scripts.length
-    ? ' · ' + scripts.length + ' 条规则 · ' + (options.enabled ? '已启用' : '未启用')
+    ? ' · ' + scripts.length + ' 条 · 提示词' + (options.enabled ? '开' : '关') + ' / 正文' + (displayAvailable && regexDisplayEnabled() ? '开' : '关')
     : ' · 尚无规则';
   // 载入预设后默认选中第一条，编辑器不会停在空面板上。
   if (!scripts.length) regexSelected = -1;
@@ -2528,7 +2516,7 @@ function renderRegexList() {
     const toggle = document.createElement('input');
     toggle.type = 'checkbox';
     toggle.checked = script.disabled !== true;
-    toggle.title = '启用这条规则（酒馆的 disabled 字段，显示侧以后也会读它）';
+    toggle.title = '启用规则';
     toggle.onchange = () => {
       script.disabled = !toggle.checked;
       regexMarkChanged(toggle.checked ? '已启用「' + regexRuleName(script, index) + '」' : '已停用「' + regexRuleName(script, index) + '」');
@@ -2540,7 +2528,7 @@ function renderRegexList() {
     pick.textContent = (index + 1) + '. ' + regexRuleName(script, index);
     pick.onclick = () => { regexSelected = index; renderRegexList(); renderRegexEditor(); };
     const meta = document.createElement('small');
-    meta.textContent = [regexTargetLabel(script), regexDepthLabel(script), plan && !plan.runs ? plan.reason : '']
+    meta.textContent = [script.promptOnly === true ? '提示词' : '', script.markdownOnly === true ? '正文' : '', regexTargetLabel(script), regexDepthLabel(script), plan && !plan.runs ? plan.reason : '']
       .filter(Boolean).join(' · ');
     const actions = document.createElement('span');
     actions.className = 'regex-actions';
@@ -2667,10 +2655,16 @@ function renderRegexEditor() {
   runOnEdit.type = 'checkbox';
   runOnEdit.checked = script.runOnEdit === true;
   runOnEdit.onchange = () => { script.runOnEdit = runOnEdit.checked; markDirty(); };
+  const promptOnly = document.createElement('input');
+  promptOnly.type = 'checkbox';
+  promptOnly.id = 'regex-rule-prompt';
+  promptOnly.checked = script.promptOnly === true;
+  promptOnly.onchange = () => { script.promptOnly = promptOnly.checked; regexMarkChanged(); renderRegexList(); };
   const markdownOnly = document.createElement('input');
+  markdownOnly.id = 'regex-rule-display';
   markdownOnly.type = 'checkbox';
   markdownOnly.checked = script.markdownOnly === true;
-  markdownOnly.onchange = () => { script.markdownOnly = markdownOnly.checked; markDirty(); scheduleRegexPlan(); renderRegexList(); };
+  markdownOnly.onchange = () => { script.markdownOnly = markdownOnly.checked; regexMarkChanged(); renderRegexList(); };
   const idField = document.createElement('input');
   idField.value = typeof script.id === 'string' ? script.id : '';
   idField.onchange = () => { script.id = idField.value.trim() || regexMintId(regexScripts()); markDirty(); };
@@ -2685,16 +2679,19 @@ function renderRegexEditor() {
     regexField('trimStrings（每行一个）', trim),
     regexField('substituteRegex', substitute),
     regexField('runOnEdit（原样保存，本版不据此执行）', runOnEdit),
-    regexField('markdownOnly（显示侧提示）', markdownOnly),
     regexField('规则 ID', idField),
     advancedNote,
     raw,
   );
+  const channels = document.createElement('div');
+  channels.className = 'row regex-targets';
+  channels.append(regexField('发送提示词', promptOnly), regexField('正文显示', markdownOnly));
   const title = document.createElement('strong');
   title.textContent = '规则 ' + (regexSelected + 1) + ' · ' + regexRuleName(script, regexSelected);
   box.append(
     title,
     regexField('规则名称', name),
+    channels,
     targetRow,
     depthRow,
     regexField('查找式 findRegex', find),
@@ -2705,7 +2702,7 @@ function renderRegexEditor() {
   if (plan && !plan.runs && plan.reason) {
     const why = document.createElement('p');
     why.className = 'regex-why';
-    why.textContent = '本版不会执行这条规则：' + plan.reason;
+    why.textContent = (regexChannel() === 'display' ? '正文通道：' : '提示词通道：') + plan.reason;
     box.append(why);
   }
 }
@@ -2739,7 +2736,7 @@ function renderRegexSkipped() {
     const none = document.createElement('p');
     none.className = 'muted';
     none.textContent = regexPlan.length
-      ? '当前所有规则都可能在请求副本上执行（是否命中取决于正文和深度，请在测试框里验证）。'
+      ? '当前通道规则可执行，是否命中取决于文本和深度。'
       : '尚未读取到适用性信息，点“刷新适用性”重试。';
     body.append(none);
   }
@@ -2750,7 +2747,7 @@ function renderRegexTest() {
   box.replaceChildren();
   if (!regexTestResult) { note.textContent = ''; return; }
   const data = regexTestResult;
-  note.textContent = '使用深度 ' + data.depth + '（作用对象：' + (data.target === 'prefill' ? '预填充 → assistant' : data.target)
+  note.textContent = (data.channel === 'display' ? '正文显示 · ' : '提示词 · ') + '使用深度 ' + data.depth + '（作用对象：' + (data.target === 'prefill' ? '预填充 → assistant' : data.target)
     + '）' + (data.notes.length ? ' · ' + data.notes.join('；') : '');
   const result = data.result;
   if (!result) return;
@@ -2784,6 +2781,8 @@ function renderRegexTest() {
   box.append(summary, diff, hits);
 }
 function scheduleRegexPlan() {
+  ++regexTestGeneration;
+  ++regexPlanGeneration;
   if (regexPlanTimer !== null) clearTimeout(regexPlanTimer);
   regexPlanTimer = setTimeout(() => {
     regexPlanTimer = null;
@@ -2802,7 +2801,7 @@ async function refreshRegexPlan() {
   }
   const depth = Number($('regex-test-depth').value);
   try {
-    const result = await api({ action: 'regex-test', preset, text: '', target: 'user',
+    const result = await api({ action: 'regex-test', preset, channel: regexChannel(), text: '', target: regexChannel() === 'display' ? 'assistant' : 'user',
       depth: Number.isFinite(depth) ? depth : 0 });
     if (generation !== regexPlanGeneration) return;
     regexPlan = Array.isArray(result.rules) ? result.rules : [];
@@ -2897,6 +2896,12 @@ function regexImportRules(parsed) {
   regexWriteScripts(scripts);
   return { added, updated, skipped };
 }
+$('regex-display-enabled').onchange = () => {
+  if (!displayAvailable) { renderRegexPanel(); return; }
+  regexWriteOptions({ enabled: $('regex-display-enabled').checked }, 'display');
+  regexMarkChanged($('regex-display-enabled').checked ? '已启用正文正则' : '已停用正文正则');
+  renderRegexPanel();
+};
 $('regex-enabled').onchange = () => {
   regexWriteOptions({ enabled: $('regex-enabled').checked });
   regexMarkChanged($('regex-enabled').checked ? '已启用提示词正则' : '已停用提示词正则');
@@ -2927,14 +2932,17 @@ $('regex-import').onchange = guard(async () => {
   }
 });
 $('regex-test-run').onclick = guard(async () => {
+  const generation = ++regexTestGeneration;
   const depth = Number($('regex-test-depth').value);
   const result = await api({
     action: 'regex-test',
+    channel: regexChannel(),
     preset,
     text: $('regex-test-text').value,
     target: $('regex-test-target').value,
     depth: Number.isFinite(depth) ? depth : 0,
   });
+  if (generation !== regexTestGeneration) return;
   regexTestResult = result;
   regexPlan = Array.isArray(result.rules) ? result.rules : regexPlan;
   renderRegexSkipped();
@@ -2943,8 +2951,25 @@ $('regex-test-run').onclick = guard(async () => {
   status('正则测试完成：命中 ' + (result.result?.applied.length ?? 0) + ' 条规则');
 });
 $('regex-test-clear').onclick = () => {
+  ++regexTestGeneration;
   regexTestResult = null;
   renderRegexTest();
+};
+$('regex-test-channel').onchange = () => {
+  ++regexPlanGeneration;
+  regexPlan = [];
+  regexTestResult = null;
+  const display = regexChannel() === 'display';
+  if (display) {
+    if ($('regex-test-target').value === 'prefill') $('regex-test-depth').value = '0';
+    $('regex-test-target').value = 'assistant';
+  }
+  $('regex-test-target').disabled = display;
+  renderRegexList();
+  renderRegexEditor();
+  renderRegexSkipped();
+  renderRegexTest();
+  scheduleRegexPlan();
 };
 $('regex-test-target').onchange = () => {
   if ($('regex-test-target').value === 'prefill') $('regex-test-depth').value = String(REGEX_PREFILL_DEPTH);
@@ -3007,3 +3032,6 @@ pluginTemplatePanel = globalThis.PresetPluginTemplates?.mount($('plugin-template
   onChange: (draft, id) => { preset = draft; ensureGroups(); selectedPrompt = id; markDirty(); renderList(); renderEditor(); },
 });
 await guard(() => reload())();
+
+observeDisplayAvailability(value => { displayAvailable = value.available; renderRegexPanel(); });
+// The subscription releases on pagehide and reconnects on pageshow (including BFCache).
