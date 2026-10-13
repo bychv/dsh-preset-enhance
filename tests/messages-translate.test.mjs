@@ -108,7 +108,7 @@ test('a Messages request becomes a chat/completions request without lossy notes'
   assert.deepEqual(body.messages, [
     { role: 'system', content: 'You are helpful.' },
     { role: 'user', content: 'hello' },
-    { role: 'assistant', content: 'hi' },
+    { role: 'assistant', content: 'hi', reasoning_content: '' },
     { role: 'user', content: 'what now?' },
   ]);
   assert.deepEqual(notes, []);

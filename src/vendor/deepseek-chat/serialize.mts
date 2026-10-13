@@ -211,7 +211,8 @@ function serializeAssistant(message: Message): WireMessage {
     // Text-less turns send "" (never null): a null content with no tool_calls
     // is rejected by the API and would brick every later turn of the session.
     content: text,
-    ...reasoning.length > 0 ? { reasoning_content: reasoning } : {},
+    // Preset-authored replies may have no reasoning; DeepSeek still requires the field.
+    reasoning_content: reasoning,
     ...toolCalls.length > 0 ? { tool_calls: toolCalls } : {},
   };
 }

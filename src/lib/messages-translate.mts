@@ -196,8 +196,7 @@ function assistantMessage(blocks: readonly JsonObject[], note: (field: string, d
   }
   // Mirror the host chat-completions serializer: assistant content is always a
   // JSON string (empty on tool-call-only turns), never null.
-  const message: JsonObject = { role: 'assistant', content: body };
-  if (reasoning.length > 0) message.reasoning_content = reasoning;
+  const message: JsonObject = { role: 'assistant', content: body, reasoning_content: reasoning };
   if (toolCalls.length > 0) message.tool_calls = toolCalls;
   return message;
 }

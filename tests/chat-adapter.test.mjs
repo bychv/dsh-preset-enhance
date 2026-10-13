@@ -1009,3 +1009,24 @@ test('a developer tool-update message never becomes a wire message', async () =>
   }));
   assert.deepEqual(requests[0].body.messages.map(message => message.role), ['user', 'assistant']);
 });
+
+
+test('preset-authored assistant replies send empty reasoning without requiring prefill', async () => {
+  const { adapter, requests } = makeAdapter(sseResponse([textChunk('done'), '[DONE]']));
+  const options = baseOptions();
+  options.messages = [
+    { role: 'assistant', content: [{ type: 'text', text: 'Example reply' }] },
+    { role: 'assistant', content: [{ type: 'tool-call', id: 'empty-reasoning-call', name: 'noop', arguments: '{}' }] },
+    { role: 'tool', toolCallId: 'empty-reasoning-call', content: [{ type: 'text', text: 'ok' }] },
+    { role: 'assistant', content: [{ type: 'reasoning', text: 'existing reasoning' }, { type: 'text', text: 'Previous reply' }] },
+    { role: 'user', content: [{ type: 'text', text: 'Continue' }] },
+  ];
+  await collect(adapter.stream(options));
+  const messages = requests[0].body.messages;
+  assert.equal(messages[0].reasoning_content, '');
+  assert.equal(messages[1].reasoning_content, '');
+  assert.equal(messages[3].reasoning_content, 'existing reasoning');
+  assert.equal(messages[0].prefix, undefined);
+  assert.equal(messages[2].reasoning_content, undefined);
+  assert.equal(messages[4].reasoning_content, undefined);
+});
