@@ -164,7 +164,7 @@ test('new conversations inject and pin the globally selected preset after reopen
     assert.deepEqual((await new PresetStore(file).read()).bindings.auto, { enabled: true, presetId: 'selected', characterId: null, values: {}, markers: {} });
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
-test('client registers the workbench and locks both DSH resize handles while mounted', async () => {
+test('client hides conversation width handles locally while keeping sidebar resizing available', async () => {
   let definition;
   const cleanups = [];
   const rootAttributes = new Set();
@@ -225,14 +225,16 @@ test('client registers the workbench and locks both DSH resize handles while mou
     });
     assert.equal(frame.type, 'iframe');
     assert.equal(frame.props.src, '/preset-enhance?sessionId=current-session');
-    assert.equal(rootAttributes.has('data-preset-enhance-workbench'), true);
+    assert.equal(rootAttributes.has('data-preset-enhance-workbench'), false);
     assert.equal(styles.length, 1);
-    assert.match(styles[0].textContent, /data-side="sidebar"/);
-    assert.match(styles[0].textContent, /data-side="rightbar"/);
+    assert.match(styles[0].textContent, /data-width-handle/);
+    assert.match(styles[0].textContent, /data-conversation-content/);
+    assert.doesNotMatch(styles[0].textContent, /data-side|html\[/);
+    assert.equal(conversationFrame.props['data-preset-enhance-frame'], '');
     assert.match(styles[0].textContent, /display:none!important/);
 
     cleanups.shift()();
-    assert.equal(rootAttributes.has('data-preset-enhance-workbench'), true);
+    assert.equal(rootAttributes.has('data-preset-enhance-workbench'), false);
     cleanups.shift()();
     assert.equal(rootAttributes.has('data-preset-enhance-workbench'), false);
     assert.equal(styles.length, 0);

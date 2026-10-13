@@ -100,7 +100,10 @@
 .preview-raw .json-text, .preview-raw > pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 4px 6px 8px 18px; font: inherit; color: #b1dcc5; }
 .preview-raw .json-more { margin: 6px; font-size: 12px; padding: 4px 8px; }
 
-.request-token-controls input[type="range"] { flex: 1; min-width: 120px; width: auto; }
+.request-token-controls input[type="range"] { flex: 1; min-width: 120px; width: auto; height: 8px; padding: 0; border: 0; border-radius: 999px; appearance: none; accent-color: #9edfc7; background: linear-gradient(to right, #9edfc7 0, #9edfc7 var(--token-progress, 0%), #3a4a54 var(--token-progress, 0%), #3a4a54 100%); cursor: pointer; }
+.request-token-controls input[type="range"]::-webkit-slider-thumb { appearance: none; width: 18px; height: 18px; border: 2px solid #10171d; border-radius: 50%; background: #a9dfcc; box-shadow: 0 0 0 1px #9edfc7; }
+.request-token-controls input[type="range"]::-moz-range-thumb { width: 14px; height: 14px; border: 2px solid #10171d; border-radius: 50%; background: #a9dfcc; box-shadow: 0 0 0 1px #9edfc7; }
+.request-token-controls input[type="range"]:focus-visible { outline: 2px solid #a9dfcc; outline-offset: 5px; }
 .request-token-controls input[type="number"] { width: 130px; }
 .dsh-template-macros { max-height: 320px; overflow: auto; }
 .dsh-template-macros summary { overflow-wrap: anywhere; }
@@ -112,3 +115,5 @@
 .preview-raw .json-toolbar button { padding: 3px 8px; font-size: 12px; }
 .preview-raw .json-more { padding: 1px 5px; margin: 0 5px; }
 .preview-raw summary:focus-visible, .preview-raw button:focus-visible { outline: 2px solid #44b5af; outline-offset: 2px; }
+
+html, body { overflow-anchor: none; }

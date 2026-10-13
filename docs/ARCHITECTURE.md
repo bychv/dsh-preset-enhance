@@ -35,7 +35,7 @@ flowchart TD
 
 | 模块 | 职责 |
 | --- | --- |
-| `client.js`、`web/`，正则与 Raw 预览模块源码 `src/client/` | 侧边栏与会话入口，预设编辑、预览、工具管理和保存交互 |
+| 客户端入口及正则、Raw、折叠偏好源码 `src/client/`；其余工作台 `web/` | 侧边栏与会话入口，预设编辑、预览、工具管理和保存交互 |
 | `src/index.mts`、`src/mode.mts` | 插件入口、API、命令、请求拦截、预设模式与生命周期管理 |
 | `src/lib/store.mts`、`src/lib/preset-package.mts` | 状态持久化、版本校验、单文件导入导出 |
 | `src/lib/dsh-system-template.mts`、`src/lib/request-settings.mts`、`src/lib/buffered-response.mts` | 模式系统模板、动态 DSH 宏、请求参数与非流式响应接入 |

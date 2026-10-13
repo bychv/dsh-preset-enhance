@@ -81,9 +81,10 @@ try {
     if (file === 'client.js') text = text.replace("import('./runtime.mjs')", "import('/preset-enhance-display/runtime.mjs')").replace(/export \{\};?\s*$/, '');
     await writeFile(join(root, 'packages', 'display-regex', file), text);
   }
-  for (const file of ['display-availability.js', 'regex-editor.js', 'request-preview.js']) {
+  for (const file of ['display-availability.js', 'regex-editor.js', 'request-preview.js', 'disclosures.js', 'scroll-state.js']) {
     await emit(join(browser, 'src', 'client', file), join(root, 'web', file));
   }
+  await writeFile(join(root, 'client.js'), (await readFile(join(browser, 'src', 'client', 'entry.js'), 'utf8')).replace(/^export \{\};?\s*$/gm, ''));
   // Request preview remains a classic script loaded before the workbench module.
   await writeFile(join(root, 'web', 'request-preview.js'), (await readFile(join(browser, 'src', 'client', 'request-preview.js'), 'utf8')).replace(/^export \{\};?\s*$/gm, ''));
   const worker = (await readFile(join(browser, 'src', 'client', 'worker', 'regex-worker.js'), 'utf8')).replace("'../../lib/display-regex.mjs'", "'./regex/display-regex.mjs'");

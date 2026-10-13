@@ -23,4 +23,4 @@
 
 临时验证进程已退出，3196 端口已释放。未调用模型接口。本次验证的是 `0.2.1-alpha.2`，不是对整个 `0.2.1` 系列逐版本测试。
 
-相关说明：[条目操作决策](../../../.agents/notes/implemented/feature/2026-10-12-spreset-chain-row-actions.md)、[使用指南](../guides/WORKBENCH.md)、[兼容记录](../compatibility/DSH_0.2.1_COMPATIBILITY.md)。
+相关说明：[条目操作决策](../../.agents/notes/implemented/feature/2026-10-12-spreset-chain-row-actions.md)、[使用指南](../guides/WORKBENCH.md)、[兼容记录](../compatibility/DSH_0.2.1_COMPATIBILITY.md)。

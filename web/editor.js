@@ -1,5 +1,6 @@
 import { observeDisplayAvailability } from './display-availability.js';
 import { mcpTabNames } from './tool-labels.js';
+import { rememberWorkbenchScroll } from './scroll-state.js';
 
 const $ = id => document.getElementById(id);
 const sessionId = new URLSearchParams(location.search).get('sessionId') ?? '';
@@ -601,7 +602,7 @@ function groupDiscardOkay() {
   return true;
 }
 
-/* ---------- 预设自动保存（浏览器本地开关，默认关闭） ---------- */
+/* ---------- 预设自动保存（浏览器本地开关，未设置时默认开启） ---------- */
 function presetAutoSaveIsOn() {
   return $('preset-auto-save').checked === true;
 }
@@ -1747,6 +1748,7 @@ function renderRequestSettings() {
   const value = preset.dsh_request?.max_tokens ?? 0;
   $('request-max-tokens').value = String(value);
   $('request-max-tokens-range').value = String(value);
+  $('request-max-tokens-range').style.setProperty('--token-progress', (value / 10000) + '%');
   $('request-stream').checked = preset.dsh_request?.stream !== false;
 }
 function updateMaxTokens(id) {
@@ -1756,6 +1758,7 @@ function updateMaxTokens(id) {
   preset.dsh_request = { ...preset.dsh_request, max_tokens: value };
   $('request-max-tokens').value = String(value);
   $('request-max-tokens-range').value = String(value);
+  $('request-max-tokens-range').style.setProperty('--token-progress', (value / 10000) + '%');
   markDirty();
 }
 for (const id of ['request-max-tokens', 'request-max-tokens-range']) $(id).oninput = () => updateMaxTokens(id);
@@ -2980,7 +2983,7 @@ $('spreset-open').onclick = () => {
   const url = '/preset-enhance/editor' + (sessionId ? '?sessionId=' + encodeURIComponent(sessionId) : '');
   window.location.assign(url);
 };
-$('preset-auto-save').checked = storageGet(PRESET_AUTO_SAVE_KEY, '0') === '1';
+$('preset-auto-save').checked = storageGet(PRESET_AUTO_SAVE_KEY, '1') !== '0';
 $('tool-auto-save').checked = storageGet(TOOL_AUTO_SAVE_KEY, '0') === '1';
 $('tool-auto-save').disabled = presetAutoSaveIsOn();
 $('tool-scope').querySelector('option[value="session"]').disabled = !sessionId;
@@ -3032,6 +3035,7 @@ pluginTemplatePanel = globalThis.PresetPluginTemplates?.mount($('plugin-template
   onChange: (draft, id) => { preset = draft; ensureGroups(); selectedPrompt = id; markDirty(); renderList(); renderEditor(); },
 });
 await guard(() => reload())();
+if (typeof rememberWorkbenchScroll === 'function') rememberWorkbenchScroll(document, () => encodeURIComponent(sessionId || 'global') + ':' + encodeURIComponent(selectedId || 'new'));
 
 observeDisplayAvailability(value => { displayAvailable = value.available; renderRegexPanel(); });
 // The subscription releases on pagehide and reconnects on pageshow (including BFCache).

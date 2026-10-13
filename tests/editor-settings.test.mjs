@@ -64,6 +64,12 @@ function editor(storage = new Map(), fetch = async () => { throw new Error('offl
   return { ...context.editor, get, storage };
 }
 
+test('global autosave defaults on but preserves an explicit off preference', () => {
+  assert.equal(editor().get('preset-auto-save').checked, true);
+  assert.equal(editor(new Map([['dsh-preset-enhance.preset-auto-save', '0']])).get('preset-auto-save').checked, false);
+  assert.equal(editor(new Map([['dsh-preset-enhance.preset-auto-save', '1']])).get('preset-auto-save').checked, true);
+});
+
 test('Messages disables prefill; enabling extraction inserts one template and preserves edits', () => {
   const ui = editor();
   ui.protocol('messages');

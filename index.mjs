@@ -484,6 +484,8 @@ export async function apply(ctx, config = {}) {
         [`${BASE}/regex-worker.js`, ['web/regex-worker.js', 'text/javascript']],
         [`${BASE}/display-availability.js`, ['web/display-availability.js', 'text/javascript']],
         ...['display-regex', 'prompt-regex', 'macros', 'compaction'].map(file => [`${BASE}/regex/${file}.mjs`, [`lib/${file}.mjs`, 'text/javascript']]),
+        [`${BASE}/disclosures.js`, ['web/disclosures.js', 'text/javascript']],
+        [`${BASE}/scroll-state.js`, ['web/scroll-state.js', 'text/javascript']],
         [`${BASE}/editor.js`, ['web/editor.js', 'text/javascript']],
         [`${BASE}/tool-labels.js`, ['web/tool-labels.js', 'text/javascript']],
         [`${BASE}/editor.css`, ['web/editor.css', 'text/css']],
