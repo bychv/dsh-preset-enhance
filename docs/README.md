@@ -30,6 +30,7 @@
 | [2026-10-04 接入验证](testing/2026-10-04-ALPHA_INTEGRATION.md) | 真实宿主、HTTP、工具及插件生命周期 |
 | [2026-10-04 系统模板验证](testing/2026-10-04-SYSTEM_TEMPLATE.md) | 524 项回归、真实提示词服务及输入后切换模式的页面验证 |
 | [2026-10-13 工作台 UI 验证](testing/2026-10-13-WORKBENCH_UI.md) | 折叠偏好、页面实例与滚动保留、正文手柄隐藏与恢复 |
+| [2026-10-14 皮肤与正文正则验证](testing/2026-10-14-SKIN_REGEX.md) | 气泡背景、明暗主题与关闭恢复 |
 | [2026-10-14 npm 升级验证](testing/2026-10-14-NPM_UPGRADE.md) | npm 0.3.5 至 0.3.6、依赖安装、配置保留与启停重启 |
 | [2026-10-13 包与启停验证](testing/2026-10-13-PACKAGE_LIFECYCLE.md) | TypeScript 文件整理、原主包入口升级、同页分包与正文开关联动 |
 | [2026-10-12 正则验证](testing/2026-10-12-DISPLAY_REGEX.md) | 编辑、Worker、流式正文与配置生命周期 |

@@ -27,7 +27,7 @@ test('display survives concurrent commits, restores on config changes and releas
     }
   }
   const body=new Element(),view=new Element(),row=new Element(),slot=new Element(),shell=new Element(),prose=new Element(),raw=new Element();
-  view.dataset.conversationSession='s';row.dataset={chatFlowKind:'assistant-step',chatNodeKey:'node',chatGroupPart:'response'};slot.dataset.slot='conversation.chat.node';raw.classList=['host_markdown'];
+  view.dataset.conversationSession='s';row.dataset={chatFlowKind:'assistant-step',chatNodeKey:'node',chatGroupPart:'response'};slot.dataset.slot='conversation.chat.node';raw.classList=['host_markdown'];raw.className='host_markdown';
   body.append(view);view.append(row);row.append(slot);slot.append(shell);shell.append(prose);prose.append(raw);
   const listeners=new Set();let node={kind:'assistant-step',data:{status:'settled',finalNode:{messageId:'m'},blocks:[{kind:'text',text:'foo'}]}};
   const source={getSnapshot:()=>node,subscribe(fn){listeners.add(fn);return ()=>listeners.delete(fn);}};
@@ -59,7 +59,7 @@ test('display survives concurrent commits, restores on config changes and releas
   try {
     stop=installDisplay(ctx,{React,createRoot,MarkdownText:()=>null});
     await until(()=>displays().length===1&&raw.style.display==='none');
-    const first=displays()[0];assert.equal(first.children[0].textContent,'bar');assert.equal(node.data.blocks[0].text,'foo');
+    const first=displays()[0];assert.equal(first.className,raw.className,'replacement keeps host surface classes for skins');first.classList=['host_markdown'];assert.equal(first.children[0].textContent,'bar');assert.equal(node.data.blocks[0].text,'foo');
     node={...node,data:{...node.data,blocks:[{kind:'text',text:'foo updated'}]}};for(const fn of listeners)fn();
     await until(()=>displays()[0]?.children[0]?.textContent==='bar updated');assert.equal(displays()[0],first);assert.equal(rootCount,1,'stream updates reuse the committed root');
     node={...node,data:{...node.data,blocks:[{kind:'text',text:'foo updated\n```dsh-ui\n{}\n```'}]}};for(const fn of listeners)fn();

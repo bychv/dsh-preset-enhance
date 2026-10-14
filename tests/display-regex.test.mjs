@@ -83,9 +83,10 @@ test('text runs do not match across reasoning, image or tool boundaries and unsa
   const blocks=[{kind:'text',text:'a'},{kind:'text',text:'b'},{kind:'reasoning',text:'private'},{kind:'text',text:'c'},{kind:'tool-call'}];
   assert.deepEqual(textRuns(blocks).map(r=>r.text),['a\nb','c']);
   assert.equal(mapTextElements({dataset:{},firstElementChild:null},blocks),null);
-  const el={classList:['fixture_markdown_hash']};const body={parentElement:{},children:[el]};const shell={dataset:{},firstElementChild:body,children:[body]};
+  const el={dataset:{},classList:['fixture_markdown_hash']};const body={parentElement:{},children:[el]};const shell={dataset:{},firstElementChild:body,children:[body]};
   assert.equal(mapTextElements({dataset:{},firstElementChild:shell},blocks),null);
   assert.equal(mapTextElements({dataset:{},firstElementChild:shell},[{kind:'text',text:'a'}]).get(0),el);
+  body.children.unshift({dataset:{presetDisplay:''},classList:['fixture_markdown_hash']});
   const slot={dataset:{slot:'conversation.chat.node'},firstElementChild:shell,children:[shell]};
   assert.equal(mapTextElements({dataset:{},firstElementChild:slot},[{kind:'text',text:'a'}]).get(0),el);
 });

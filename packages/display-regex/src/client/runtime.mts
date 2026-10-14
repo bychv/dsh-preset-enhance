@@ -18,7 +18,8 @@ export function mapTextElements(row: HTMLElement,blocks: Block[]) {
   if(shell?.dataset.slot==='conversation.chat.node'&&shell.children.length===1)shell=shell.firstElementChild as HTMLElement | null;
   const body=shell?.firstElementChild;
   if(!body||!body.parentElement||shell?.children.length!==1)return null;
-  const candidates=[...body.children].filter(isMarkdown) as HTMLElement[];
+  // The display mount mirrors the source classes for skin selectors, but is not source text.
+  const candidates=[...body.children].filter(el=>!('presetDisplay' in (el as HTMLElement).dataset)&&isMarkdown(el)) as HTMLElement[];
   const texts=blocks.map((b,i)=>b.kind==='text'?i:null).filter(i=>i!==null);
   if(candidates.length!==texts.length)return null;
   return new Map(texts.map((index,i)=>[index,candidates[i]]));
@@ -85,11 +86,14 @@ export function installDisplay(ctx: DisplayContext, {React,createRoot,MarkdownTe
         const existing=entry.mounts.find(m=>m.key===key);
         retained.add(key);
         if(existing){
+          existing.container.className=originals[0].className;
           if(status==='running')existing.container.dataset.streaming='';else delete existing.container.dataset.streaming;
           existing.root.render(React.createElement(CommittedMarkdown,{text,streaming:status==='running'}));
           continue;
         }
-        const container=document.createElement('div');container.dataset.presetDisplay='';container.style.minWidth='0';container.style.display='none';
+        const container=document.createElement('div');container.dataset.presetDisplay='';
+        // Keep the host-level Markdown surface so theme bubbles still match at this depth.
+        container.className=originals[0].className;container.style.minWidth='0';container.style.display='none';
         if(status==='running')container.dataset.streaming='';
         // Render the transformed Markdown normally, leaving fences available to GenUI.
         const root=createRoot(container);

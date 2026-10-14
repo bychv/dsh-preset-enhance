@@ -26,7 +26,8 @@ export function mapTextElements(row, blocks) {
     const body = shell?.firstElementChild;
     if (!body || !body.parentElement || shell?.children.length !== 1)
         return null;
-    const candidates = [...body.children].filter(isMarkdown);
+    // The display mount mirrors the source classes for skin selectors, but is not source text.
+    const candidates = [...body.children].filter(el => !('presetDisplay' in el.dataset) && isMarkdown(el));
     const texts = blocks.map((b, i) => b.kind === 'text' ? i : null).filter(i => i !== null);
     if (candidates.length !== texts.length)
         return null;
@@ -178,6 +179,7 @@ export function installDisplay(ctx, { React, createRoot, MarkdownText }) {
                 const existing = entry.mounts.find(m => m.key === key);
                 retained.add(key);
                 if (existing) {
+                    existing.container.className = originals[0].className;
                     if (status === 'running')
                         existing.container.dataset.streaming = '';
                     else
@@ -187,6 +189,8 @@ export function installDisplay(ctx, { React, createRoot, MarkdownText }) {
                 }
                 const container = document.createElement('div');
                 container.dataset.presetDisplay = '';
+                // Keep the host-level Markdown surface so theme bubbles still match at this depth.
+                container.className = originals[0].className;
                 container.style.minWidth = '0';
                 container.style.display = 'none';
                 if (status === 'running')
