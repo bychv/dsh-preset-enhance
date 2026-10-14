@@ -72,3 +72,21 @@ test('opening the editor preserves the last workbench position when navigation s
   ui.cleanup();
   assert.equal(JSON.parse([...saved.values()][0]).page, 701);
 });
+
+
+test('canceled navigation and back-forward restoration resume scroll recording', () => {
+  for (const event of ['wheel', 'pointerdown', 'keydown', 'touchstart', 'pageshow']) {
+    const ui = fixture();
+    try {
+      ui.root.scrollingElement.scrollTop = 701;
+      ui.windowListeners.get('pagehide')();
+      ui.preserveOnNavigation();
+      (event === 'pageshow' ? ui.windowListeners : ui.listeners).get(event)();
+      ui.root.scrollingElement.scrollTop = 920;
+      ui.windowListeners.get('pagehide')();
+      assert.equal(JSON.parse([...ui.saved.values()][0]).page, 920, event);
+    } finally { ui.cleanup(); }
+    assert.equal(ui.listeners.size, 0);
+    assert.equal(ui.windowListeners.size, 0);
+  }
+});

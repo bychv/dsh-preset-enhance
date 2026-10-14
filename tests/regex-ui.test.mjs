@@ -190,7 +190,7 @@ const basePreset = extra => ({
 function element(tag) {
   const node = {
     tagName: tag, children: [], _text: '', checked: false, value: '', disabled: false, hidden: false,
-    className: '', dataset: {}, style: {}, type: '', rows: 0, placeholder: '', title: '', spellcheck: true,
+    className: '', dataset: {}, style: { setProperty(name, value) { this[name] = value; } }, type: '', rows: 0, placeholder: '', title: '', spellcheck: true,
     min: '', step: '', files: undefined, files: undefined,
     classList: {
       _set: new Set(),

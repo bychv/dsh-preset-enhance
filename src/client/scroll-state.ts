@@ -34,6 +34,12 @@ export function rememberWorkbenchScroll(root: Document, identity: () => string, 
   root.addEventListener('scroll', onScroll, true);
   const onPageHide = () => { if (!preserve) save(); };
   window.addEventListener('pagehide', onPageHide);
+  // A canceled beforeunload leaves this document alive; resume on further input.
+  // pageshow also covers returning through the browser's back-forward cache.
+  const resume = () => { preserve = false; };
+  const inputEvents = ['pointerdown', 'keydown', 'wheel', 'touchstart'];
+  for (const name of inputEvents) root.addEventListener(name, resume, true);
+  window.addEventListener('pageshow', resume);
 
   let saved: Record<string, unknown> | undefined;
   try {
@@ -61,6 +67,8 @@ export function rememberWorkbenchScroll(root: Document, identity: () => string, 
     if (!preserve) save();
     root.removeEventListener('scroll', onScroll, true);
     window.removeEventListener('pagehide', onPageHide);
+    window.removeEventListener('pageshow', resume);
+    for (const name of inputEvents) root.removeEventListener(name, resume, true);
   }) as ScrollController;
   dispose.preserveOnNavigation = () => {
     preserve = true;
