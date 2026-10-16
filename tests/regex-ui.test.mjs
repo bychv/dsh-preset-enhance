@@ -223,6 +223,7 @@ function editor(presetValue = basePreset(), fetchImpl) {
     .replace(/^import .*;\r?\n/gm, '').replace('await guard(() => reload())();', '');
   const context = {
     URLSearchParams, structuredClone, console, fetch, __initialPreset: presetValue,
+    observeRequestEvents: () => () => {},
     observeDisplayAvailability: notify => { context.notifyAvailability = notify; notify({ available: true }); return () => {}; },
     location: { search: '?sessionId=s' },
     localStorage: { getItem: () => null, setItem() {}, removeItem() {} },

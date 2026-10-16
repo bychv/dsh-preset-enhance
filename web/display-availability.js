@@ -1,3 +1,4 @@
+import { observeWorkbenchActivity } from './workbench-activity.js';
 const off = { apiVersion: 1, available: false, instance: null };
 const displayListeners = new Set();
 const templateListeners = new Set();
@@ -62,18 +63,11 @@ function lease(start, end) {
         return; active = true; start(); connect(); };
     const pause = () => { if (!active)
         return; active = false; end(); release(); };
-    if (typeof window !== 'undefined') {
-        window.addEventListener('pageshow', resume);
-        window.addEventListener('pagehide', pause);
-    }
-    resume();
+    const dispose = observeWorkbenchActivity(active => active ? resume() : pause());
     return () => {
         disposed = true;
         pause();
-        if (typeof window !== 'undefined') {
-            window.removeEventListener('pageshow', resume);
-            window.removeEventListener('pagehide', pause);
-        }
+        dispose();
     };
 }
 export function observeDisplayAvailability(notify) {

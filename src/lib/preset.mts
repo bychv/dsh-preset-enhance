@@ -29,6 +29,9 @@ export function validatePreset(preset: unknown): SillyTavernPreset {
   }
   validateDshTemplates(preset.dsh_system_prompt_templates);
   validateRequestSettings(preset.dsh_request);
+  if (preset.dsh_prefill_target !== undefined && preset.dsh_prefill_target !== 'reasoning' && preset.dsh_prefill_target !== 'content') {
+    throw new Error('dsh_prefill_target 必须为 reasoning 或 content');
+  }
   const ids = new Set<string>();
   templateBindings(preset as unknown as SillyTavernPreset);
   for (const p of preset.prompts as unknown[]) {

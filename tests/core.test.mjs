@@ -1142,7 +1142,7 @@ test('adapter tool settings drive prefix rewriting end to end', async () => {
     }])).messages.at(-1).reasoning_content, 'Review second output');
     assert.equal((await send([...toolHistory, msg('new', 'user', 'next turn')])).messages.at(-1).reasoning_content, '继续');
     await configure({ postToolPrefixText: 'Updated continuation' });
-    assert.equal((await send(toolHistory)).messages.at(-1).content, 'Updated continuation');
+    assert.equal((await send(toolHistory)).messages.at(-1).reasoning_content, 'Updated continuation');
     await configure({ deepseekBetaPrefix: false });
     assert.equal((await send(toolHistory)).messages.at(-1).content, '<think>\n继续');
     await configure({ deepseekBetaPrefix: true, postToolPrefixText: '' });
@@ -1156,6 +1156,11 @@ test('adapter tool settings drive prefix rewriting end to end', async () => {
     assert.equal(passedThrough.tool_choice, 'auto');
     assert.equal(passedThrough.parallel_tool_calls, false);
     assert.doesNotMatch(passedThrough.messages[0].content, /## Tools/);
+
+    await store.transaction(state => { state.presets[0].preset.dsh_prefill_target = 'content'; });
+    const bodyPrefix = (await send()).messages.at(-1);
+    assert.equal(bodyPrefix.content, '<think>\n继续', 'explicit body target preserves the exact prefix');
+    assert.equal(bodyPrefix.reasoning_content, '');
 
     await configure({ prefixNonOfficialRemoveTools: true });
     const removed = await send();

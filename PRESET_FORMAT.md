@@ -29,6 +29,7 @@
           { "identifier": "chatHistory", "enabled": true }
         ] }
       ],
+      "dsh_prefill_target": "reasoning",
       "assistant_prefill": ""
     }
   },
@@ -85,6 +86,8 @@
 - `postToolPrefix.text`：自定义提示词文本；留空或宏展开为空时继承原预设。
 
 接口地址、API key、用户身份、会话 ID、会话历史、运行中的变量值和本机路径不属于预填充配置。新建分享文件只从全局状态中提取上述接口设置，不打包整个本地数据库。
+
+`preset.data.dsh_prefill_target` 为 `reasoning`（默认）或 `content`，控制末条预填充写入思考还是正文。它属于预设内容，普通 ST JSON 和单文件分享都保留；不属于全局 `prefill` 接口配置。省略时默认思考，未知值拒绝导入。该设置同样用于工具调用后的自定义前缀；关闭模型思考时按正文发送。
 
 ## 工具预设与分组
 

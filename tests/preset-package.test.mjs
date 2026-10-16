@@ -389,3 +389,16 @@ test('extraction linkage preserves edited templates and package fields through i
  const plain=prompt();delete plain.assistant_prefill;assert.equal(ensurePackageExtractionTemplate(plain,true,true),false);
  const unordered={prompts:[{identifier:'off',role:'system',enabled:false},{identifier:'prefix',role:'assistant',content:'prefix'}]};assert.equal(ensurePackageExtractionTemplate(unordered,true,true),true);assert.equal(unordered.prompt_order[0].order.find(p=>p.identifier==='off').enabled,false);
 });
+
+
+test('prefill target belongs to the preset, defaults to reasoning and survives sharing',()=>{
+  for(const target of ['reasoning','content']) {
+    const preset={...prompt(),dsh_prefill_target:target};
+    const encoded=encodePresetPackage({name:'Target fixture',preset},settings());
+    assert.equal(encoded.preset.data.dsh_prefill_target,target);
+    assert.equal(decodePresetDocument(encoded).preset.dsh_prefill_target,target);
+    assert.equal(Object.hasOwn(encoded.prefill,'target'),false,'target is not a global interface setting');
+  }
+  assert.equal(decodePresetDocument(packet()).preset.dsh_prefill_target,undefined,'legacy presets need no rewrite');
+  assert.throws(()=>decodePresetDocument({...prompt(),dsh_prefill_target:'other'}),/dsh_prefill_target/);
+});

@@ -62,6 +62,10 @@ window.__ModuleLoader__.load({
                 void face.load?.(); }, [entry, source]);
             return modeId;
         }
+        function notifyFrameActivity(record, active) {
+            record.element.setAttribute('data-preset-enhance-active', String(active));
+            record.element.contentWindow?.postMessage({ type: 'preset-enhance:activity', active }, window.location.origin);
+        }
         function acquireFrame(key, src) {
             const candidates = keptFrames.get(key) ?? [];
             let record = candidates.find(item => !item.active && item.element.isConnected);
@@ -90,6 +94,7 @@ window.__ModuleLoader__.load({
             record.active = false;
             record.lastUsed = Date.now();
             const frame = record.element;
+            notifyFrameActivity(record, false);
             frame.removeAttribute('data-preset-enhance-frame');
             frame.setAttribute('aria-hidden', 'true');
             frame.style.visibility = 'hidden';
@@ -128,7 +133,10 @@ window.__ModuleLoader__.load({
                 const record = acquireFrame(kind + ':' + sessionId, workbenchSrc(sessionId, selectedMode.current));
                 current.current = record;
                 const frame = record.element;
-                const notify = () => frame.contentWindow?.postMessage({ type: 'preset-enhance:input-mode', modeId: selectedMode.current }, window.location.origin);
+                const notify = () => {
+                    notifyFrameActivity(record, record.active);
+                    frame.contentWindow?.postMessage({ type: 'preset-enhance:input-mode', modeId: selectedMode.current }, window.location.origin);
+                };
                 const position = () => {
                     if (!anchor.isConnected)
                         return;

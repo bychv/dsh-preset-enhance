@@ -370,6 +370,7 @@ const chatConnection = () => {
     const preparedHistory = (preset: import('./lib/types.mjs').SillyTavernPreset) => exclusive || !dshSystemPromptEnabled(preset)
       ? presetModeHistory(history) : dshSystemTemplate?.available ? withoutDshPrompt(history) : history;
     let requestSettings: ReturnType<typeof readRequestSettings> | undefined;
+    let prefixTarget: 'reasoning' | 'content' = 'reasoning';
     const historyRevision = dynamic && session.deriveMessages ? digest(session.deriveMessages()) : undefined;
     const dynamicBodies = dynamic ? (await lifecycle.track(prepareDynamicTemplates(templateRegistry, initialRecord!.preset,
       preparedHistory(initialRecord!.preset), {
@@ -400,6 +401,7 @@ const chatConnection = () => {
         if (!record) throw new Error('当前会话启用的预设不存在');
         const presetHistory = preparedHistory(record.preset);
         requestSettings = readRequestSettings(record.preset);
+        prefixTarget = record.preset.dsh_prefill_target === 'content' ? 'content' : 'reasoning';
         const postToolPrefix = current.deepseekBetaPrefix && current.postToolPrefixMode === 'custom'
           ? current.postToolPrefixText : undefined;
         const templateReferences = resolveTemplateBindings(record.preset, templateCatalog,
@@ -459,6 +461,7 @@ const chatConnection = () => {
     const releaseBeta = compiled !== null ? deepSeekBeta.activate(sessionId, prefixKey, {
       mode: connectionProtocolFor(initial, connectionInfo),
       ...requestSettings,
+      target: prefixTarget,
       toolCalls: initial.prefixToolCalls === true,
       removeNonOfficialTools: initial.prefixNonOfficialRemoveTools !== false,
       extractOutput: initial.prefixOutputExtraction === true,
@@ -486,6 +489,8 @@ const chatConnection = () => {
     [BASE, ['web/index.html', 'text/html']],
     [`${BASE}/regex-editor.js`, ['web/regex-editor.js', 'text/javascript']],
     [`${BASE}/regex-worker.js`, ['web/regex-worker.js', 'text/javascript']],
+    [`${BASE}/workbench-activity.js`, ['web/workbench-activity.js', 'text/javascript']],
+    [`${BASE}/request-events.js`, ['web/request-events.js', 'text/javascript']],
     [`${BASE}/display-availability.js`, ['web/display-availability.js', 'text/javascript']],
     ...['display-regex', 'prompt-regex', 'macros', 'compaction'].map(file => [`${BASE}/regex/${file}.mjs`, [`lib/${file}.mjs`, 'text/javascript']] as [string, [string, string]]),
     [`${BASE}/disclosures.js`, ['web/disclosures.js', 'text/javascript']],
@@ -714,7 +719,7 @@ const chatConnection = () => {
               const config = chatConnection();
               const wire = serializeRequest(request as never, { thinking: config.thinking, reasoningEffort: config.reasoningEffort });
               const content = current.deepseekBetaPrefix && result.assistantPrefix.active ? messageText(result.messages.at(-1)) : '';
-              const registry = new Map([[sessionId, new Map([[content, { count: 1, ...requestSettings, mode: 'chat-completions' as const, toolCalls: current.prefixToolCalls === true,
+              const registry = new Map([[sessionId, new Map([[content, { count: 1, ...requestSettings, mode: 'chat-completions' as const, target: body.preset.dsh_prefill_target === 'content' ? 'content' as const : 'reasoning' as const, toolCalls: current.prefixToolCalls === true,
                 removeNonOfficialTools: current.prefixNonOfficialRemoveTools !== false, extractOutput: current.prefixOutputExtraction === true }]])]]);
               const rewritten = rewriteDeepSeekPrefixFetch(config.baseURL + '/chat/completions', {
                 method: 'POST', headers: { 'x-deepseek-harness-session-id': sessionId }, body: JSON.stringify(wire),

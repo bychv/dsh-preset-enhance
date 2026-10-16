@@ -65,7 +65,7 @@
 - `GET /preset-enhance/api/display-status`：无需会话的正文包就绪状态。
 - `GET /preset-enhance/api/display-status-events`：同状态 SSE，监听启停与实例替换。
 
-状态为 `{ apiVersion: 1, available: boolean, instance: string | null }`。内置编辑器复用现有 `template-events` 的 `display` 字段接收该状态，与模板刷新共享一条连接；独立状态 SSE 留给其他消费者。页面隐藏释放订阅，返回时重新连接。接口复用宿主 Web 登录，断线或未知版本按不可用处理。客户端不通过此接口修改插件启停，启停仍由 DSH 插件管理器负责。
+状态为 `{ apiVersion: 1, available: boolean, instance: string | null }`。内置编辑器复用现有 `template-events` 的 `display` 字段接收该状态，与模板刷新共享一条连接；独立状态 SSE 留给其他消费者。页面隐藏释放订阅，返回时重新连接；包括宿主切换页面后仍缓存的 iframe，由宿主活动通知控制，不能只依赖 pagehide。接口复用宿主 Web 登录，断线或未知版本按不可用处理。客户端不通过此接口修改插件启停，启停仍由 DSH 插件管理器负责。
 
 两个包通过公开 `./display-api` 导出 `PRESET_DISPLAY_SERVICE`、`PRESET_DISPLAY_EVENT` 和类型。显示包在资源校验完成后提供 `presetDisplayRegex`，就绪或退出时发出 `preset-display/availability`；主包用当前实例的 `ready` 判定有效能力，避免仅凭安装记录显示开启。该能力不包含规则内容或用户数据。
 

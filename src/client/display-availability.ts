@@ -1,3 +1,4 @@
+import { observeWorkbenchActivity } from './workbench-activity.js';
 import type { DisplayAvailability } from '../display-api.mjs';
 export type DisplayStatus = DisplayAvailability;
 const off: DisplayStatus = { apiVersion: 1, available: false, instance: null };
@@ -45,11 +46,10 @@ function lease(start: () => void, end: () => void): () => void {
   let active = false, disposed = false;
   const resume = () => { if (disposed || active) return; active = true; start(); connect(); };
   const pause = () => { if (!active) return; active = false; end(); release(); };
-  if (typeof window !== 'undefined') { window.addEventListener('pageshow', resume); window.addEventListener('pagehide', pause); }
-  resume();
+  const dispose = observeWorkbenchActivity(active => active ? resume() : pause());
   return () => {
     disposed = true; pause();
-    if (typeof window !== 'undefined') { window.removeEventListener('pageshow', resume); window.removeEventListener('pagehide', pause); }
+    dispose();
   };
 }
 export function observeDisplayAvailability(notify: (status: DisplayStatus) => void): () => void {

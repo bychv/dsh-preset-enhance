@@ -10,7 +10,7 @@ function editor(storage = new Map(), fetch = async () => { throw new Error('offl
     classList: { toggle() {}, add() {}, remove() {} }, append() {}, replaceChildren() {},
     addEventListener() {}, querySelector: () => node(), querySelectorAll: () => [], setAttribute() {} });
   const get = id => { if (!nodes.has(id)) nodes.set(id, node()); return nodes.get(id); };
-  const context = { observeDisplayAvailability: notify => { notify({ available: true }); return () => {}; }, URLSearchParams, structuredClone, console, fetch,
+  const context = { observeRequestEvents: () => () => {}, observeDisplayAvailability: notify => { notify({ available: true }); return () => {}; }, URLSearchParams, structuredClone, console, fetch,
     location: { search: '?sessionId=s' },
     localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) },
     setTimeout: () => 1, clearTimeout() {},
@@ -57,6 +57,7 @@ function editor(storage = new Map(), fetch = async () => { throw new Error('offl
     reloadSelection: () => reload(),
     selected: () => selectedId,
     draft: () => toolDraft,
+    draftPreset: () => preset,
     save: runAutoSave, flush: flushToolDraftKeepalive,
     };
   `, context);
@@ -177,4 +178,13 @@ test('import waits for an old global save and reloads restored controls without 
  assert.deepEqual(calls.filter(Boolean).map(b=>b.action),['import']);
  assert.equal(ui.get('deepseek-beta-prefix').checked,true);assert.equal(ui.get('prefix-output-extraction').checked,true);
  assert.equal(ui.get('post-tool-prefix-text').value,'restored');assert.equal(ui.selected(),'B');
+});
+
+
+test('prefill target switch edits the preset instead of global interface settings',()=>{
+  const ui=editor();ui.setPreset({prompts:[],prompt_order:[]});
+  ui.get('prefix-to-reasoning').checked=false;ui.get('prefix-to-reasoning').onchange();
+  assert.equal(ui.draftPreset().dsh_prefill_target,'content');
+  ui.get('prefix-to-reasoning').checked=true;ui.get('prefix-to-reasoning').onchange();
+  assert.equal(ui.draftPreset().dsh_prefill_target,'reasoning');
 });

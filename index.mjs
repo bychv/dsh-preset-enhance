@@ -351,6 +351,7 @@ export async function apply(ctx, config = {}) {
         const preparedHistory = (preset) => exclusive || !dshSystemPromptEnabled(preset)
             ? presetModeHistory(history) : dshSystemTemplate?.available ? withoutDshPrompt(history) : history;
         let requestSettings;
+        let prefixTarget = 'reasoning';
         const historyRevision = dynamic && session.deriveMessages ? digest(session.deriveMessages()) : undefined;
         const dynamicBodies = dynamic ? (await lifecycle.track(prepareDynamicTemplates(templateRegistry, initialRecord.preset, preparedHistory(initialRecord.preset), {
             ...initialBinding, local: ownGet(initial.sessions, sessionId)?.result.local, global: initial.global,
@@ -384,6 +385,7 @@ export async function apply(ctx, config = {}) {
                     throw new Error('当前会话启用的预设不存在');
                 const presetHistory = preparedHistory(record.preset);
                 requestSettings = readRequestSettings(record.preset);
+                prefixTarget = record.preset.dsh_prefill_target === 'content' ? 'content' : 'reasoning';
                 const postToolPrefix = current.deepseekBetaPrefix && current.postToolPrefixMode === 'custom'
                     ? current.postToolPrefixText : undefined;
                 const templateReferences = resolveTemplateBindings(record.preset, templateCatalog, new Set(getOrder(record.preset, binding.characterId).filter(item => item.enabled).map(item => item.identifier))).references;
@@ -445,6 +447,7 @@ export async function apply(ctx, config = {}) {
         const releaseBeta = compiled !== null ? deepSeekBeta.activate(sessionId, prefixKey, {
             mode: connectionProtocolFor(initial, connectionInfo),
             ...requestSettings,
+            target: prefixTarget,
             toolCalls: initial.prefixToolCalls === true,
             removeNonOfficialTools: initial.prefixNonOfficialRemoveTools !== false,
             extractOutput: initial.prefixOutputExtraction === true,
@@ -482,6 +485,8 @@ export async function apply(ctx, config = {}) {
         [BASE, ['web/index.html', 'text/html']],
         [`${BASE}/regex-editor.js`, ['web/regex-editor.js', 'text/javascript']],
         [`${BASE}/regex-worker.js`, ['web/regex-worker.js', 'text/javascript']],
+        [`${BASE}/workbench-activity.js`, ['web/workbench-activity.js', 'text/javascript']],
+        [`${BASE}/request-events.js`, ['web/request-events.js', 'text/javascript']],
         [`${BASE}/display-availability.js`, ['web/display-availability.js', 'text/javascript']],
         ...['display-regex', 'prompt-regex', 'macros', 'compaction'].map(file => [`${BASE}/regex/${file}.mjs`, [`lib/${file}.mjs`, 'text/javascript']]),
         [`${BASE}/disclosures.js`, ['web/disclosures.js', 'text/javascript']],
@@ -733,7 +738,7 @@ export async function apply(ctx, config = {}) {
                             const config = chatConnection();
                             const wire = serializeRequest(request, { thinking: config.thinking, reasoningEffort: config.reasoningEffort });
                             const content = current.deepseekBetaPrefix && result.assistantPrefix.active ? messageText(result.messages.at(-1)) : '';
-                            const registry = new Map([[sessionId, new Map([[content, { count: 1, ...requestSettings, mode: 'chat-completions', toolCalls: current.prefixToolCalls === true,
+                            const registry = new Map([[sessionId, new Map([[content, { count: 1, ...requestSettings, mode: 'chat-completions', target: body.preset.dsh_prefill_target === 'content' ? 'content' : 'reasoning', toolCalls: current.prefixToolCalls === true,
                                                 removeNonOfficialTools: current.prefixNonOfficialRemoveTools !== false, extractOutput: current.prefixOutputExtraction === true }]])]]);
                             const rewritten = rewriteDeepSeekPrefixFetch(config.baseURL + '/chat/completions', {
                                 method: 'POST', headers: { 'x-deepseek-harness-session-id': sessionId }, body: JSON.stringify(wire),

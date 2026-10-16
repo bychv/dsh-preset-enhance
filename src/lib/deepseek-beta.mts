@@ -24,6 +24,7 @@ export type BridgeProtocolMode = 'chat-completions' | 'messages';
 /** Activation bookkeeping for one session/text pair. */
 interface ActivationEntry {
   count: number;
+  target?: 'reasoning' | 'content';
   maxTokens?: number;
   stream?: boolean;
   toolCalls: boolean;
@@ -121,17 +122,17 @@ function entryExtractsOutput(entry: BridgeRegistryEntry): boolean {
   return typeof entry === 'object' && entry !== null && entry.extractOutput === true;
 }
 
-/** Split SillyTavern's open/closed <think> convention into DeepSeek wire fields. */
+/** Split a leading SillyTavern think/thinking block into DeepSeek wire fields. */
 export function splitReasoningPrefix(content: string): { tagged: boolean; content: string; reasoningContent: string } {
-  const open = /^\s*<think>[ \t]*(?:\r?\n)?/iu.exec(content);
+  const open = /^\s*<\s*(think|thinking)\s*>[ \t]*(?:\r?\n)?/iu.exec(content);
   if (!open) return { tagged: false, content, reasoningContent: '' };
   const start = open[0].length;
-  const close = content.indexOf('</think>', start);
-  if (close < 0) return { tagged: true, content: '', reasoningContent: content.slice(start) };
+  const close = new RegExp('</\\s*' + open[1] + '\\s*>', 'iu').exec(content.slice(start));
+  if (!close) return { tagged: true, content: '', reasoningContent: content.slice(start) };
   return {
     tagged: true,
-    content: content.slice(close + '</think>'.length).replace(/^\r?\n/u, ''),
-    reasoningContent: content.slice(start, close),
+    content: content.slice(start + close.index + close[0].length).replace(/^\r?\n/u, ''),
+    reasoningContent: content.slice(start, start + close.index),
   };
 }
 
@@ -152,6 +153,20 @@ function thinkingMessages(messages: any[], enabled: boolean): any[] {
     }
     return { ...message, reasoning_content: '' };
   });
+}
+
+/** Only the matched trailing prefill changes channels; historical messages keep their fields. */
+function targetPrefix(original: JsonObject, normalized: JsonObject, entry: BridgeRegistryEntry, thinking: boolean): JsonObject {
+  const target = typeof entry === 'object' && entry !== null ? entry.target : undefined;
+  // Legacy bridge callers without a target keep the old tag-based projection.
+  if (!target) return { ...normalized, prefix: true };
+  if (target === 'content' || !thinking) return {
+    ...normalized, content: original.content, prefix: true,
+    ...(thinking ? { reasoning_content: typeof original.reasoning_content === 'string' ? original.reasoning_content : '' } : {}),
+  };
+  const split = splitReasoningPrefix(String(original.content ?? ''));
+  const reasoning = split.tagged ? split.reasoningContent + (split.content ? '\n' + split.content : '') : original.content;
+  return { ...normalized, content: '', reasoning_content: reasoning, prefix: true };
 }
 
 /** Why this request could not use the Chat Completions compatibility path. */
@@ -261,7 +276,7 @@ function rewritePrefixFetch(
   if (!entry) return untouched;
   const thinkingEnabled = body.thinking?.type !== 'disabled';
   const messages = thinkingMessages(body.messages, thinkingEnabled);
-  messages[messages.length - 1] = { ...messages.at(-1), prefix: true };
+  messages[messages.length - 1] = targetPrefix(last, messages.at(-1), entry, thinkingEnabled);
   const prefixedBody: JsonObject = { ...body, messages };
   const emulation = entryHandlesToolCalls(entry) && Array.isArray(prefixedBody.tools) &&
     prefixedBody.tools.length > 0 ? emulateToolCallRequest(prefixedBody) : null;
@@ -340,7 +355,7 @@ function switchOfficialMessagesRequest(
   let finalBody: JsonObject = { ...chat, messages };
   let responseTransform: ResponseTransformMetadata | undefined;
   if (entry) {
-    messages[messages.length - 1] = { ...last, prefix: true };
+    messages[messages.length - 1] = targetPrefix(last, last, entry, chat.thinking?.type !== 'disabled');
     const prefixed: JsonObject = { ...chat, messages };
     const emulation = entryHandlesToolCalls(entry) && Array.isArray(prefixed.tools) && prefixed.tools.length > 0
       ? emulateToolCallRequest(prefixed) : null;
@@ -498,6 +513,7 @@ export interface DeepSeekBridgeActivation {
 }
 
 export interface DeepSeekBetaActivationOptions {
+  target?: 'reasoning' | 'content';
   maxTokens?: number;
   stream?: boolean;
   toolCalls?: boolean;
@@ -626,6 +642,7 @@ export function installDeepSeekBetaBridge(
         count: entryCount(texts.get(content)) + 1,
         ...(activationOptions.maxTokens === undefined ? {} : { maxTokens: activationOptions.maxTokens }),
         ...(activationOptions.stream === undefined ? {} : { stream: activationOptions.stream }),
+        ...(activationOptions.target ? { target: activationOptions.target } : {}),
         toolCalls: activationOptions.toolCalls === true,
         removeNonOfficialTools: activationOptions.removeNonOfficialTools !== false,
         extractOutput: activationOptions.extractOutput === true,

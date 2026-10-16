@@ -132,7 +132,11 @@ DSH 系统正文按「当前预设 + DSH 模式」分别保存：编辑过的模
 
 当最终注入消息是 assistant 时，包括顶层 `assistant_prefill` 或顺序表中的末尾 assistant/model 条目，工作台会显示预填充提醒，预览中标记为 `Assistant Prefix`。
 
-在对话补全接口下开启“预填充自动兼容”，插件会为匹配到的末条 assistant 消息添加 `prefix: true`，处理 `<think>` 前缀及兼容接口的思考字段，并保留工具调用历史中的真实 `reasoning_content`。接口要求见 [DeepSeek 对话前缀续写文档](https://api-docs.deepseek.com/zh-cn/guides/chat_prefix_completion)。
+在对话补全接口下开启“预填充自动兼容”，插件会为匹配到的末条 assistant 消息添加 `prefix: true`，处理 `<think>` / `<thinking>` 前缀及兼容接口的思考字段，并保留工具调用历史中的真实 `reasoning_content`。接口要求见 [DeepSeek 对话前缀续写文档](https://api-docs.deepseek.com/zh-cn/guides/chat_prefix_completion)。
+
+预设编辑区的“Assistant 预填充”内提供“预填充到思考”开关，默认开启，随当前预设保存和分享。开启时末条前缀写入 `reasoning_content`；关闭时原样写入 `content`。该选择也适用于顺序表末尾的 assistant 条目及工具调用后的自定义前缀，不改变历史消息的通道。思考模式已关闭时按正文发送；Messages 协议仍不启用预填充桥接。
+
+思考目标支持普通文本，以及开头的 `<think>` / `<thinking>` 包装，兼容未闭合标记、大小写和标签内空白；包装会移除。选择正文时保留原始文本和标记。原有预设没有 `dsh_prefill_target` 字段时默认使用思考目标。
 
 ### 地址与工具字段
 
@@ -152,7 +156,7 @@ DSH 系统正文按「当前预设 + DSH 模式」分别保存：编辑过的模
 
 开启时，格式提示词自动加入当前预设的 `chatHistory` 后方、assistant 预填充前，可在提示词列表中编辑。重复开启保留已有编辑；保存接口设置时会一并保存当前预设。
 
-“工具调用后继续请求的预填充”默认继承原预设，也可填写独立提示词，支持变量宏和 `<think>` 前缀。开启自动兼容后，它只替换同一轮工具执行后继续请求的末条预填充；新一轮用户消息仍使用原预设。留空或展开为空时继续继承。
+“工具调用后继续请求的预填充”默认继承原预设，也可填写独立提示词，支持变量宏和 `<think>` / `<thinking>` 前缀。开启自动兼容后，它只替换同一轮工具执行后继续请求的末条预填充；新一轮用户消息仍使用原预设。留空或展开为空时继续继承。
 
 上述接口设置全局保存，从下一次请求生效。预填充转换只作用于匹配当前会话末条 assistant 前缀的请求。
 

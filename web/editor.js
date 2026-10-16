@@ -1,3 +1,4 @@
+import { observeRequestEvents } from './request-events.js';
 import { observeDisplayAvailability } from './display-availability.js';
 import { mcpTabNames } from './tool-labels.js';
 import { rememberWorkbenchScroll } from './scroll-state.js';
@@ -153,6 +154,7 @@ function loadDraft(id) {
   $('order').value = String(binding.presetId === id && binding.characterId != null ? binding.characterId :
     preset.prompt_order.find(group => String(group.character_id) === '100001')?.character_id ?? preset.prompt_order[0].character_id);
   $('prefill').value = preset.assistant_prefill ?? '';
+  $('prefix-to-reasoning').checked = preset.dsh_prefill_target !== 'content';
   renderRequestSettings();
   selectedPrompt = order()[0]?.identifier ?? preset.prompts[0]?.identifier ?? '';
   dirty = false;
@@ -1818,6 +1820,10 @@ $('post-tool-prefix-mode').onchange = () => {
 };
 $('post-tool-prefix-text').oninput = markPrefillSettingsDirty;
 $('deepseek-beta-prefix').onchange = markPrefillSettingsDirty;
+$('prefix-to-reasoning').onchange = () => {
+  preset.dsh_prefill_target = $('prefix-to-reasoning').checked ? 'reasoning' : 'content';
+  markDirty();
+};
 // 选中即切换：走宿主自己的 provider/model 选择，立即生效。
 // 不参与自动保存，也不触碰未保存的工具开关/分组草稿。
 $('connection-side-left').onclick = () => {
@@ -2372,21 +2378,14 @@ async function readRequestSnapshot(id) {
 $('last').onclick = guard(async () => {
   await readRequestSnapshot();
 });
-let requestEvents;
-function connectRequestEvents() {
-  if (!sessionId || typeof EventSource === 'undefined' || requestEvents) return;
-  requestEvents = new EventSource(`/preset-enhance/api/request-events?sessionId=${encodeURIComponent(sessionId)}`);
-  requestEvents.addEventListener('mode', () => { void refreshConnectionState(); });
-  requestEvents.onmessage = event => {
-    const { id } = JSON.parse(event.data);
-    if (id) void readRequestSnapshot(id).catch(error => status(error.message, true));
-  };
-}
-window.addEventListener('pagehide', () => { previewController?.abort(); requestEvents?.close(); requestEvents = null; });
-window.addEventListener('pageshow', connectRequestEvents);
-connectRequestEvents();
+observeRequestEvents(sessionId, {
+  mode: () => { void refreshConnectionState(); },
+  snapshot: id => { void readRequestSnapshot(id).catch(error => status(error.message, true)); },
+  pause: () => { ++previewGeneration; previewController?.abort(); },
+});
+
 document.querySelector('.preview').addEventListener('input', () => { ++previewGeneration; previewController?.abort(); requestPreview.stale(); });
-for (const id of ['user', 'char', 'markers', 'order', 'deepseek-beta-prefix', 'prefix-tool-calls', 'prefix-output-extraction', 'prefix-nonofficial-remove-tools', 'post-tool-prefix-mode', 'post-tool-prefix-text', 'enabled', 'request-max-tokens', 'request-max-tokens-range', 'request-stream']) {
+for (const id of ['user', 'char', 'markers', 'order', 'deepseek-beta-prefix', 'prefix-to-reasoning', 'prefix-tool-calls', 'prefix-output-extraction', 'prefix-nonofficial-remove-tools', 'post-tool-prefix-mode', 'post-tool-prefix-text', 'enabled', 'request-max-tokens', 'request-max-tokens-range', 'request-stream']) {
   $(id).addEventListener('change', () => { ++previewGeneration; previewController?.abort(); requestPreview.stale(); });
 }
 
