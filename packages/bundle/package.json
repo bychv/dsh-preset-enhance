@@ -1,6 +1,6 @@
 {
   "name": "dsh-preset-enhance-bundle",
-  "version": "0.3.6-alpha.2",
+  "version": "0.3.6-alpha.3",
   "type": "module",
   "license": "MIT",
   "main": "index.mjs",
@@ -13,8 +13,8 @@
     "locale"
   ],
   "dependencies": {
-    "dsh-preset-enhance": "0.3.6-alpha.2",
-    "dsh-preset-display-regex": "0.3.6-alpha.2"
+    "dsh-preset-enhance": "0.3.6-alpha.3",
+    "dsh-preset-display-regex": "0.3.6-alpha.3"
   },
   "dsh": {
     "bundle": {
