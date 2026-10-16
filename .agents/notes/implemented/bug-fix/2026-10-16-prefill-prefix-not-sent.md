@@ -1,56 +1,63 @@
-# 预填充 prefix 未出现在请求中的排查
+# 预填充未切到 beta：宿主把请求 Request 化，桥读不到请求体
 
 Status: implemented
 
-## 问题
+## 现象
 
-用户报告：在沙盒实测的插件请求里「完全没有发送 prefix 参数」，并要求必须修好预填充、在真实沙盒 DSH 的插件请求上验证。
+工作台里预设已注入、末条是 assistant 预填充，但请求**始终不走 beta 接口**，模型按正文续写而不是按预填充续写。工作台的"历史请求"里也看不到 `prefix`。
 
-本记录说明实际发生了什么、哪些猜测被证伪，以及为此新增的可观测性与测试。
+> 本文件早前记录过一次排查，结论是"配置问题、未发现代码缺陷"。**那个结论是错的**，本文替换它。
 
-## 结论
+## 根因
 
-**代码没有丢失 prefix。** 在预填充被正确配置的会话里，`prefix: true` 会出现在**最后一条 message 上**，不是请求顶层：
+宿主自带的 `dsh-experimental-inspector` 包装了 `globalThis.fetch`，把每次调用**规范化成 `Request` 对象**再传给下游（`dsh-experimental-inspector/lib/index.js:53`）：
 
-```json
-{ "messages": [ { "role": "system", "content": "HEAD" },
-                { "role": "assistant", "content": "", "reasoning_content": "好的，我继续。", "prefix": true } ] }
+```js
+const observedFetch = async (input, init) => {
+  const request = new Request(input, init);   // 下游只收到 Request
+  ...
 ```
 
-这与 DeepSeek beta 的前缀续写约定一致（标记属于那条 assistant 消息）。顶层没有 `prefix` 字段是正常的，以「body 顶层无 prefix」判定「没有发送」会误判。真实 API 复核：把该 body 直接发往 `https://api.deepseek.com/beta/chat/completions`，`dsh_prefill_target` 两个取值均返回 HTTP 200，续写正常（content 目标续出正文、reasoning 目标续出思考）。
+而兼容桥只从 `init.body` 读请求体（`src/lib/deepseek-beta.mts` 的 `bodyText`），且只认字符串与 `Uint8Array`：
 
-## 观察到的真实原因（按证据强度）
+```js
+if (typeof body === 'string') return body;
+if (body instanceof Uint8Array) return new TextDecoder().decode(body);
+return null;                       // Request 输入落在这里
+```
 
-1. **该槽位当时没有任何预设绑定到会话。** `GET /preset-enhance/api` 的 `bindings` 为空、`defaultPresetId` 为 undefined，因此编译结果为 null。`src/index.mts:461` 只在 `compiled !== null` 时武装 fetch 桥，桥不武装就不会有任何 prefix。这是配置状态，不是代码缺陷。
-2. **抓到的真实宿主请求走 Messages 协议**（`POST /v1/messages`），不经过插件的 Chat 适配器，因此不参与这条预填充路径。这与 `src/index.mts:453` 的门控一致：Messages 模式不武装。
-3. 该槽位的 `deepseekBetaPrefix` 实际为 **true**（门控 b 已满足），所以「开关默认关闭」不是本次现象的原因——默认值 false 只在全新状态成立。
+所以 `raw == null`，改写函数**静默返回未改写**（`src/lib/deepseek-beta.mts` 的早退分支），前缀永远不可能发出。`captureOutgoingRequest` 同样只认 `init.body`，因此连 wire 快照都记录不下来——这也是"历史请求看不到 prefix"的直接原因。
 
-## 被证伪的假设
+## 为什么长期没被发现
 
-- **激活 key 与 wire content 因 `<think>` 拆分而失配。** 一度很像，但顺序不成立：`src/lib/deepseek-beta.mts:275` 在 `thinkingMessages()`（:278）之前读的是原始 `last.content`；且 vendored 序列化器（`src/vendor/deepseek-chat/serialize.mts:201-217`）不拆 `<think>`，拆分只发生在更晚、更窄的兼容桥内。
-- **key 的生产者与消费者分隔符不同。** 两者完全一致：`messageText`（`src/index.mts:1159-1161`）与 `flattenText`（`serialize.mts`）都是只取 text 块并 `join('')`。
+- **预览路径传的是字符串**（`src/index.mts` 的预览分支直接构造 `(url, init)` 调用改写器），所以预览一切正常，只有真实链路失败。
+- 桥的早退是**静默**的，没有警告、没有快照。
+- 门控、注入、武装键、改写逻辑本身都正确，容易被逐个排除掉，把注意力留在配置上。
 
-## 字段位置（避免再踩）
+## 修复
 
-`dsh_prefill_target` 存在于**预设顶层**：写入见 `web/editor.js:1824`，读取见 `src/index.mts:404` 与 :722，校验见 `src/lib/preset.mts:32`。单文件分享包中它出现在 `preset.data.dsh_prefill_target`（`tests/preset-package.test.mjs:398`），这是分享层的位置，不是运行时读取的位置。`PRESET_FORMAT.md` 第 90 行的措辞按 `preset.data` 描述，容易被读成运行时字段，实施时以代码为准。
+在 fetch 包装层把宿主传来的 `Request` 还原成改写器认识的 `(input, init)`，其余不变：
 
-## 影响与验证
+- 新增 `materializeRequest()`（`src/lib/deepseek-beta.mts`）：`Request` 输入时用 `request.clone().text()` 取出 body，连同 method/headers/signal 组成 init；非 `Request` 输入原样返回。
+- **未改写时仍把调用方原始的 `Request` 对象转发给底层 fetch**，不重新构造，避免丢失 credentials/redirect 等属性。
+- 观察（`captureOutgoingRequest`）与协议观测使用规范化后的形态，因此 wire 快照恢复可记录。
 
-证据分两类，强度不同，不要混用：
+## 验证
 
-- **前缀标记的位置与语义**：由预览/改写逻辑（`src/index.mts:717-727` 走同一个 `rewriteDeepSeekPrefixFetch`）复核两个目标，`prefix:true` 均出现在末条消息；再由真实 beta 端点各发一次（均 HTTP 200，续写正常）确认该位置被官方接受。**这不是抓到的宿主 wire body。**
-- **真实宿主抓包**：两次 `POST /v1/messages`，证明的是**官方 Messages 路由不经过插件适配器**，因此不是前缀路径（`src/index.mts:453` 的门控要求非 messages 才武装）。顶层无 prefix 属预期。
+- **对照实验**：同一请求体，`string + init` 输入 → `changed=true` 且改写到 `…/beta/chat/completions`；`Request` 输入 → `changed=false`。修复后两者一致。
+- **运行期探针**（真实沙盒）：修复前 `WRAP changed=false final=[object Request]`，而 `ACTIVATE keyLen=7` 证明桥已武装；修复后请求命中 beta。
+- **真实 wire 快照**：`source=wire`、`protocol=chat-completions`、`status=HTTP 200`、末条 `prefix=true`、`content=""`、`reasoning_content="好的现在我是猫"`、原生 tools 已移除——即预填充正确进入思考通道。
+- **回归测试**：`tests/core.test.mjs` 新增一条以 `Request` 输入驱动已安装的桥，断言改写命中 beta 且未激活时原样转发；旧代码下该用例会失败。全量 **582/582** 通过，`tsc` 与构建干净。
 
-仍未完成：**尚未抓到插件适配器自己发出的真实 wire body**。要抓需要把该 profile 的 `agent-default-model` 指向 `preset-deepseek-chat` 并让插件按包名解析（headless 下 `--patch` 挂裸目录会报 `ERR_UNSUPPORTED_DIR_IMPORT`）；web 剖面已按包名安装，是可行路径。
-- 覆盖缺口由测试盘点提供，是本记录保留的主要价值：真正断言「线上 body 出现 prefix」的用例只有 7 处，且工作台路径（官方 chat + `assistant_prefill` + `dsh_prefill_target`）没有任何 L3 用例；`content` 目标、工具续轮、`deepseekBetaPrefix=false` 的反向断言均缺失；`preset-stability*` 的 prefix 断言针对 `scripts/preset-stability-core.mjs` 的复刻实现，生产转换器损坏时不会变红。
-- 未做：未改动运行时代码（本次未发现需要修的行为缺陷）。上面的覆盖缺口尚未补测。
+## 遗留
+
+- 只覆盖了 `Request` 一种非字符串形态；`body` 为 `ReadableStream` 的输入仍未支持（`clone()` 失败时退化为不读 body，行为等同修复前）。
+- 按当前约定 `<think>` 包装的预填充由目标设置决定通道（默认思考）；本文未改动该策略。
 
 ## 相关资料
 
-- [兼容桥与预填充改写](../../../../src/lib/deepseek-beta.mts)
-- [激活门控](../../../../src/index.mts)
-- [序列化器](../../../../src/vendor/deepseek-chat/serialize.mts)
-- [预设字段校验](../../../../src/lib/preset.mts)
-- [预设格式说明](../../../../PRESET_FORMAT.md)
+- [桥与改写器](../../../../src/lib/deepseek-beta.mts)
+- 宿主 inspector 包装：`@deepseek-ai/dsh-experimental-inspector/lib/index.js`（在宿主安装目录，不在本仓库内）
+- [回归测试](../../../../tests/core.test.mjs)
 - [工作台预填充开关](../../../../web/editor.js)
-- [本次验证记录](../../../../docs/testing/2026-10-16-WORKBENCH_PREFIX.md)
+- [实现记录](../../../../docs/testing/2026-10-16-WORKBENCH_PREFIX.md)

@@ -425,16 +425,42 @@ export const BRIDGE_INPUT_REASON =
  * on every call, so a controller that installs later shares the same wrapper instead of
  * stacking a new one, and an existing (foreign) wrapper is never replaced.
  */
+/**
+ * The host inspector normalizes every fetch call into a `Request` before this bridge sees it, so
+ * `init` is empty and a body that only lives on the request is invisible to the rewriter. Turn that
+ * one shape into the `(input, init)` pair the rewriter understands. The original request object is
+ * left untouched, so an unrewritten call is forwarded exactly as it arrived.
+ */
+async function materializeRequest(input: FetchInput, init: FetchInit): Promise<{ input: FetchInput; init: FetchInit }> {
+  const RequestCtor = globalThis.Request;
+  if (typeof RequestCtor !== 'function' || !(input instanceof RequestCtor)) return { input, init };
+  const request = input;
+  let body: string | undefined;
+  if (request.body !== null) {
+    try { body = await request.clone().text(); } catch { body = undefined; }
+  }
+  return {
+    input: request.url,
+    init: {
+      method: request.method,
+      headers: request.headers,
+      ...(body === undefined ? {} : { body }),
+      signal: request.signal,
+    } as FetchInit,
+  };
+}
+
 function createWrapper(host: BridgeHost): FetchLike {
   return async function (this: unknown, input: FetchInput, init?: FetchInit): Promise<FetchResponse> {
     const registries = [...host.registries];
     const observers = [...host.observers];
     const seen: Array<{ observer: ProtocolObserver; observation: ProtocolObservation }> = [];
+    const normalized = await materializeRequest(input, init);
     for (const observer of observers) {
-      const observation = observeProtocolRequest(input, init, observer);
+      const observation = observeProtocolRequest(normalized.input, normalized.init, observer);
       if (observation) seen.push({ observer, observation });
     }
-    const rewritten = rewriteDeepSeekPrefixFetch(input, init, registries, { reroute: host.reroute });
+    const rewritten = rewriteDeepSeekPrefixFetch(normalized.input, normalized.init, registries, { reroute: host.reroute });
     if (rewritten.skipped) {
       for (const { observer, observation } of seen) {
         observer.record({ ...observation, skipped: true, skippedReason: rewritten.skipped.reason });
@@ -455,10 +481,15 @@ function createWrapper(host: BridgeHost): FetchLike {
         }
       }
     }
-    const captured = captureOutgoingRequest(rewritten.input, rewritten.init);
+    // Observation always sees the readable shape; the transport keeps whatever the caller passed.
+    const captured = captureOutgoingRequest(
+      rewritten.changed ? rewritten.input : normalized.input,
+      rewritten.changed ? rewritten.init : normalized.init);
     let response: FetchResponse;
     try {
-      response = await Reflect.apply(host.original, this, [rewritten.input, rewritten.init]) as FetchResponse;
+      const forwardedInput = rewritten.changed ? rewritten.input : input;
+      const forwardedInit = rewritten.changed ? rewritten.init : init;
+      response = await Reflect.apply(host.original, this, [forwardedInput, forwardedInit]) as FetchResponse;
       captured?.(`HTTP ${response.status}`);
     } catch (error) { captured?.('传输失败'); throw error; }
     let out = rewritten.responseTransform ?

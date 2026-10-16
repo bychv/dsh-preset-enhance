@@ -993,6 +993,44 @@ test('the installed fetch bridge rewrites only an activated adapter prefill requ
   }
 });
 
+test('the installed bridge rewrites a prefill the host passes as a Request object', async () => {
+  // The host inspector normalizes every fetch call into `new Request(input, init)` before the
+  // plugin bridge sees it. Reading only `init.body` therefore saw no body at all and silently
+  // skipped the rewrite, so no prefix ever reached the beta endpoint.
+  resetFetchBridge();
+  const previous = globalThis.fetch;
+  const calls = [];
+  const stub = async (input, init) => { calls.push({ input, init }); return { ok: true, status: 200 }; };
+  globalThis.fetch = stub;
+  try {
+    const controller = installDeepSeekBetaBridge({ effect: fn => { fn(); } });
+    const body = JSON.stringify({ messages: [{ role: 'user', content: 'hi' }, { role: 'assistant', content: '<think>\ncontinue' }],
+      tools: [{ type: 'function', function: { name: 'noop' } }] });
+    const request = new Request('https://api.deepseek.com/chat/completions', {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-deepseek-harness-session-id': 's' }, body,
+    });
+    const release = controller.activate('s', '<think>\ncontinue', { removeNonOfficialTools: true });
+    await globalThis.fetch(request);
+    assert.equal(calls.length, 1);
+    // The rewrite reached the official beta endpoint and carried the continuation flag.
+    assert.equal(String(calls[0].input), 'https://api.deepseek.com/beta/chat/completions');
+    const rewritten = JSON.parse(calls[0].init.body);
+    assert.equal(rewritten.messages.at(-1).prefix, true);
+    assert.equal(rewritten.tools, undefined);
+
+    release();
+    // Without an activation the caller's own request object is forwarded untouched.
+    await globalThis.fetch(request);
+    assert.equal(calls[1].input, request);
+
+    controller.dispose();
+    assert.equal(globalThis.fetch, stub);
+  } finally {
+    resetFetchBridge();
+    globalThis.fetch = previous;
+  }
+});
+
 test('installed fetch bridge converts an emulated adapter response back to tool calls', async () => {
   resetFetchBridge();
   const previous = globalThis.fetch;
