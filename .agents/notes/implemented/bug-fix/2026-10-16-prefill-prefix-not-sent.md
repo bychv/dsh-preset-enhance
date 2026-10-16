@@ -36,7 +36,12 @@ Status: implemented
 
 ## 影响与验证
 
-- 结论基于：真实 API 两次调用（beta 端点，两个目标各一次，均 200）、真实宿主抓包（`POST /v1/messages` ×2，顶层无 prefix 属预期）、预览接口对两个目标的 wire body 复核（`prefix:true` 均出现在末条消息）。
+证据分两类，强度不同，不要混用：
+
+- **前缀标记的位置与语义**：由预览/改写逻辑（`src/index.mts:717-727` 走同一个 `rewriteDeepSeekPrefixFetch`）复核两个目标，`prefix:true` 均出现在末条消息；再由真实 beta 端点各发一次（均 HTTP 200，续写正常）确认该位置被官方接受。**这不是抓到的宿主 wire body。**
+- **真实宿主抓包**：两次 `POST /v1/messages`，证明的是**官方 Messages 路由不经过插件适配器**，因此不是前缀路径（`src/index.mts:453` 的门控要求非 messages 才武装）。顶层无 prefix 属预期。
+
+仍未完成：**尚未抓到插件适配器自己发出的真实 wire body**。要抓需要把该 profile 的 `agent-default-model` 指向 `preset-deepseek-chat` 并让插件按包名解析（headless 下 `--patch` 挂裸目录会报 `ERR_UNSUPPORTED_DIR_IMPORT`）；web 剖面已按包名安装，是可行路径。
 - 覆盖缺口由测试盘点提供，是本记录保留的主要价值：真正断言「线上 body 出现 prefix」的用例只有 7 处，且工作台路径（官方 chat + `assistant_prefill` + `dsh_prefill_target`）没有任何 L3 用例；`content` 目标、工具续轮、`deepseekBetaPrefix=false` 的反向断言均缺失；`preset-stability*` 的 prefix 断言针对 `scripts/preset-stability-core.mjs` 的复刻实现，生产转换器损坏时不会变红。
 - 未做：未改动运行时代码（本次未发现需要修的行为缺陷）。上面的覆盖缺口尚未补测。
 
