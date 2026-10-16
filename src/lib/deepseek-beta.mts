@@ -304,9 +304,19 @@ function rewritePrefixFetch(
     } : {}),
   };
 }
+/**
+ * Decode every body shape a synchronous caller can read by itself. Blob, ReadableStream and
+ * FormData cannot be decoded here; the ones the bridge can consume are read by
+ * {@link materializeRequest} before the rewriter ever runs.
+ */
 function bodyText(body: unknown): string | null {
   if (typeof body === 'string') return body;
   if (body instanceof Uint8Array) return new TextDecoder().decode(body);
+  if (body instanceof ArrayBuffer) return new TextDecoder().decode(new Uint8Array(body));
+  if (ArrayBuffer.isView(body)) {
+    return new TextDecoder().decode(new Uint8Array(body.buffer as ArrayBuffer, body.byteOffset, body.byteLength));
+  }
+  if (body instanceof URLSearchParams) return body.toString();
   return null;
 }
 
@@ -427,27 +437,52 @@ export const BRIDGE_INPUT_REASON =
  */
 /**
  * The host inspector normalizes every fetch call into a `Request` before this bridge sees it, so
- * `init` is empty and a body that only lives on the request is invisible to the rewriter. Turn that
- * one shape into the `(input, init)` pair the rewriter understands. The original request object is
- * left untouched, so an unrewritten call is forwarded exactly as it arrived.
+ * `init` is empty and a body that only lives on the request is invisible to the rewriter. Callers
+ * may also hand the body in any BodyInit shape, while the rewriter is synchronous. Materialize both
+ * here, where awaiting is allowed.
+ *
+ * `rebuilt` marks a normalization that consumed the caller's body, which a stream cannot survive;
+ * such a call must be forwarded from the normalized pair even when nothing was rewritten. A
+ * `Request` is only ever cloned, so it stays forwardable exactly as the caller passed it.
  */
-async function materializeRequest(input: FetchInput, init: FetchInit): Promise<{ input: FetchInput; init: FetchInit }> {
+async function materializeRequest(input: FetchInput, init: FetchInit): Promise<{ input: FetchInput; init: FetchInit; rebuilt: boolean }> {
   const RequestCtor = globalThis.Request;
-  if (typeof RequestCtor !== 'function' || !(input instanceof RequestCtor)) return { input, init };
-  const request = input;
-  let body: string | undefined;
-  if (request.body !== null) {
-    try { body = await request.clone().text(); } catch { body = undefined; }
+  if (typeof RequestCtor === 'function' && input instanceof RequestCtor) {
+    const request = input;
+    let body: string | undefined;
+    if (request.body !== null) {
+      try { body = await request.clone().text(); } catch { body = undefined; }
+    }
+    return {
+      input: request.url,
+      init: {
+        method: request.method,
+        headers: request.headers,
+        ...(body === undefined ? {} : { body }),
+        signal: request.signal,
+      } as FetchInit,
+      rebuilt: false,
+    };
   }
-  return {
-    input: request.url,
-    init: {
-      method: request.method,
-      headers: request.headers,
-      ...(body === undefined ? {} : { body }),
-      signal: request.signal,
-    } as FetchInit,
-  };
+  const text = await readableBodyText(init?.body);
+  if (text === null) return { input, init, rebuilt: false };
+  return { input, init: { ...(init ?? {}), body: text } as FetchInit, rebuilt: true };
+}
+
+/**
+ * Read a body the synchronous rewriter cannot decode on its own. Returns null when the body needs
+ * no help, when another owner already holds the stream, or when reading fails; the call is then
+ * left exactly as the caller wrote it.
+ */
+async function readableBodyText(body: unknown): Promise<string | null> {
+  if (typeof Blob === 'function' && body instanceof Blob) {
+    try { return await body.text(); } catch { return null; }
+  }
+  if (typeof ReadableStream === 'function' && body instanceof ReadableStream) {
+    if (body.locked) return null;
+    try { return await new Response(body).text(); } catch { return null; }
+  }
+  return null;
 }
 
 function createWrapper(host: BridgeHost): FetchLike {
@@ -481,14 +516,16 @@ function createWrapper(host: BridgeHost): FetchLike {
         }
       }
     }
-    // Observation always sees the readable shape; the transport keeps whatever the caller passed.
+    // Observation always sees the readable shape. The transport keeps the caller's own objects
+    // unless the normalization had to consume them.
     const captured = captureOutgoingRequest(
       rewritten.changed ? rewritten.input : normalized.input,
       rewritten.changed ? rewritten.init : normalized.init);
     let response: FetchResponse;
     try {
-      const forwardedInput = rewritten.changed ? rewritten.input : input;
-      const forwardedInit = rewritten.changed ? rewritten.init : init;
+      const forwardNormalized = rewritten.changed || normalized.rebuilt;
+      const forwardedInput = forwardNormalized ? rewritten.input : input;
+      const forwardedInit = forwardNormalized ? rewritten.init : init;
       response = await Reflect.apply(host.original, this, [forwardedInput, forwardedInit]) as FetchResponse;
       captured?.(`HTTP ${response.status}`);
     } catch (error) { captured?.('传输失败'); throw error; }

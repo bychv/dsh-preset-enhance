@@ -49,9 +49,21 @@ return null;                       // Request 输入落在这里
 - **真实 wire 快照**：`source=wire`、`protocol=chat-completions`、`status=HTTP 200`、末条 `prefix=true`、`content=""`、`reasoning_content="好的现在我是猫"`、原生 tools 已移除——即预填充正确进入思考通道。
 - **回归测试**：`tests/core.test.mjs` 新增一条以 `Request` 输入驱动已安装的桥，断言改写命中 beta 且未激活时原样转发；旧代码下该用例会失败。全量 **582/582** 通过，`tsc` 与构建干净。
 
+## 覆盖的输入形态
+
+包装层先把输入规范化，再交给同步改写器：
+
+| 形态 | 处理 |
+| --- | --- |
+| `Request` | `clone().text()` 取 body（非破坏性），未改写时仍转发调用方原始对象 |
+| `string` / `Uint8Array` / `ArrayBuffer` / 其他 `ArrayBufferView` / `URLSearchParams` | 同步解码 |
+| `Blob` / `ReadableStream` | 包装层异步读取；流已被占用或读取失败时保持原样（等同修复前行为） |
+
+被读取过的 body 已被消费，因此这类调用即使在未改写时也从规范化后的 `(url, init)` 转发；其余调用继续使用调用方自己的对象。
+
 ## 遗留
 
-- 只覆盖了 `Request` 一种非字符串形态；`body` 为 `ReadableStream` 的输入仍未支持（`clone()` 失败时退化为不读 body，行为等同修复前）。
+- `FormData` 不读取：它不是 JSON 形态，改写器会安全跳过。
 - 按当前约定 `<think>` 包装的预填充由目标设置决定通道（默认思考）；本文未改动该策略。
 
 ## 相关资料

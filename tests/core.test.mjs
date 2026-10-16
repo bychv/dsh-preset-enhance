@@ -1031,6 +1031,54 @@ test('the installed bridge rewrites a prefill the host passes as a Request objec
   }
 });
 
+test('the installed bridge reads every BodyInit shape the host may pass', async () => {
+  resetFetchBridge();
+  const previous = globalThis.fetch;
+  const calls = [];
+  const stub = async (input, init) => { calls.push({ input, init }); return { ok: true, status: 200 }; };
+  globalThis.fetch = stub;
+  try {
+    const controller = installDeepSeekBetaBridge({ effect: fn => { fn(); } });
+    const body = JSON.stringify({ messages: [{ role: 'user', content: 'hi' }, { role: 'assistant', content: 'continue' }],
+      tools: [{ type: 'function', function: { name: 'noop' } }] });
+    const url = 'https://api.deepseek.com/chat/completions';
+    const headers = { 'content-type': 'application/json', 'x-deepseek-harness-session-id': 's' };
+    const encoded = () => new TextEncoder().encode(body);
+    const shapes = {
+      Uint8Array: () => encoded(),
+      ArrayBuffer: () => encoded().buffer,
+      Blob: () => new Blob([body]),
+      ReadableStream: () => new ReadableStream({ start(controller) { controller.enqueue(encoded()); controller.close(); } }),
+    };
+    const release = controller.activate('s', 'continue', { removeNonOfficialTools: true });
+    for (const [name, make] of Object.entries(shapes)) {
+      calls.length = 0;
+      await globalThis.fetch(url, { method: 'POST', headers, body: make() });
+      assert.equal(calls.length, 1, name + ': should reach the transport');
+      assert.equal(String(calls[0].input), 'https://api.deepseek.com/beta/chat/completions', name + ': should switch to beta');
+      const rewritten = JSON.parse(calls[0].init.body);
+      assert.equal(rewritten.messages.at(-1).prefix, true, name + ': should carry the prefix flag');
+      assert.equal(rewritten.tools, undefined, name + ': should drop native tools');
+    }
+    release();
+    // A body nobody had to consume keeps the caller's own init object; a consumed one is forwarded
+    // from the normalized pair, because the original stream is gone.
+    calls.length = 0;
+    const init = { method: 'POST', headers, body };
+    await globalThis.fetch(url, init);
+    assert.equal(calls[0].init, init, 'an untouched body keeps the caller init object');
+    calls.length = 0;
+    await globalThis.fetch(url, { method: 'POST', headers, body: new Blob([body]) });
+    assert.equal(typeof calls[0].init.body, 'string', 'a consumed body is forwarded as text');
+    assert.equal(JSON.parse(calls[0].init.body).messages.at(-1).prefix, undefined);
+    controller.dispose();
+    assert.equal(globalThis.fetch, stub);
+  } finally {
+    resetFetchBridge();
+    globalThis.fetch = previous;
+  }
+});
+
 test('installed fetch bridge converts an emulated adapter response back to tool calls', async () => {
   resetFetchBridge();
   const previous = globalThis.fetch;
