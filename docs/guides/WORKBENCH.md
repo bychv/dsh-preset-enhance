@@ -1,17 +1,17 @@
 # 工作台使用指南
 
-适用范围：0.3.6-alpha.3，面向 DSH 0.2.1 全系列。正文分包、正则编辑、分享配置恢复与紧凑 Raw 已发布；后续源码改动以对应版本和验证记录为准。
+适用范围：0.3.6-rc.1，面向 DSH 0.2.1 全系列。正文分包、正则编辑、分享配置恢复与紧凑 Raw 已发布；后续源码改动以对应版本和验证记录为准。
 
 预设模式的能力、适用场景和任务示例见[模式说明与如何使用](PRESET_MODE.md)。
 
 ## 安装与上手
 
-### 已发布预览版
+### 已发布候选版
 
-安装 alpha 预览通道：
+安装 next 候选通道：
 
 ```powershell
-dsh plugin --profile web add dsh-preset-enhance@alpha
+dsh plugin --profile web add dsh-preset-enhance@next
 ```
 
 安装后重新启动 `dsh web`，侧边栏会出现“预设工作台”，新建对话的模式列表中会出现“预设模式”。

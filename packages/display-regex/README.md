@@ -4,9 +4,9 @@
 
 支持历史及流式助手正文的正则替换，HTML 始终作为文本，不执行脚本。可与另装 GenUI 共用 Markdown 围栏，发现组件时不会自动回退。关闭后恢复原文；不修改历史、请求上下文及宿主导出。需要同版本、提供 display API v1 的 `dsh-preset-enhance`，仅面向 DSH 0.2.1 系列。
 
-本地开发先在仓库根目录运行 `npm run build`，用本地构建快照满足主包对子包的依赖，再安装主包入口。正式安装使用 `dsh-preset-enhance@alpha`，由主包自动安装本包。
+本地开发先在仓库根目录运行 `npm run build`，用本地构建快照满足主包对子包的依赖，再安装主包入口。正式安装使用 `dsh-preset-enhance@next`，由主包自动安装本包。
 
-配置、接口及 GenUI/文件展示边界见仓库的 [正文正则说明](https://github.com/bychv/dsh-preset-enhance/blob/next-ver/docs/api/DISPLAY_REGEX.md)。
+配置、接口及 GenUI/文件展示边界见仓库的 [正文正则说明](https://github.com/bychv/dsh-preset-enhance/blob/main/docs/api/DISPLAY_REGEX.md)。
 
 ## 源码与插件管理
 

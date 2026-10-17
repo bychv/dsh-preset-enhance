@@ -10,14 +10,14 @@
 - **预填充与工具**：Assistant 前缀续写、DSML 转换、实验性正文提取、逐工具开关与分组。
 - **插件接入**：动态模板、酒馆 marker 关联、历史消息处理与预设只读 API。
 
-> 本文对应 **0.3.6-alpha.3**，面向 DSH **0.2.1 全系列**。
+> 本文对应 **0.3.6-rc.1**，面向 DSH **0.2.1 全系列**。
 
 ## 安装与升级
 
-安装已发布的 alpha 通道版本：
+安装已发布的 RC 通道版本：
 
 ```powershell
-dsh plugin --profile web add dsh-preset-enhance@alpha
+dsh plugin --profile web add dsh-preset-enhance@next
 ```
 
 重新启动 `dsh web`，在侧边栏打开「预设工作台」。导入预设后，新建「预设模式」对话即可使用；已有会话用 `/preset on` 或 `/preset off` 控制注入。
