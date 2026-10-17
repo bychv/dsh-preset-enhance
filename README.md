@@ -1,5 +1,7 @@
 # DSH Preset Enhance
 
+[![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)
+
 在 DeepSeek Harness 中使用 SillyTavern 预设，管理提示词、预填充、正则与工具开关。
 
 - **预设编辑**：工作台与 SPreset 编辑器，支持顺序、深度注入、变量宏、自动保存和单文件分享。
