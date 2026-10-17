@@ -17,6 +17,14 @@ node tests/fixtures/protocol-server.mjs
 具备本机沙盒环境时，`npm run test:mcp:candidate` 可在 **candidate 槽位**启动两个隔离的 stdio MCP 服务，检查发现、调用和分组；结束后关闭测试服务，不写入 candidate 配置。
 
 
+## 本地化与文档维护
+
+三个包各自的 `locale/en.json`、`locale/zh-CN.json` 提供 DSH 插件管理器读取的 `meta.title` 和 `meta.description`。英文文件使用英文显示名称和简介，中文文件保留中文；键结构应一致。适配器名称、工作台及 SPreset 的中文文案仍在源码中，不会因修改这些元数据自动变成英文界面。
+
+功能或字段变化时，先更新 `docs/guides/` 的操作说明、`docs/api/` 的接口契约或根目录 `PRESET_FORMAT.md`，再按需调整[架构入口](ARCHITECTURE.md#代码对应关系)和[文档导航](README.md)。`docs/plans/` 标明已落地与待实施范围；`docs/testing/` 保留当次版本、测试数量和验证边界，不将历史记录改写为当前版本已全部复测。
+
+仅修改 locale 或文档时，检查 JSON 键与语言、相对链接以及三个包的 `npm pack --dry-run --ignore-scripts` 清单即可，无需重跑模型调用或完整运行测试。改变 TypeScript 源码时仍需构建。
+
 ## 正文显示子包
 
 根目录 `npm run build` 检查主包宿主、子包宿主及浏览器 TypeScript 项目，再生成主包与显示包的运行产物。`src/client/` 保存客户端入口、折叠与滚动状态、正则编辑器、Raw 预览、可用性订阅和共享 Worker；正文包浏览器源码在 `packages/display-regex/src/client/`。既有资源 URL 保持不变，无需另装共享运行包。其余旧 JavaScript 按模块继续迁移。

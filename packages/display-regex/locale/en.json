@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "正文正则",
-    "description": "助手正文显示替换"
+    "title": "Display Regex",
+    "description": "Regex replacements for assistant message display"
   }
 }
