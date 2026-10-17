@@ -265,7 +265,7 @@ export function buildPresetModeDefinition(
   return {
     id: options.id ?? PRESET_MODE_ID,
     name: options.name ?? '预设模式',
-    description: options.description ?? '新对话从第一轮起自动启用预设工作台中设置的模式默认预设。',
+    description: options.description ?? '使用酒馆预设组织提示词，保留标准模式工具。先在预设工作台导入并选择预设，再新建对话，自动从首轮启用。',
     order: options.order ?? 4,
     plugins,
   };

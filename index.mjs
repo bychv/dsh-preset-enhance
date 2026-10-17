@@ -216,7 +216,7 @@ export async function apply(ctx, config = {}) {
     // disk. Probe once and take whichever shape this host actually offers.
     const presetModeCapability = modeCapability(ctx);
     const presetMode = createPresetModeController(ctx, {
-        description: '新对话从第一轮起自动启用预设工作台中设置的模式默认预设。',
+        description: '使用酒馆预设组织提示词，保留标准模式工具。先在预设工作台导入并选择预设，再新建对话，自动从首轮启用。',
     });
     // Startup is staged and names the failing stage together with its path. It must
     // Keep the recovery UI available even when initialization fails. A failed

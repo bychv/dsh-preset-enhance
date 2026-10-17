@@ -6,6 +6,7 @@
 
 | 目的 | 文档 |
 | --- | --- |
+| 预设模式的能力、适用场景与任务示例 | [模式说明与如何使用](guides/PRESET_MODE.md) |
 | 安装、工作台、预填充与工具管理 | [使用指南](guides/WORKBENCH.md) |
 | 请求处理流程、模块分工与生命周期 | [插件架构](ARCHITECTURE.md) |
 | 构建、测试与打包命令 | [开发验证](DEVELOPMENT.md) |
