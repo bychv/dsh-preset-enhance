@@ -11,6 +11,7 @@ const initialState = (): PresetState => ({
   defaultPresetId: null,
   selectedPresetId: null,
   deepseekBetaPrefix: false,
+  forcePrefill: false,
   prefixToolCalls: false,
   prefixOutputExtraction: false,
   postToolPrefixMode: 'inherit',
@@ -45,6 +46,7 @@ function normalize(state: PresetState): PresetState {
   state.presets = Array.isArray(state.presets) ? state.presets : [];
   state.defaultPresetId ??= null;
   state.deepseekBetaPrefix = state.deepseekBetaPrefix === true;
+  state.forcePrefill = state.forcePrefill === true;
   state.prefixToolCalls = state.prefixToolCalls === true;
   state.prefixOutputExtraction = state.prefixOutputExtraction === true;
   state.prefixNonOfficialRemoveTools = state.prefixNonOfficialRemoveTools !== false;

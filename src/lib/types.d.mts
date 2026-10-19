@@ -233,6 +233,11 @@ export interface CompilePresetOptions {
   characterId?: string | number | null;
   trigger?: string;
   postToolPrefix?: string;
+  /**
+   * Manual fallback: close the request with the last assistant entry the preset itself declares,
+   * ignoring assistant text that Tavern markers or the conversation contribute.
+   */
+  forcePrefill?: boolean;
 }
 
 /* -------------------------------------------------------------------- tools */
@@ -400,6 +405,12 @@ export interface PresetState {
   defaultPresetId: string | null;
   selectedPresetId: string | null;
   deepseekBetaPrefix: boolean;
+  /**
+   * Manual fallback for prefill detection: send the assistant-prefix continuation even when the
+   * preset does not look like a prefill preset. It also implies `deepseekBetaPrefix`, so one
+   * switch is enough to reach the compatibility path.
+   */
+  forcePrefill: boolean;
   prefixToolCalls: boolean;
   prefixOutputExtraction: boolean;
   postToolPrefixMode: 'inherit' | 'custom';

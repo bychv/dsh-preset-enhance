@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { createMacroContext, renderMacros } from '../lib/macros.mjs';
 import { validateHistoryPatches } from '../lib/history-patches.mjs';
-import { compilePreset, dshSystemPromptEnabled, validatePreset } from '../lib/preset.mjs';
+import { compilePreset, dshSystemPromptEnabled, DYNAMIC_PREFILL_ID, lastContentRole, validatePreset } from '../lib/preset.mjs';
 import { PresetStore } from '../lib/store.mjs';
 import { installDeepSeekBetaBridge, rewriteDeepSeekPrefixFetch } from '../lib/deepseek-beta.mjs';
 import { AGENT_PRESET_ID, apply, buildPresetModeComposition, discoverModeToolCatalogs, ensurePresetAgentMode } from '../index.mjs';
@@ -654,13 +654,14 @@ test('saved imports are global and the last library selection survives reopening
     const first = await post({ revision: 0, action: 'save', name: 'A', preset });
     const second = await post({ revision: 1, action: 'save', name: 'B', preset });
     await post({ revision: 2, action: 'select-preset', id: first.id });
-    await post({ revision: 3, action: 'save-deepseek-beta', enabled: true, toolCalls: true, extractOutput: true, removeNonOfficialTools: false, postToolPrefixMode: 'custom', postToolPrefixText: 'Review results' });
+    await post({ revision: 3, action: 'save-deepseek-beta', enabled: true, forcePrefill: true, toolCalls: true, extractOutput: true, removeNonOfficialTools: false, postToolPrefixMode: 'custom', postToolPrefixText: 'Review results' });
 
     const reopened = await new PresetStore(file).read();
     assert.deepEqual(reopened.presets.map(item => item.name), ['A', 'B']);
     assert.equal(reopened.selectedPresetId, first.id);
     assert.equal(reopened.defaultPresetId, first.id);
     assert.equal(reopened.deepseekBetaPrefix, true);
+    assert.equal(reopened.forcePrefill, true);
     assert.equal(reopened.prefixToolCalls, true);
     assert.equal(reopened.prefixOutputExtraction, true);
     assert.equal(reopened.postToolPrefixMode, 'custom');
@@ -679,12 +680,14 @@ test('saved imports are global and the last library selection survives reopening
     assert.match(rejected.payload.error, /工具移除开关/);
     assert.equal((await new PresetStore(file).read()).prefixNonOfficialRemoveTools, false);
 
-    for (const invalid of [{ postToolPrefixMode: 'unknown' }, { postToolPrefixText: null }]) {
+    for (const invalid of [{ postToolPrefixMode: 'unknown' }, { postToolPrefixText: null }, { forcePrefill: 'yes' }]) {
       const response = await postRaw({ revision: reopened.revision,
         action: 'save-deepseek-beta', enabled: true, ...invalid });
       assert.equal(response.statusCode, 400);
       assert.equal((await new PresetStore(file).read()).postToolPrefixText, 'Review results');
+      assert.equal((await new PresetStore(file).read()).forcePrefill, true);
     }
+
 
     const external = new PresetStore(file);
     await external.transaction(state => {
@@ -745,6 +748,136 @@ test('negative order and trailing ordered assistant compile as a prefix', () => 
     { ...msg('a', 'assistant', 'answer'), source: { kind: 'model', provider: 'mock', model: 'mock' } },
   ]);
   assert.equal(ordinary.assistantPrefix.active, false);
+});
+
+test('prefill detection ignores trailing placeholders instead of the assistant prefill', () => {
+  // An empty marker or a blank prompt at the end of the order produces no message at all, so it must
+  // not hide the assistant prefill in front of it. Tavern markers are content-bearing: chatHistory
+  // stands for the conversation, which makes the final message the chat's rather than the preset's.
+  const system = { identifier: 'sys', role: 'system', content: 'S' };
+  const history = { identifier: 'chatHistory', marker: true, role: 'user' };
+  const prefill = { identifier: 'prefix', role: 'assistant', content: '好的现在我是猫' };
+  const presetOf = (order, prompts) => ({
+    prompts,
+    prompt_order: [{ character_id: 100001, order: order.map(identifier => ({ identifier, enabled: true })) }],
+  });
+  const chat = [msg('u', 'user', 'hello')];
+  const cases = [
+    ['trailing empty marker', presetOf(['sys', 'chatHistory', 'prefix', 'empty'], [system, history, prefill, { identifier: 'empty', role: 'system', marker: true }]), 'assistant'],
+    ['prefill closes the order', presetOf(['sys', 'chatHistory', 'prefix'], [system, history, prefill]), 'assistant'],
+    ['trailing blank content', presetOf(['sys', 'chatHistory', 'prefix', 'blank'], [system, history, prefill, { identifier: 'blank', role: 'system', content: '   ' }]), 'assistant'],
+    ['trailing depth injection', presetOf(['sys', 'chatHistory', 'prefix', 'deep'], [system, history, prefill, { identifier: 'deep', role: 'system', content: 'deep', injection_position: 1 }]), 'assistant'],
+    ['chatHistory closes the order', presetOf(['sys', 'prefix', 'chatHistory'], [system, prefill, history]), 'other'],
+    ['trailing real system text', presetOf(['sys', 'chatHistory', 'prefix', 'tail'], [system, history, prefill, { identifier: 'tail', role: 'system', content: 'real' }]), 'other'],
+    ['no chatHistory marker', presetOf(['sys', 'prefix'], [system, prefill]), 'other'],
+  ];
+  for (const [name, preset, expected] of cases) {
+    assert.equal(lastContentRole(preset, 100001), expected, name);
+    // The workbench badge and the request path must agree on every shape.
+    assert.equal(compilePreset(preset, chat, { characterId: 100001 }).assistantPrefix.active, expected === 'assistant', name + ': compile');
+  }
+
+  // A marker does carry content when the caller supplies its text, so it can then be the final message.
+  const marker = presetOf(['sys', 'chatHistory', 'prefix', 'worldInfoAfter'],
+    [system, history, prefill, { identifier: 'worldInfoAfter', marker: true, role: 'system' }]);
+  assert.equal(lastContentRole(marker, 100001), 'assistant');
+  assert.equal(lastContentRole(marker, 100001, { worldInfoAfter: 'lore' }), 'other');
+  assert.equal(compilePreset(marker, chat, { characterId: 100001, markers: { worldInfoAfter: 'lore' } }).assistantPrefix.active, false);
+});
+
+test('the forced prefill switch fills in the last assistant preset entry', () => {
+  // Manual fallback: the order may close with system prompts or markers, so take the last assistant
+  // entry the preset itself declares and move it to the end.
+  const system = { identifier: 'sys', role: 'system', content: 'S' };
+  const history = { identifier: 'chatHistory', marker: true, role: 'user' };
+  const prefill = { identifier: 'prefix', role: 'assistant', content: '好的现在我是猫' };
+  const presetOf = (order, prompts) => ({
+    prompts,
+    prompt_order: [{ character_id: 100001, order: order.map(identifier => ({ identifier, enabled: true })) }],
+  });
+  const chat = [msg('u', 'user', 'hello')];
+  const trailing = presetOf(['sys', 'chatHistory', 'prefix', 'tail'],
+    [system, history, prefill, { identifier: 'tail', role: 'system', content: '真正内容' }]);
+
+  assert.equal(compilePreset(trailing, chat, { characterId: 100001 }).assistantPrefix.active, false);
+  const forced = compilePreset(trailing, chat, { characterId: 100001, forcePrefill: true });
+  assert.equal(forced.assistantPrefix.active, true);
+  assert.deepEqual(forced.messages.map(message => message.role), ['system', 'user', 'system', 'assistant']);
+  assert.match(forced.messages.at(-1).content[0].text, /好的现在我是猫/);
+  assert.match(forced.warnings.join('\n'), /强制启用预填充/);
+
+  // Assistant text a Tavern marker injects is never adopted as the prefill.
+  const marked = presetOf(['sys', 'chatHistory', 'prefix', 'marker'],
+    [system, history, prefill, { identifier: 'marker', marker: true, role: 'assistant' }]);
+  const adopted = compilePreset(marked, chat, { characterId: 100001, forcePrefill: true, markers: { marker: '标记里的助手文本' } });
+  assert.equal(adopted.assistantPrefix.active, true);
+  assert.equal(adopted.messages.at(-1).content[0].text, '好的现在我是猫');
+
+  // Nothing to adopt: the request stays ordinary.
+  const noAssistant = presetOf(['sys', 'chatHistory', 'tail'],
+    [system, history, { identifier: 'tail', role: 'system', content: 'x' }]);
+  assert.equal(compilePreset(noAssistant, chat, { characterId: 100001, forcePrefill: true }).assistantPrefix.active, false);
+});
+
+test('the dynamic prefill marker supplies the trailing continuation instead of injecting in place', () => {
+  // The one entry exempt from injection: its rendered text becomes the final assistant message, so
+  // the prefill can change per request through the marker value without reordering the preset.
+  const system = { identifier: 'sys', role: 'system', content: 'S' };
+  const history = { identifier: 'chatHistory', marker: true, role: 'user' };
+  const dynamic = { identifier: DYNAMIC_PREFILL_ID, marker: true, role: 'assistant', content: '默认续写' };
+  const trailing = { identifier: 'tail', role: 'system', content: '结尾系统条目' };
+  const preset = {
+    prompts: [system, history, dynamic, trailing],
+    prompt_order: [{ character_id: 100001, order: [system, history, dynamic, trailing]
+      .map(prompt => ({ identifier: prompt.identifier, enabled: true })) }],
+  };
+  const chat = [msg('u', 'user', 'hello')];
+
+  const fallback = compilePreset(preset, chat, { characterId: 100001 });
+  assert.equal(fallback.assistantPrefix.active, true);
+  assert.deepEqual(fallback.messages.map(message => message.role), ['system', 'user', 'system', 'assistant']);
+  assert.equal(fallback.messages.at(-1).content[0].text, '默认续写');
+  // The entry itself never appears where it sits in the order.
+  assert.equal(fallback.messages.filter(message => message.content[0].text === '默认续写').length, 1);
+
+  // Marker values drive it, so the continuation can differ per request.
+  const first = compilePreset(preset, chat, { characterId: 100001, markers: { [DYNAMIC_PREFILL_ID]: '动态一' } });
+  const second = compilePreset(preset, chat, { characterId: 100001, markers: { [DYNAMIC_PREFILL_ID]: '动态二' } });
+  assert.equal(first.messages.at(-1).content[0].text, '动态一');
+  assert.equal(second.messages.at(-1).content[0].text, '动态二');
+
+  // It is appended after everything, so it outranks an earlier ordered assistant prompt.
+  const overlapped = compilePreset({
+    prompts: [system, history, { identifier: 'prefix', role: 'assistant', content: '前面的 assistant' }, dynamic],
+    prompt_order: [{ character_id: 100001, order: ['sys', 'chatHistory', 'prefix', DYNAMIC_PREFILL_ID]
+      .map(identifier => ({ identifier, enabled: true })) }],
+  }, chat, { characterId: 100001, markers: { [DYNAMIC_PREFILL_ID]: '最终动态' } });
+  assert.deepEqual(overlapped.messages.map(message => message.role), ['system', 'user', 'assistant', 'assistant']);
+  assert.equal(overlapped.messages.at(-1).content[0].text, '最终动态');
+
+  // Without text it contributes nothing at all.
+  const emptied = compilePreset({
+    prompts: [system, history, { ...dynamic, content: '' }, trailing],
+    prompt_order: [{ character_id: 100001, order: ['sys', 'chatHistory', DYNAMIC_PREFILL_ID, 'tail']
+      .map(identifier => ({ identifier, enabled: true })) }],
+  }, chat, { characterId: 100001 });
+  assert.equal(emptied.assistantPrefix.active, false);
+  assert.deepEqual(emptied.messages.map(message => message.role), ['system', 'user', 'system']);
+
+  // Detection agrees on every shape above.
+  assert.equal(lastContentRole(preset, 100001), 'assistant');
+  assert.equal(lastContentRole({ ...preset, prompts: [system, history, { ...dynamic, content: '' }, trailing] }, 100001), 'other');
+});
+
+test('the forced prefill switch persists on its own and rejects junk values', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-preset-force-'));
+  try {
+    const file = join(dir, 'state.json'), store = new PresetStore(file);
+    await store.transaction(state => { state.forcePrefill = 'yes'; });
+    assert.equal((await new PresetStore(file).read()).forcePrefill, false, 'junk normalizes to false');
+    await store.transaction(state => { state.forcePrefill = true; });
+    assert.equal((await new PresetStore(file).read()).forcePrefill, true);
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
 test('DeepSeek Beta bridge supplies reasoning fields only for the activated official prefix request', () => {

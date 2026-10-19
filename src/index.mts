@@ -15,7 +15,7 @@ import { resolveTemplateBindings, selectTemplate, templateCatalogWithFingerprint
 import { prepareDynamicTemplates } from './lib/dynamic-templates.mjs';
 import { RequestSnapshots, traceRequest, previewMessages, messageOrigins } from './lib/request-preview.mjs';
 import { PRESET_TEMPLATES_SERVICE } from './templates.mjs';
-import { compilePreset, validatePreset, getOrder, dshSystemPromptEnabled } from './lib/preset.mjs';
+import { compilePreset, validatePreset, getOrder, dshSystemPromptEnabled, lastContentRole } from './lib/preset.mjs';
 import { decodePresetDocument, encodePresetPackage, attachPrefillSettings, applyPackagePrefill, ensurePackageExtractionTemplate } from './lib/preset-package.mjs';
 import {
   deleteLibraryEntry, presetLocks, restoreDefaultTemplates, saveLibraryEntry, setPresetLock,
@@ -411,6 +411,7 @@ const chatConnection = () => {
         if (prior?.key === key) return prior.result;
         const compiledResult = compilePreset(record.preset, presetHistory, {
           ...binding, seed: key, local: prior?.result.local, global: current.global, postToolPrefix, templateCatalog, dynamicBodies, dshSystemTemplate,
+          forcePrefill: current.forcePrefill === true,
         });
         options.signal?.throwIfAborted();
         // The host serializes the request with whichever protocol its connection uses, and
@@ -450,8 +451,13 @@ const chatConnection = () => {
     const request = routedRequest({ ...options, ...(requestSettings?.maxTokens ? { maxTokens: requestSettings.maxTokens } : {}) }, messages, filteredTools);
     // The compatibility bridge is chat-completions only: under the Messages mode it
     // must never arm, so an unadapted prefix is never sent.
+    // `forcePrefill` is the manual fallback: when detection cannot see the prefill the workbench
+    // can still ask for the compatibility path, and it implies the compatibility switch itself.
+    const betaEnabled = initial.deepseekBetaPrefix === true || initial.forcePrefill === true;
+    const assistantPrefill = compiled?.assistantPrefix?.active === true ||
+      (compiled !== null && initial.forcePrefill === true);
     const betaPrefix = connectionProtocolFor(initial, connectionInfo) !== 'messages' &&
-      initial.deepseekBetaPrefix === true && compiled?.assistantPrefix?.active === true;
+      betaEnabled && assistantPrefill;
     // Arm the fetch bridge only when this request actually carries an injected preset:
     // with no preset the plugin must not intervene at all (no reroute, no translation).
     // The content key arms the assistant-prefix path, so it is only the plugin's own
@@ -616,6 +622,7 @@ const chatConnection = () => {
             postToolPrefixMode: state.postToolPrefixMode,
             postToolPrefixText: state.postToolPrefixText,
             deepseekBetaPrefix: state.deepseekBetaPrefix === true,
+            forcePrefill: state.forcePrefill === true,
             prefixToolCalls: state.prefixToolCalls === true,
             prefixOutputExtraction: state.prefixOutputExtraction === true,
             prefixNonOfficialRemoveTools: state.prefixNonOfficialRemoveTools !== false,
@@ -699,7 +706,7 @@ const chatConnection = () => {
           const references = resolveTemplateBindings(body.preset, prepared.catalog,
             new Set(getOrder(body.preset, options.characterId).filter(i => i.enabled).map(i => i.identifier))).references;
           const key = compilationKey(body.preset, history, options, protocol, references, prepared.bodies);
-          const compiled = compilePreset(body.preset, history, { ...options, seed: key, templateCatalog: prepared.catalog, dynamicBodies: prepared.bodies, dshSystemTemplate });
+          const compiled = compilePreset(body.preset, history, { ...options, seed: key, templateCatalog: prepared.catalog, dynamicBodies: prepared.bodies, dshSystemTemplate, forcePrefill: current.forcePrefill === true });
           const adapted = adaptPresetForMessages(compiled.messages);
           const result = { ...compiled, messages: adapted.messages,
             ...(protocol === 'messages' ? { assistantPrefix: { active: false }, warnings: [...compiled.warnings, ...adapted.notes] } : {}) };
@@ -718,7 +725,9 @@ const chatConnection = () => {
             try {
               const config = chatConnection();
               const wire = serializeRequest(request as never, { thinking: config.thinking, reasoningEffort: config.reasoningEffort });
-              const content = current.deepseekBetaPrefix && result.assistantPrefix.active ? messageText(result.messages.at(-1)) : '';
+              const prefillActive = result.assistantPrefix.active === true || current.forcePrefill === true;
+              const content = (current.deepseekBetaPrefix === true || current.forcePrefill === true) && prefillActive
+                ? messageText(result.messages.at(-1)) : '';
               const registry = new Map([[sessionId, new Map([[content, { count: 1, ...requestSettings, mode: 'chat-completions' as const, target: body.preset.dsh_prefill_target === 'content' ? 'content' as const : 'reasoning' as const, toolCalls: current.prefixToolCalls === true,
                 removeNonOfficialTools: current.prefixNonOfficialRemoveTools !== false, extractOutput: current.prefixOutputExtraction === true }]])]]);
               const rewritten = rewriteDeepSeekPrefixFetch(config.baseURL + '/chat/completions', {
@@ -737,8 +746,10 @@ const chatConnection = () => {
           const order = getOrder(preset, body.options?.characterId).filter(i => i.enabled);
           const ids = new Set(order.map(i => i.identifier));
           const dynamic = Object.entries(templateBindings(preset, templateRegistry.service.list())).some(([id, ref]) => ids.has(id) && ref?.mode === 'linked-dynamic');
-          const tail = preset.prompts.find(p => p.identifier === order.at(-1)?.identifier);
-          return respond(res, 200, { pending: dynamic, assistantPrefix: { active: !!preset.assistant_prefill?.trim() || tail?.role === 'assistant' || tail?.role === 'model' } });
+          // Entries that produce no message never become the final message, so an empty marker or a
+          // blank prompt at the end of the order must not hide an assistant prefill in front of it.
+          const role = lastContentRole(preset, body.options?.characterId, body.options?.markers);
+          return respond(res, 200, { pending: dynamic, assistantPrefix: { active: !!preset.assistant_prefill?.trim() || role === 'assistant' } });
         }
 
         // The workbench test box. Regular expressions, the placement/depth plan and the macro engine
@@ -1103,6 +1114,10 @@ const chatConnection = () => {
               state.postToolPrefixText = body.postToolPrefixText;
             }
             state.deepseekBetaPrefix = body.enabled;
+            if (body.forcePrefill !== undefined) {
+              if (typeof body.forcePrefill !== 'boolean') throw new Error('强制启用预填充开关值无效');
+              state.forcePrefill = body.forcePrefill;
+            }
             if (body.presetId) {
               const record = state.presets.find(preset => preset.id === body.presetId);
               if (!record) throw new Error('请选择有效的已保存预设');
@@ -1113,6 +1128,7 @@ const chatConnection = () => {
             return {
               revision: state.revision,
               enabled: state.deepseekBetaPrefix,
+              forcePrefill: state.forcePrefill === true,
               toolCalls: state.prefixToolCalls === true,
               extractOutput: state.prefixOutputExtraction === true,
               removeNonOfficialTools: state.prefixNonOfficialRemoveTools !== false,

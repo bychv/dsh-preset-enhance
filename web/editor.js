@@ -185,6 +185,7 @@ async function reload(id) {
   $('char').value = binding.values?.char ?? 'Assistant';
   $('markers').value = JSON.stringify(binding.markers ?? {}, null, 2);
   $('deepseek-beta-prefix').checked = state.deepseekBetaPrefix === true;
+  $('force-prefill').checked = state.forcePrefill === true;
   $('prefix-tool-calls').checked = state.prefixToolCalls === true;
   $('prefix-output-extraction').checked = state.prefixOutputExtraction === true;
   $('prefix-nonofficial-remove-tools').checked = state.prefixNonOfficialRemoveTools !== false;
@@ -215,10 +216,16 @@ async function refreshPrefillWarning() {
       $('prefill-warning-text').textContent = '动态模板预填充状态待解析。';
       return;
     }
-    const active = result.assistantPrefix?.active === true;
+    const detected = result.assistantPrefix?.active === true;
+    const active = detected || state.forcePrefill === true;
     $('prefill-warning').hidden = !active;
     if (!active) return;
-    if (state.deepseekBetaPrefix === true) {
+    if (!detected) {
+      $('prefill-warning-text').textContent =
+        '已强制启用预填充：本预设未被识别为 assistant 结尾，仍会按预填充续写发送。若末条不是 assistant，请求会按普通请求发出。';
+      return;
+    }
+    if (state.forcePrefill === true || state.deepseekBetaPrefix === true) {
       const tools = state.prefixToolCalls ?
         '工具调用会通过 DSML 转换并恢复为标准 tool_calls。' :
         state.prefixNonOfficialRemoveTools !== false ?
@@ -1820,6 +1827,7 @@ $('post-tool-prefix-mode').onchange = () => {
 };
 $('post-tool-prefix-text').oninput = markPrefillSettingsDirty;
 $('deepseek-beta-prefix').onchange = markPrefillSettingsDirty;
+$('force-prefill').onchange = markPrefillSettingsDirty;
 $('prefix-to-reasoning').onchange = () => {
   preset.dsh_prefill_target = $('prefix-to-reasoning').checked ? 'reasoning' : 'content';
   markDirty();
@@ -2041,6 +2049,7 @@ function prefillSettingsPayload() {
     postToolPrefixMode: $('post-tool-prefix-mode').value,
     postToolPrefixText: $('post-tool-prefix-text').value,
     enabled: $('deepseek-beta-prefix').checked,
+    forcePrefill: $('force-prefill').checked,
     toolCalls: $('prefix-tool-calls').checked,
     extractOutput: $('prefix-output-extraction').checked,
     removeNonOfficialTools: $('prefix-nonofficial-remove-tools').checked,
@@ -2385,7 +2394,7 @@ observeRequestEvents(sessionId, {
 });
 
 document.querySelector('.preview').addEventListener('input', () => { ++previewGeneration; previewController?.abort(); requestPreview.stale(); });
-for (const id of ['user', 'char', 'markers', 'order', 'deepseek-beta-prefix', 'prefix-to-reasoning', 'prefix-tool-calls', 'prefix-output-extraction', 'prefix-nonofficial-remove-tools', 'post-tool-prefix-mode', 'post-tool-prefix-text', 'enabled', 'request-max-tokens', 'request-max-tokens-range', 'request-stream']) {
+for (const id of ['user', 'char', 'markers', 'order', 'deepseek-beta-prefix', 'force-prefill', 'prefix-to-reasoning', 'prefix-tool-calls', 'prefix-output-extraction', 'prefix-nonofficial-remove-tools', 'post-tool-prefix-mode', 'post-tool-prefix-text', 'enabled', 'request-max-tokens', 'request-max-tokens-range', 'request-stream']) {
   $(id).addEventListener('change', () => { ++previewGeneration; previewController?.abort(); requestPreview.stale(); });
 }
 

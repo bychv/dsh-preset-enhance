@@ -132,7 +132,11 @@ DSH 系统正文按「当前预设 + DSH 模式」分别保存：编辑过的模
 
 ## 预填充与工具调用兼容
 
-当最终注入消息是 assistant 时，包括顶层 `assistant_prefill` 或顺序表中的末尾 assistant/model 条目，工作台会显示预填充提醒，预览中标记为 `Assistant Prefix`。
+当最终注入消息是 assistant 时，包括顶层 `assistant_prefill` 或顺序表中的末尾 assistant/model 条目，工作台会显示预填充提醒，预览中标记为 `Assistant Prefix`。识别按“最后一条有实际内容的条目”判定：末尾的空标记、空白条目、深度注入和不匹配触发器的条目会被跳过，不会掩盖它们前面的 assistant 预填充；`chatHistory` 等酒馆标记算有内容，当它位于末尾时最终消息属于对话本身，因此不构成预填充。
+
+预设中可以放一个名为 `dshDynamicPrefill` 的条目（通常按标记处理），它是**注入的例外**：内容不会出现在它原本的顺序位置上，而是作为末尾 assistant 预填充发送。由于内容先经宏渲染，它可以按请求变化——在“角色标记内容”里填写 `{"dshDynamicPrefill": "..."}`、使用变量或动态模板都能改变每轮续写的前缀，无需调整顺序表。该条目为空时不产生任何消息，也不影响其他识别。
+
+识别不到预填充时，可在“Assistant 预填充接口”中开启“强制启用预填充”兜底：插件会取预设中**最后一条 assistant 条目**（不含标记注入的 assistant 文本与对话历史）移到末尾作为续写前缀，并同时启用自动兼容。预设中没有任何 assistant 条目时该开关不改变请求。
 
 在对话补全接口下开启“预填充自动兼容”，插件会为匹配到的末条 assistant 消息添加 `prefix: true`，处理 `<think>` / `<thinking>` 前缀及兼容接口的思考字段，并保留工具调用历史中的真实 `reasoning_content`。接口要求见 [DeepSeek 对话前缀续写文档](https://api-docs.deepseek.com/zh-cn/guides/chat_prefix_completion)。
 
