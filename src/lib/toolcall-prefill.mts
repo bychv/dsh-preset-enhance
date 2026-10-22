@@ -42,7 +42,8 @@ interface RegexMatch {
   [group: number]: string | undefined;
 }
 
-const D = '｜｜DSML｜｜';
+// Canonical V4.1 Flash output; the parser below retains legacy spellings.
+const D = '｜DSML｜';
 export const DSML_CALLS_OPEN = '<' + D + ' calls>';
 export const DSML_CALLS_CLOSE = '</' + D + ' calls>';
 export const TOOL_CALLS_OPEN = '<tool_calls>';

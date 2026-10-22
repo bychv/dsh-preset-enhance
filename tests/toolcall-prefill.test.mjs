@@ -7,6 +7,7 @@ import {
   emulateToolCallRequest,
   inlineToolHistory,
   parseDsmlCalls,
+  renderDsmlCall,
   parseToolCallsFromText,
   transformToolCallJson,
   transformToolCallResponse,
@@ -578,4 +579,19 @@ test('a call written without any newlines is captured on every path and split gr
     choices: [{ message: { role: 'assistant', content: pair }, finish_reason: 'stop' }],
   }, {}).choices[0];
   assert.deepEqual(double.message.tool_calls.map(call => call.function.name), ['a', 'b']);
+});
+
+
+test('V4.1 Flash canonical tool history round-trips typed parameters', () => {
+  const args = { text: '"quoted"\nline', count: 2, enabled: true, items: ['a'], empty: null };
+  const block = DSML_CALLS_OPEN + '\n' + renderDsmlCall('lookup', args) + '\n' + DSML_CALLS_CLOSE;
+  assert.equal(DSML_CALLS_OPEN, '<｜DSML｜ calls>');
+  assert.match(block, /<｜DSML｜ invoke name="lookup">/u);
+  assert.doesNotMatch(block, /｜｜DSML｜｜/u);
+  const calls = parseDsmlCalls(block);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(JSON.parse(calls[0].function.arguments), args);
+  const prompt = buildToolsPrompt([{ type: 'function', function: { name: 'lookup', parameters: {} } }]);
+  assert.ok(prompt.includes(DSML_CALLS_OPEN));
+  assert.doesNotMatch(prompt, /｜｜DSML｜｜/u);
 });

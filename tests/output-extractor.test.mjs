@@ -22,12 +22,13 @@ const invoke = '<｜｜DSML｜｜ invoke name="lookup_weather">\n' +
   '<｜｜DSML｜｜ parameter name="city" string="true">上海</｜｜DSML｜｜ parameter>\n' +
   '</｜｜DSML｜｜ invoke>';
 
-test('the bundled template is the stability test final strategy prompt', () => {
+test('the bundled template keeps extraction conventions and uses V4.1 Flash DSML', () => {
   assert.match(OUTPUT_EXTRACTION_PROMPT_TEMPLATE, new RegExp(END_MARKER.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'));
   assert.match(OUTPUT_EXTRACTION_PROMPT_TEMPLATE, new RegExp(OUTPUT_OPEN.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'));
   assert.match(OUTPUT_EXTRACTION_PROMPT_TEMPLATE, /您好，这是约定的内容，请查收/u);
   assert.match(OUTPUT_EXTRACTION_PROMPT_TEMPLATE, /1200~1600/u);
-  assert.match(OUTPUT_EXTRACTION_PROMPT_TEMPLATE, /<｜｜DSML｜｜ calls>/u);
+  assert.match(OUTPUT_EXTRACTION_PROMPT_TEMPLATE, /<｜DSML｜ calls>/u);
+  assert.doesNotMatch(OUTPUT_EXTRACTION_PROMPT_TEMPLATE, /｜｜DSML｜｜/u);
   assert.match(OUTPUT_EXTRACTION_PROMPT_TEMPLATE, /invoke name="工具名"/u);
   assert.match(OUTPUT_EXTRACTION_PROMPT_TEMPLATE, /parameter name="参数名" string="false"/u);
 });
