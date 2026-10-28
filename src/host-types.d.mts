@@ -3,7 +3,7 @@
  *
  * Hand-written on purpose: the plugin never bundles another copy of Cordis, the
  * host framework or React, so the runtime contract it consumes is declared here
- * and re-checked against the pinned host source (currently DSH 0.2.1-alpha.1)
+ * and re-checked against the pinned host source (currently DSH 0.2.2-alpha.2)
  * before every release. Members marked optional are probed with optional
  * chaining at runtime and must stay optional here as well.
  */
@@ -96,6 +96,7 @@ export interface AgentToolScope {
 }
 
 export interface AgentHandle {
+  model?: { current?(): { provider?: string; model?: string; reasoningEffort?: string } | undefined };
   options?: { provider?: string; model?: string; reasoningEffort?: string; [key: string]: unknown };
   session?: SessionLike;
   id?: string;

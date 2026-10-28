@@ -2,49 +2,85 @@ import type { AgentHandle, PluginContext, SessionLike } from '../host-types.mjs'
 import { planToolRestriction } from './tool-presets.mjs';
 import type { ToolPolicySnapshot } from './tool-presets.mjs';
 
-/** The host's system-prompt assembly service (accessed without declaring an inject dependency). */
-interface SystemPromptService { assemble(context: unknown): Promise<unknown> }
+type Preparation = { agent?: AgentHandle; toolSet?: unknown };
+type PrepareMethod = (this: unknown, context: Preparation) => Promise<unknown>;
 
-/** Refresh scoped restrictions before rebuilding both native schemas and the PTC SDK. */
+/** Install a reversible service-method bridge, preserving Cordis caller tracing. */
+function beforePreparation(ctx: PluginContext, service: object, name: string,
+  before: (context: Preparation) => Promise<void>): void {
+  // Reading service[name] binds it to the plugin's Cordis context. Read the raw
+  // descriptor instead so calls from agent scopes retain their original `this`.
+  let owner: object | null = service;
+  while (owner && !Object.getOwnPropertyDescriptor(owner, name)) owner = Object.getPrototypeOf(owner);
+  const original = owner && Object.getOwnPropertyDescriptor(owner, name)?.value as PrepareMethod | undefined;
+  if (typeof original !== 'function') return;
+  const own = Object.getOwnPropertyDescriptor(service, name);
+  let active = true;
+  const wrapped: PrepareMethod = async function(context = {}) {
+    if (active) await before(context);
+    return original.call(this, context);
+  };
+  ctx.effect(() => {
+    Object.defineProperty(service, name, { configurable: true, writable: true, value: wrapped });
+    return () => {
+      active = false;
+      if (Object.getOwnPropertyDescriptor(service, name)?.value !== wrapped) return;
+      if (own) Object.defineProperty(service, name, own);
+      else Reflect.deleteProperty(service, name);
+    };
+  });
+}
+
+/** Apply policy before step admission (0.2.2) and schema/SDK collection (0.2.1). */
 export function installToolRestrictions(
   ctx: PluginContext, snapshot: () => ToolPolicySnapshot,
   modeOf: (session: SessionLike | undefined) => string,
 ): void {
-  // Resolve through ctx.get(): a bare ctx.systemPrompt access throws in Cordis when the
-  // service is not declared in inject, which is why the whole plugin failed to load.
   const systemPrompt = typeof ctx.get === 'function'
-    ? (ctx.get('systemPrompt') as SystemPromptService | undefined)
-    : (ctx as { systemPrompt?: SystemPromptService }).systemPrompt;
+    ? ctx.get('systemPrompt') : (ctx as { systemPrompt?: object }).systemPrompt;
   if (!systemPrompt || !ctx.tools?.get) return;
   const releases = new Map<AgentHandle, () => void>();
-  const rebuilding = new WeakSet<object>();
+  const pending = new WeakMap<AgentHandle, Promise<void>>();
   const tracked = new WeakSet<AgentHandle>();
-  ctx.effect(() => () => { for (const release of releases.values()) release(); releases.clear(); });
-  ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
-    const agent = context.agent as AgentHandle | undefined;
-    const tools = agent?.ctx?.tools;
-    if (!agent?.session || !tools?.restrict || !tools.schemas || rebuilding.has(context)) return next();
+  const retired = new WeakSet<AgentHandle>();
+  let closed = false;
+  ctx.effect(() => () => { closed = true; for (const release of releases.values()) release(); releases.clear(); });
+
+  async function refresh(agent: AgentHandle): Promise<void> {
+    const tools = agent.ctx?.tools;
+    if (closed || retired.has(agent) || !agent.session || !tools?.restrict || !tools.schemas) return;
     if (!tracked.has(agent) && agent.ctx?.effect) {
       tracked.add(agent);
-      agent.ctx.effect(() => () => { releases.get(agent)?.(); releases.delete(agent); });
+      agent.ctx.effect(() => () => { retired.add(agent); releases.get(agent)?.(); releases.delete(agent); });
     }
-    const previous = releases.get(agent);
-    previous?.();
+    releases.get(agent)?.();
     releases.delete(agent);
     const modeId = modeOf(agent.session);
-    const standing = await ctx.agentPresets?.standingKeyFor?.(modeId);
-    const catalog = tools.schemas(agent);
-    // Only inherited definitions can be restricted; agent-local overrides remain guarded.
-    const restrictable = catalog.filter(tool => {
-      const inherited = ctx.tools?.get?.(tool.name, standing);
-      return inherited !== undefined && tools.get?.(tool.name, agent) === inherited;
-    }).map(tool => tool.name);
-    const plan = planToolRestriction(snapshot(), agent.session.id, modeId, catalog, { restrictable });
-    if (plan) releases.set(agent, tools.restrict(plan));
-    if (!previous && !plan) return next();
-    // The host assembles the SDK before this hook. Rebuild once with the new visibility.
-    rebuilding.add(context);
-    try { return await systemPrompt.assemble(context); }
-    finally { rebuilding.delete(context); }
-  });
+    const lease = await ctx.agentPresets?.acquireScope?.(modeId || undefined);
+    try {
+      const standing = lease?.key ?? await ctx.agentPresets?.standingKeyFor?.(modeId);
+      if (closed || retired.has(agent)) return;
+      const catalog = tools.schemas(agent);
+      // Mode-owned tools are inherited too; root-only lookup misses these.
+      // Agent-local overrides cannot be restricted and remain execution-guarded.
+      const restrictable = catalog.filter(tool => {
+        const inherited = ctx.tools?.get?.(tool.name, standing);
+        return inherited !== undefined && tools.get?.(tool.name, agent) === inherited;
+      }).map(tool => tool.name);
+      const plan = planToolRestriction(snapshot(), agent.session.id, modeId, catalog, { restrictable });
+      if (plan) releases.set(agent, tools.restrict(plan));
+    } finally { await lease?.[Symbol.asyncDispose](); }
+  }
+  function prepare(context: Preparation): Promise<void> {
+    const agent = context.agent;
+    if (!agent) return Promise.resolve();
+    const work = (pending.get(agent) ?? Promise.resolve()).catch(() => {}).then(() => refresh(agent));
+    pending.set(agent, work);
+    return work;
+  }
+  // There is no pre-admission waterfall in 0.2.2: agent/pre-step is too late.
+  // Keep the bridge limited to the public preparation methods, with owned cleanup.
+  beforePreparation(ctx, ctx.tools, 'resolve', prepare);
+  beforePreparation(ctx, systemPrompt, 'assemble', context =>
+    context.toolSet === undefined ? prepare(context) : Promise.resolve());
 }

@@ -154,11 +154,21 @@ const defaultModelService = (ctx: PluginContext): DefaultModelService | undefine
   ctx.get?.('agentDefaultModel') as DefaultModelService | undefined;
 
 type ModelSelection = { provider?: string; model?: string; reasoningEffort?: string };
-function sessionSelection(ctx: PluginContext, sessionId: string): ModelSelection | undefined {
+export function sessionSelection(ctx: PluginContext, sessionId: string): ModelSelection | undefined {
   if (!sessionId) return undefined;
   const session = ctx.sessions?.get(sessionId);
   if (!session) return undefined;
-  const projections = ctx.get?.('sessionProjections') as { stateOf?(session: unknown, key: string): { pending?: ModelSelection | null; lastUsed?: ModelSelection | null } | undefined } | undefined;
+  const live = ctx.agents?.get(sessionId)?.model?.current?.();
+  if (live) return live;
+  const projections = ctx.get?.('sessionProjections') as {
+    snapshot?(session: unknown, keys: string[]): { values: { modelSelection?: { next?: ModelSelection | null; lastUsed?: ModelSelection | null } } };
+    stateOf?(session: unknown, key: string): { pending?: ModelSelection | null; lastUsed?: ModelSelection | null } | undefined;
+  } | undefined;
+  if (projections?.snapshot) {
+    const state = projections.snapshot(session, ['modelSelection']).values.modelSelection;
+    return state?.next ?? state?.lastUsed ?? undefined;
+  }
+  // Compatibility with older hosts/embedders which expose no wire snapshot.
   const state = projections?.stateOf?.(session, 'modelSelection');
   return state?.pending ?? state?.lastUsed ?? undefined;
 }

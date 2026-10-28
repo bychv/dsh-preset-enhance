@@ -1,5 +1,5 @@
 import type { PluginContext, HostMessage } from '../host-types.mjs';
-import { connectionSelection } from './connection.mjs';
+import { connectionSelection, sessionSelection } from './connection.mjs';
 
 export const DSH_TEMPLATE_ID = 'dsh-preset-enhance:dsh-system-prompt';
 interface Section { name: string; text: string; interpolate?: boolean }
@@ -61,15 +61,17 @@ export async function readDshSystemTemplate(ctx: PluginContext, sessionId: strin
     // an Agent whose Session is undefined; host providers support an absent Agent.
     const selected = connectionSelection(ctx, sessionId);
     const defaults = connectionSelection(ctx);
-    const pending = session ? ctx.get?.('sessionProjections')?.stateOf?.(session, 'modelSelection')?.pending : undefined;
+    const current = sessionSelection(ctx, sessionId);
     const options = { ...Object.fromEntries(Object.entries({ provider: selected.provider ?? defaults.provider,
         model: selected.model ?? defaults.model, reasoningEffort: selected.reasoningEffort ?? defaults.reasoningEffort }).filter(([, value]) => value != null)),
-      ...session?.requestHeader?.()?.config, ...live?.options, ...pending, ...Object.fromEntries(['provider', 'model', 'reasoningEffort'].filter(key => callOptions?.[key] !== undefined).map(key => [key, callOptions![key]])) };
-    const agent = live && Object.entries(options).every(([key, value]) => live.options?.[key] === value)
+      ...session?.requestHeader?.()?.config, ...live?.options, ...current, ...Object.fromEntries(['provider', 'model', 'reasoningEffort'].filter(key => callOptions?.[key] !== undefined).map(key => [key, callOptions![key]])) };
+    // Omitting effort in a newly selected route means adapter default, not the old header's effort.
+    if (current && current.reasoningEffort === undefined && callOptions?.reasoningEffort === undefined) delete options.reasoningEffort;
+    const agent = live && live.options?.reasoningEffort === options.reasoningEffort && Object.entries(options).every(([key, value]) => live.options?.[key] === value)
       ? live : session ? Object.assign(Object.create(live ?? null), { session, options }) : undefined;
     signal?.throwIfAborted();
     // Preserve the live Agent scope; cold reads use a preset scope without creating an Agent.
-    const assembly = await (service as any).assemble({ agent, scope, ...(signal ? { signal } : {}) });
+    const assembly = await (service as any).assemble({ agent, scope, modelSelection: options, ...(signal ? { signal } : {}) });
     signal?.throwIfAborted();
     const variables = assembly.variables ?? {};
     const values: Record<string, string> = Object.create(null);

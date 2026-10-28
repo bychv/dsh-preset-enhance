@@ -118,3 +118,21 @@ test('section macros use readable identifiers while previously saved encoded ide
   const unusual = await readDshSystemTemplate(h.ctx, 's', 'standard');
   assert.equal(renderMacros(unusual.sections[0].macro, createMacroContext({values: unusual.values})), 'literal result');
 });
+
+
+test('0.2.2 system assembly receives current modelSelection and clears an old explicit effort', async () => {
+  const h = harness();
+  h.session.requestHeader = () => ({ config: { provider: 'official', model: 'old', reasoningEffort: 'high' } });
+  const selected = { provider: 'official', model: 'new' };
+  h.agent.model = { current: () => selected };
+  const info = await readDshSystemTemplate(h.ctx, 's', 'standard');
+  assert.match(info.text, /Powered by new/);
+  assert.equal(h.calls[0].modelSelection.model, 'new');
+  assert.equal(h.calls[0].modelSelection.reasoningEffort, undefined);
+  assert.equal(h.calls[0].agent.options.reasoningEffort, undefined);
+  assert.equal(h.agent.options.model, 'one', 'preview must not mutate the live Agent options');
+  h.agent.options.reasoningEffort = 'high'; selected.model = 'one';
+  await readDshSystemTemplate(h.ctx, 's', 'standard');
+  assert.equal(h.calls[1].agent.options.reasoningEffort, undefined, 'clearing effort on the same model also needs a detached preview Agent');
+  assert.equal(h.agent.options.reasoningEffort, 'high');
+});

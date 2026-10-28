@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { selectConnection, sessionConnection, writeConnectionProtocol } from '../lib/connection.mjs';
+import { selectConnection, sessionConnection, connectionSelection, writeConnectionProtocol } from '../lib/connection.mjs';
 import { installToolRestrictions } from '../lib/tool-restrictions.mjs';
 import { toolPolicySnapshot } from '../lib/tool-presets.mjs';
 
@@ -34,7 +34,6 @@ test('PTC assembly hides disabled tools, restores dynamically and isolates sessi
   const inherited = { read: { name: 'read' }, shell: { name: 'shell' }, run_code: { name: 'run_code' } };
   const local = { name: 'local' };
   let snapshot = toolPolicySnapshot({ modeToolPolicies: { standard: { shell: false, local: false, run_code: false } } });
-  let hook;
   const cleanup = [];
   function makeAgent(id) {
     const denied = new Set();
@@ -49,11 +48,11 @@ test('PTC assembly hides disabled tools, restores dynamically and isolates sessi
   const ctx = {
     tools: { get: name => inherited[name] },
     agentPresets: { standingKeyFor: async () => 'standard' },
-    effect: fn => cleanup.push(fn()), on: (_, handler) => { hook = handler; },
+    effect: fn => cleanup.push(fn()),
     systemPrompt: { assemble: async context => {
       const names = context.agent.ctx.tools.schemas().map(tool => tool.name);
       const assembly = { tools: names, sections: [{ name: 'TOOLS_SDK', text: names.join(',') }] };
-      return hook(assembly, context, async () => assembly);
+      return assembly;
     } },
   };
   installToolRestrictions(ctx, () => snapshot, () => 'standard');
@@ -127,4 +126,68 @@ test('protocol switch updates the current conversation through the host selector
   assert.equal(states.s.pending.model, 'session-model');
   delete services.sessionController;
   await assert.rejects(selectConnection(ctx, 'preset-deepseek-chat', undefined, 's'), /模型切换服务/);
+});
+
+
+test('0.2.2 step admission sees re-enabled mode tools before providers collect schemas', async () => {
+  const modeKey = {}, definitions = { read: { name: 'read' }, shell: { name: 'shell' } };
+  const denied = new Set(), cleanup = [];
+  let acquired = 0, released = 0, snapshot = toolPolicySnapshot({ modeToolPolicies: { standard: { shell: false } } });
+  const scope = {
+    get: name => definitions[name],
+    schemas: () => Object.values(definitions).filter(tool => !denied.has(tool.name)),
+    restrict: ({ deny }) => { deny.forEach(name => denied.add(name)); return () => deny.forEach(name => denied.delete(name)); },
+  };
+  const agent = { session: { id: 's' }, ctx: { tools: scope, effect: fn => cleanup.push(fn()) } };
+  const tools = {
+    get: (name, key) => key === modeKey ? definitions[name] : undefined,
+    async resolve({ agent: caller }) {
+      assert.equal(this, tools, 'keep the caller instead of binding the service to plugin ctx');
+      const admitted = new Set(caller.ctx.tools.schemas().map(tool => tool.name));
+      return { view: () => caller.ctx.tools.schemas().filter(tool => admitted.has(tool.name)) };
+    },
+  };
+  const systemPrompt = { async assemble({ toolSet }) { return { tools: toolSet.view() }; } };
+  const original = tools.resolve, assemblyOriginal = systemPrompt.assemble;
+  const ctx = { tools, systemPrompt, agentPresets: { acquireScope: async () => {
+    acquired++; return { key: modeKey, [Symbol.asyncDispose]: async () => { released++; } };
+  } }, effect: fn => cleanup.push(fn()) };
+  installToolRestrictions(ctx, () => snapshot, () => 'standard');
+  let toolSet = await tools.resolve({ agent });
+  assert.deepEqual((await systemPrompt.assemble({ agent, toolSet })).tools.map(t => t.name), ['read']);
+  snapshot = toolPolicySnapshot({ modeToolPolicies: { standard: { shell: true } } });
+  toolSet = await tools.resolve({ agent });
+  assert.deepEqual((await systemPrompt.assemble({ agent, toolSet })).tools.map(t => t.name), ['read', 'shell']);
+  assert.equal(acquired, 2); assert.equal(released, acquired);
+  for (const dispose of cleanup.reverse()) dispose();
+  assert.equal(tools.resolve, original); assert.equal(systemPrompt.assemble, assemblyOriginal);
+  assert.deepEqual([...denied], []);
+});
+
+test('current selection reads public wire snapshots and live model without deprecated state access', () => {
+  let live, snapshot = { next: { provider: 'p', model: 'next' }, lastUsed: { provider: 'p', model: 'old' } };
+  const ctx = { sessions: { get: () => ({ id: 's' }) }, agents: { get: () => ({ model: { current: () => live } }) },
+    get: name => name === 'sessionProjections' ? {
+      snapshot: (_session, keys) => { assert.deepEqual(keys, ['modelSelection']); return { values: { modelSelection: snapshot } }; },
+      stateOf: () => { throw Error('deprecated'); },
+    } : undefined };
+  assert.equal(connectionSelection(ctx, 's').model, 'next');
+  snapshot = { next: null, lastUsed: { provider: 'p', model: 'old' } };
+  assert.equal(connectionSelection(ctx, 's').model, 'old');
+  live = { provider: 'p', model: 'live' };
+  assert.equal(connectionSelection(ctx, 's').model, 'live');
+});
+
+
+test('preparation bridge preserves no-argument assembly and reverses on reload', async () => {
+  const disposers = [];
+  let calls = 0;
+  class Prompt { async assemble(context = {}) { calls++; return context; } }
+  const prompt = new Prompt(), ctx = { tools: { get() {} }, systemPrompt: prompt, effect: fn => disposers.push(fn()) };
+  installToolRestrictions(ctx, () => toolPolicySnapshot(), () => 'standard');
+  assert.deepEqual(await prompt.assemble(), {});
+  for (const stop of disposers.reverse()) stop();
+  assert.equal(Object.hasOwn(prompt, 'assemble'), false);
+  assert.deepEqual(await prompt.assemble(), {});
+  assert.equal(calls, 2);
 });

@@ -1,6 +1,6 @@
 # 插件逻辑架构
 
-本文对应 0.3.6-rc.1 的实现。安装入口是 `dsh-preset-enhance`，主包精确依赖 `dsh-preset-display-regex`，由根目录 `cordis.patch.yml` 在同一插件页注册两个可分别启停的运行条目。`packages/bundle` 仅保留兼容入口，不是正常安装所需的第三个包。
+本文对应进入 0.3.7 开发阶段的当前实现，新增 DSH 0.2.2 兼容。安装入口是 `dsh-preset-enhance`，主包精确依赖 `dsh-preset-display-regex`，由根目录 `cordis.patch.yml` 在同一插件页注册两个可分别启停的运行条目。`packages/bundle` 仅保留兼容入口，不是正常安装所需的第三个包。
 
 ## 包边界与数据流
 
@@ -36,7 +36,7 @@ flowchart TD
     API <--> STATE
     HOST[DSH 模式注册表与实时工具目录] --> API
     STATE --> POLICY[解析模式默认 / 会话工具覆盖]
-    POLICY --> SCOPE[宿主作用域限制与 PTC 提示重组]
+    POLICY --> SCOPE[工具准入与提示词收集前更新作用域限制]
     SCOPE --> REQUEST[DSH 构造模型请求]
     STATE --> PRESET[预设顺序表 / 深度注入 / 宏展开]
     REQUEST --> STREAM[llm/stream 请求处理]
@@ -56,13 +56,15 @@ flowchart TD
     DSH -->|工具执行后继续请求| REQUEST
 ```
 
+`src/lib/tool-restrictions.mts` 在 0.2.2 的 `tools.resolve` 前刷新 agent 工具限制，在不带 toolSet 的系统提示词组装前刷新旧版及预览范围。局部服务方法桥接保留 Cordis 调用方并随插件释放；模式工具通过 scope lease 识别。
+
 工具执行守卫是独立的最后一道校验：即使历史中已有工具调用，或模型自行生成调用，也会检查当前工具策略。编辑器保留完整的工具目录，不会因某工具被关闭就让它从可编辑列表中消失。
 
 ### 动态解析、编译与预览
 
 `src/index.mts` 的 `injectStream` 读取实际会话、模式、连接和绑定；无会话、专用 purpose 请求及已路由请求不重复注入。启用预设时，先读取当前 DSH 系统模板和外部动态模板，再进入 Store 事务编译。异步解析不占用状态写队列；提交前核对预设、变量及相关会话依赖，期间发生变化则拒绝使用过期结果。
 
-编译负责模板关联、marker、chatHistory 深度修改、宏、提示词正则和末条预填充。缓存键包含预设、消息、协议、模板引用、动态正文和本次 DSH 系统模板，命中时复用结果，避免重复提交宏变量变更。模式系统模板按预设和模式分别保存，恢复默认不会修改其他模式。
+编译负责模板关联、marker、chatHistory 深度修改、宏、提示词正则和末条预填充。缓存键包含预设、消息、协议、模板引用、动态正文和本次 DSH 系统模板，命中时复用结果，避免重复提交宏变量变更。模式系统模板按预设和模式分别保存，恢复默认不会修改其他模式。模型选择优先读取 live Agent 与公开 projection snapshot，并将当前 modelSelection 传给组装服务。
 
 草稿预览复用动态解析与编译，但不提交变量写入，也不发送模型请求。实际发送另建请求快照，经过适配器和 HTTP 桥接后捕获真正出站的请求体；两次准备之间输入或外部数据变化时，草稿与实际请求可能不同。消息卡片与 Raw 都读取同一快照，折叠和切换视图不会触发重新解析。
 
