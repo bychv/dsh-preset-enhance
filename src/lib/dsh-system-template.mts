@@ -1,8 +1,18 @@
 import type { PluginContext, HostMessage } from '../host-types.mjs';
 import { connectionSelection, sessionSelection } from './connection.mjs';
+export { dshTemplateSource } from './dsh-template-source.mjs';
 
 export const DSH_TEMPLATE_ID = 'dsh-preset-enhance:dsh-system-prompt';
 interface Section { name: string; text: string; interpolate?: boolean }
+export interface DshAssembly {
+  sections: Section[];
+  contexts?: Section[];
+  variables?: Record<string, string | undefined>;
+  tools?: unknown[];
+}
+export type DshSectionOverride = { mode: 'custom'; template: string } | { mode: 'disabled' };
+export type DshSectionTemplates = Record<string, Record<string, DshSectionOverride>>;
+export const DSH_PREVIEW = Symbol('preset-enhance: independent assembly');
 export interface DshSystemTemplate {
   available: boolean;
   modeId: string;
@@ -11,15 +21,11 @@ export interface DshSystemTemplate {
   values: Record<string, string>;
   variables: string[];
   sections: { name: string; template: string; text: string; macro: string }[];
+  contexts?: { name: string; text: string }[];
   warnings: string[];
 }
 
 const variablePattern = /\{\{\s*([a-z][a-z0-9_]*)\s*\}\}/g;
-// These DSH providers embed changing SDKs, connection instructions, paths or endpoints.
-// Whole-section slots also remain available for third-party providers.
-function dynamicSection(name: string): boolean {
-  return /^(?:mcp:|mcp-resource-servers$|tools:|context:file-reference$|plan:policy$|app:web-surface$|harness:source$|tool:)/.test(name);
-}
 function escapeLiteral(text: string): string { return text.replace(/[{}]/g, '\\$&'); }
 function sectionTemplate(section: Section): string {
   if (section.interpolate === false) return escapeLiteral(section.text);
@@ -38,6 +44,30 @@ function renderedSection(section: Section, variables: Record<string, string | un
     }
     return variables[name]!;
   });
+}
+
+/** Project an accepted host assembly without running any provider again. */
+export function dshTemplateFromAssembly(assembly: DshAssembly, modeId: string): DshSystemTemplate {
+  const variables = assembly.variables ?? {};
+  const values: Record<string, string> = Object.create(null);
+  for (const [key, value] of Object.entries(variables)) if (typeof value === 'string') values['dsh::var::' + key.toLowerCase()] = value;
+  const missing = new Set<string>();
+  const sections = assembly.sections.map(section => {
+    const sectionMissing = new Set<string>(), text = renderedSection(section, variables, sectionMissing);
+    for (const key of sectionMissing) missing.add(key);
+    if (sectionMissing.size === 0) {
+      values['dsh::section::' + section.name.toLowerCase()] = text;
+      values['dsh::section::' + encodeURIComponent(section.name).toLowerCase()] = text;
+    }
+    return { name: section.name, text, template: sectionTemplate(section), macro: '{{dsh::section::' + section.name.replace(/[{}\\]/g, '\\$&') + '}}' };
+  });
+  const text = sections.map(s => s.text).filter(Boolean).join('\n\n');
+  if (missing.size === 0) values['dsh::prompt'] = text;
+  return { available: true, modeId, text, values, variables: Object.keys(variables), sections,
+    // All sections stay live, including empty and third-party sections.
+    template: sections.map(s => s.macro).join('\n\n'),
+    contexts: (assembly.contexts ?? []).map(section => ({ name: section.name, text: renderedSection(section, variables, new Set()) })),
+    warnings: missing.size ? ['待会话就绪后解析变量：' + [...missing].join('、')] : [] };
 }
 
 /** Public assembly API preserves scoped mode contributions and leaves runtime context separate. */
@@ -71,26 +101,9 @@ export async function readDshSystemTemplate(ctx: PluginContext, sessionId: strin
       ? live : session ? Object.assign(Object.create(live ?? null), { session, options }) : undefined;
     signal?.throwIfAborted();
     // Preserve the live Agent scope; cold reads use a preset scope without creating an Agent.
-    const assembly = await (service as any).assemble({ agent, scope, modelSelection: options, ...(signal ? { signal } : {}) });
+    const assembly = await (service as any).assemble({ agent, scope, modelSelection: options, [DSH_PREVIEW]: true, ...(signal ? { signal } : {}) });
     signal?.throwIfAborted();
-    const variables = assembly.variables ?? {};
-    const values: Record<string, string> = Object.create(null);
-    for (const [key, value] of Object.entries(variables)) if (typeof value === 'string') values['dsh::var::' + key.toLowerCase()] = value;
-    const missing = new Set<string>();
-    const sections = (assembly.sections as Section[]).map(section => {
-      const sectionMissing = new Set<string>(), text = renderedSection(section, variables, sectionMissing);
-      for (const key of sectionMissing) missing.add(key);
-      if (sectionMissing.size === 0) {
-        values['dsh::section::' + section.name.toLowerCase()] = text;
-        // Keep already-saved encoded macros readable by the compiler.
-        values['dsh::section::' + encodeURIComponent(section.name).toLowerCase()] = text;
-      }
-      return { name: section.name, text, template: sectionTemplate(section), macro: '{{dsh::section::' + section.name.replace(/[{}\\]/g, '\\$&') + '}}' };
-    });
-    const text = sections.map(s => s.text).filter(Boolean).join('\n\n');
-    if (missing.size === 0) values['dsh::prompt'] = text;
-    return { available: true, modeId, text, values, variables: Object.keys(variables), sections,
-      template: sections.filter(s => s.text.length > 0 || dynamicSection(s.name)).map(s => dynamicSection(s.name) ? s.macro : s.template).join('\n\n'), warnings: missing.size ? ['待会话就绪后解析变量：' + [...missing].join('、')] : [] };
+    return dshTemplateFromAssembly(assembly, modeId);
   } finally { await lease?.[Symbol.asyncDispose](); }
 }
 
@@ -105,5 +118,21 @@ export function validateDshTemplates(value: unknown): void {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('dsh_system_prompt_templates 必须是对象');
   for (const [mode, text] of Object.entries(value)) {
     if (!mode || typeof text !== 'string' || text.length > 2_000_000) throw new Error('DSH 模式模板必须为小于 2 MB 的文本');
+  }
+}
+
+export function validateDshSections(value: unknown): void {
+  if (value === undefined) return;
+  const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+  if (!record(value)) throw new Error('dsh_system_prompt_sections 必须为对象');
+  let count = 0, chars = 0;
+  for (const [mode, sections] of Object.entries(value)) {
+    if (!mode || !record(sections)) throw new Error('DSH 模式段落配置必须为对象');
+    for (const [name, item] of Object.entries(sections)) {
+      if (!name || !record(item) || !['custom', 'disabled'].includes(item.mode as string) ||
+        (item.mode === 'custom' && typeof item.template !== 'string')) throw new Error('DSH 段落必须包含 custom/template 或 disabled');
+      chars += typeof item.template === 'string' ? item.template.length : 0;
+      if (++count > 4096 || chars > 2_000_000) throw new Error('DSH 段落配置过大');
+    }
   }
 }

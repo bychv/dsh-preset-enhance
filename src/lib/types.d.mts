@@ -186,6 +186,7 @@ export interface SillyTavernPreset {
   assistant_prefill?: string;
   dsh_system_prompt_enabled?: boolean;
   dsh_system_prompt_templates?: Record<string, string>;
+  dsh_system_prompt_sections?: import('./dsh-system-template.mjs').DshSectionTemplates;
   dsh_request?: { max_tokens?: number; stream?: boolean; [key: string]: unknown };
   [key: string]: unknown;
 }

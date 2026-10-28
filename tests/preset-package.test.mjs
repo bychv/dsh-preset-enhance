@@ -380,12 +380,14 @@ test('package API imports, edits and exports durably; restores prefill settings 
 test('extraction linkage preserves edited templates and package fields through import/save/export', () => {
  const data=prompt();data.dsh_system_prompt_enabled=false;data.dsh_system_prompt_templates={standard:''};data.dsh_request={max_tokens:0,stream:false};
  data.extensions={...data.extensions,regex_scripts:[{id:'r',disabled:true,findRegex:'/x/g',future:0}],SPreset:{unknown:1},'dsh-preset-enhance':{displayRegex:{enabled:false},templateBindings:{fixture:{providerId:'fixture',templateId:'body',templateVersion:'1',mode:'linked-dynamic',config:{empty:''}}},autoTemplateDisabled:['fixture']}};
+ data.dsh_system_prompt_sections={standard:{'third:dynamic':{mode:'custom',template:'{{dsh::var::model}}'},'tool:read':{mode:'disabled'}},other:{'third:dynamic':{mode:'custom',template:''}}};
  const before=structuredClone(data);assert.equal(ensurePackageExtractionTemplate(data,true),true);
  const format=data.prompts.find(p=>p.identifier==='dsh-output-extraction-template');format.content='edited';
  assert.equal(ensurePackageExtractionTemplate(data,true),false);assert.equal(format.content,'edited');
  const encoded=encodePresetPackage({name:'fixture',preset:data},settings());const decoded=decodePresetDocument(encoded);
  assert.deepEqual(decoded.preset.extensions,before.extensions);assert.deepEqual(decoded.preset.dsh_request,before.dsh_request);assert.deepEqual(decoded.preset.dsh_system_prompt_templates,before.dsh_system_prompt_templates);assert.equal(decoded.preset.dsh_system_prompt_enabled,false);
  assert.equal(decoded.preset.prompts.filter(p=>p.identifier===format.identifier).length,1);
+ assert.deepEqual(decoded.preset.dsh_system_prompt_sections,before.dsh_system_prompt_sections);
  const plain=prompt();delete plain.assistant_prefill;assert.equal(ensurePackageExtractionTemplate(plain,true,true),false);
  const unordered={prompts:[{identifier:'off',role:'system',enabled:false},{identifier:'prefix',role:'assistant',content:'prefix'}]};assert.equal(ensurePackageExtractionTemplate(unordered,true,true),true);assert.equal(unordered.prompt_order[0].order.find(p=>p.identifier==='off').enabled,false);
 });

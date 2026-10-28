@@ -108,6 +108,9 @@
 .dsh-template-macros { max-height: 320px; overflow: auto; }
 .dsh-template-macros summary { overflow-wrap: anywhere; }
 .dsh-template-macros pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+.dsh-section { border: 1px solid #3a4a54; border-radius: 8px; padding: 10px 12px; margin-top: 10px; }
+.dsh-section summary { overflow-wrap: anywhere; }
+.dsh-section pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow: auto; font: 12px/1.6 ui-monospace,Consolas,monospace; }
 
 .preview-raw .json-branch { margin: 0; padding: 0; border: 0; }
 .preview-raw .json-branch > summary, .preview-raw .json-leaf { padding: 2px 4px; }

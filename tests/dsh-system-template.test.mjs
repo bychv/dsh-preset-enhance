@@ -26,8 +26,8 @@ function harness() {
 test('source variables become dynamic macros, literal braces and Windows paths survive, default prompt is exact', async () => {
   const h = harness(), info = await readDshSystemTemplate(h.ctx, 's', 'standard');
   assert.equal(h.calls[0].scope, h.agent); assert.equal(h.calls[0].agent, h.agent);
-  assert.match(info.template, /\{\{dsh::var::model\}\}/);
-  assert.match(info.template, /\{\{dsh::var::cwd\}\}/);
+  assert.match(info.sections[0].template, /\{\{dsh::var::model\}\}/);
+  assert.match(info.sections[0].template, /\{\{dsh::var::cwd\}\}/);
   assert.ok(info.template.includes('{{dsh::section::plan:policy}}'), 'inactive dynamic sections remain available in saved overrides');
   assert.equal(renderMacros(info.sections[1].template, createMacroContext({ values: info.values })), info.sections[1].text);
   const compiled = compilePreset(preset, withoutDshPrompt(history), { dshSystemTemplate: info });
@@ -89,11 +89,11 @@ test('new-conversation workbench reads the chosen scope without inventing an inc
     } } };
   const info = await readDshSystemTemplate(ctx, '', '');
   assert.equal(info.available, true); assert.equal(info.modeId, 'standard');
-  assert.ok(info.template.includes('{{dsh::var::cwd}}'));
+  assert.ok(info.sections[0].template.includes('{{dsh::var::cwd}}'));
   assert.ok(info.warnings.length > 0);
   assert.throws(() => compilePreset(preset, [], { dshSystemTemplate: info }), /不可用/, 'unresolved values cannot leak into a sent prompt');
   const chosen = await readDshSystemTemplate(ctx, '', 'another');
-  assert.equal(scope.mode, 'another'); assert.match(chosen.template, /Mode another/);
+  assert.equal(scope.mode, 'another'); assert.match(chosen.sections[0].template, /Mode another/);
 });
 
 test('a blank cold session uses the current host model selection before its first request', async () => {
@@ -135,4 +135,35 @@ test('0.2.2 system assembly receives current modelSelection and clears an old ex
   await readDshSystemTemplate(h.ctx, 's', 'standard');
   assert.equal(h.calls[1].agent.options.reasoningEffort, undefined, 'clearing effort on the same model also needs a detached preview Agent');
   assert.equal(h.agent.options.reasoningEffort, 'high');
+});
+
+test('section overrides inherit new/empty/dynamic contributions, preserve modes and keep absent sources dormant', async () => {
+  const h = harness();
+  const p = { ...preset, dsh_system_prompt_sections: {
+    standard: { identity: {mode:'custom',template:'Edited {{dsh::var::model}}'}, literal:{mode:'disabled'}, absent:{mode:'custom',template:'Do not inject'} },
+    other: {identity:{mode:'custom',template:'Other mode'}} } };
+  let info = await readDshSystemTemplate(h.ctx,'s','standard');
+  const text = () => compilePreset(p,[],{dshSystemTemplate:info}).messages[0].content[0].text;
+  assert.equal(text(),'Edited one\n\nSDK ');
+  h.setPhase('dynamic');info=await readDshSystemTemplate(h.ctx,'s','standard');
+  assert.equal(text(),'Edited one\n\nSDK dynamic\n\ndynamic');
+  const old = h.ctx.systemPrompt.assemble;
+  h.ctx.systemPrompt.assemble = async c => {const assembly=await old(c);assembly.sections.push({name:'unknown:new',text:'New default'});return assembly;};
+  info=await readDshSystemTemplate(h.ctx,'s','standard');assert.match(text(),/New default$/);
+  p.dsh_system_prompt_sections.standard['unknown:new']={mode:'custom',template:'Changed third-party'};
+  info=await readDshSystemTemplate(h.ctx,'s','standard');assert.match(text(),/Changed third-party$/);
+  h.ctx.systemPrompt.assemble=old;info=await readDshSystemTemplate(h.ctx,'s','standard');
+  assert.ok(!text().includes('Changed third-party'));
+  assert.equal(p.dsh_system_prompt_sections.standard['unknown:new'].template,'Changed third-party');
+  p.dsh_system_prompt_templates={standard:''};assert.equal(compilePreset(p,[],{dshSystemTemplate:info}).messages.length,0,'legacy empty body wins');
+  p.dsh_system_prompt_templates.standard='Whole body';assert.equal(text(),'Whole body');
+  delete p.dsh_system_prompt_templates.standard;assert.match(text(),/^Edited one/);
+  assert.equal(p.dsh_system_prompt_sections.other.identity.template,'Other mode');
+});
+
+test('section configuration validation rejects malformed or oversized imports', () => {
+  for(const value of [[],null,'text',{standard:[]},{standard:{x:{mode:'follow'}}},{standard:{x:{mode:'custom'}}},{standard:{x:{mode:'custom',template:2}}},{standard:{x:{mode:'custom',template:'x'.repeat(2000001)}}}]) {
+    assert.throws(()=>validatePreset({...preset,dsh_system_prompt_sections:value}),/段落|sections/);
+  }
+  assert.doesNotThrow(()=>validatePreset({...preset,dsh_system_prompt_sections:{standard:{x:{mode:'custom',template:''},y:{mode:'disabled',future:1}}}}));
 });

@@ -64,9 +64,11 @@ flowchart TD
 
 ### 动态解析、编译与预览
 
-`src/index.mts` 的 `injectStream` 读取实际会话、模式、连接和绑定；无会话、专用 purpose 请求及已路由请求不重复注入。启用预设时，先读取当前 DSH 系统模板和外部动态模板，再进入 Store 事务编译。异步解析不占用状态写队列；提交前核对预设、变量及相关会话依赖，期间发生变化则拒绝使用过期结果。
+`src/index.mts` 的 `injectStream` 读取实际会话、模式、连接和绑定；无会话、专用 purpose 请求及已路由请求不重复注入。启用预设时，优先取得宿主本轮最终组装的 DSH 系统模板，再解析外部动态模板并进入 Store 事务编译。异步解析不占用状态写队列；提交前核对预设、变量及相关会话依赖，期间发生变化则拒绝使用过期结果。
 
-编译负责模板关联、marker、chatHistory 深度修改、宏、提示词正则和末条预填充。缓存键包含预设、消息、协议、模板引用、动态正文和本次 DSH 系统模板，命中时复用结果，避免重复提交宏变量变更。模式系统模板按预设和模式分别保存，恢复默认不会修改其他模式。模型选择优先读取 live Agent 与公开 projection snapshot，并将当前 modelSelection 传给组装服务。
+编译负责模板关联、marker、chatHistory 深度修改、宏、提示词正则和末条预填充。缓存键包含预设、消息、协议、模板引用、动态正文和本次 DSH 系统模板，命中时复用结果，避免重复提交宏变量变更。模式系统模板按预设、模式和段落保存局部覆盖，其他段落跟随宿主默认；旧整篇模板优先使用，恢复默认不会修改其他模式。
+
+`src/lib/dsh-assembly.mts` 在已有准备桥接返回后记录最终 assembly，通过 Agent、turn/step 和请求信号关联，核对原系统正文与 schemas 后复用。预览带独立标记，不能覆盖本轮；step/turn 结束、模式切换及停用时清理。它不保留 toolSet 的所有权，也不重新执行 tools.resolve。无关联的手工/旧式调用保留独立组装路径，模型选择读取 live Agent 与公开 projection snapshot，并显式传入 modelSelection。
 
 草稿预览复用动态解析与编译，但不提交变量写入，也不发送模型请求。实际发送另建请求快照，经过适配器和 HTTP 桥接后捕获真正出站的请求体；两次准备之间输入或外部数据变化时，草稿与实际请求可能不同。消息卡片与 Raw 都读取同一快照，折叠和切换视图不会触发重新解析。
 
@@ -77,7 +79,8 @@ flowchart TD
 | 客户端入口及正则、Raw、折叠与滚动偏好源码 `src/client/`；其余工作台 `web/` | 侧边栏与会话入口，预设编辑、预览、工具管理和保存交互 |
 | `src/index.mts`、`src/mode.mts` | 插件入口、API、命令、请求拦截、预设模式与生命周期管理 |
 | `src/lib/store.mts`、`src/lib/preset-package.mts` | 状态持久化、版本校验、单文件导入导出 |
-| `src/lib/dsh-system-template.mts`、`src/lib/request-settings.mts`、`src/lib/buffered-response.mts` | 模式系统模板、动态 DSH 宏、请求参数与非流式响应接入 |
+| `src/lib/dsh-system-template.mts`、`src/lib/request-settings.mts`、`src/lib/buffered-response.mts` | 模式系统模板与动态 DSH 宏、请求参数与非流式响应接入 |
+| `src/lib/dsh-assembly.mts`、`src/lib/dsh-template-source.mts`、`src/client/dsh-template-editor.ts` | 本轮组装关联、共享段落选择、分段编辑和只读上下文预览 |
 | `src/lib/preset.mts`、`src/lib/macros.mts` | 顺序表、深度注入、变量宏、最终消息和预填充判定 |
 | `src/lib/tool-presets.mts`、`src/lib/tool-restrictions.mts` | 工具策略、分组、会话作用域限制和 PTC 工具可见性 |
 | `src/lib/connection.mts`、`src/lib/protocol.mts`、`src/lib/messages.mts` | 读取实际连接协议、记录协议观察结果、Messages 消息适配 |

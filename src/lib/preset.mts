@@ -1,5 +1,6 @@
 import { isCompactionCheckpoint, isUserAuthored } from './compaction.mjs';
-import { DSH_TEMPLATE_ID, validateDshTemplates } from './dsh-system-template.mjs';
+import { DSH_TEMPLATE_ID, validateDshTemplates, validateDshSections } from './dsh-system-template.mjs';
+import { dshTemplateParts } from './dsh-template-source.mjs';
 import { validateRequestSettings } from './request-settings.mjs';
 import { applyHistoryPatches, historyInsertionIndex, validateHistoryPatches } from './history-patches.mjs';
 import { createMacroContext, renderMacros } from './macros.mjs';
@@ -29,6 +30,7 @@ export function validatePreset(preset: unknown): SillyTavernPreset {
   }
   if (preset.dsh_spreset_tools_enabled !== undefined && typeof preset.dsh_spreset_tools_enabled !== 'boolean') throw new Error('dsh_spreset_tools_enabled 必须是布尔值');
   validateDshTemplates(preset.dsh_system_prompt_templates);
+  validateDshSections(preset.dsh_system_prompt_sections);
   validateRequestSettings(preset.dsh_request);
   if (preset.dsh_prefill_target !== undefined && preset.dsh_prefill_target !== 'reasoning' && preset.dsh_prefill_target !== 'content') {
     throw new Error('dsh_prefill_target 必须为 reasoning 或 content');
@@ -142,8 +144,7 @@ export function compilePreset(preset: SillyTavernPreset, history: HostMessage[] 
   ctx.warnings.push(...resolved.warnings);
   if (options.dshSystemTemplate?.available && dshSystemPromptEnabled(preset)) {
     const host = options.dshSystemTemplate;
-    const text = renderMacros(Object.hasOwn(preset.dsh_system_prompt_templates ?? {}, host.modeId)
-      ? preset.dsh_system_prompt_templates![host.modeId] : '{{dsh::prompt}}', ctx);
+    const text = dshTemplateParts(preset, host).map(part => renderMacros(part, ctx)).filter(Boolean).join('\n\n');
     entries.push({ identifier: DSH_TEMPLATE_ID, name: 'DSH 系统提示词', role: 'system', text });
     if (text.trim()) before.push({ id: `preset:dsh-system:${options.seed ?? 'preview'}`, role: 'system',
       content: [{ type: 'text', text }], source: { kind: 'plugin', plugin: 'dsh-preset-enhance' } });

@@ -81,9 +81,11 @@ try {
     if (file === 'client.js') text = text.replace("import('./runtime.mjs')", "import('/preset-enhance-display/runtime.mjs')").replace(/export \{\};?\s*$/, '');
     await writeFile(join(root, 'packages', 'display-regex', file), text);
   }
-  for (const file of ['workbench-activity.js', 'request-events.js', 'display-availability.js', 'regex-editor.js', 'request-preview.js', 'disclosures.js', 'scroll-state.js', 'spreset-tools.js']) {
+  for (const file of ['workbench-activity.js', 'request-events.js', 'display-availability.js', 'regex-editor.js', 'request-preview.js', 'disclosures.js', 'scroll-state.js', 'spreset-tools.js', 'dsh-template-editor.js']) {
     await emit(join(browser, 'src', 'client', file), join(root, 'web', file));
   }
+  const dshEditor = join(root, 'web', 'dsh-template-editor.js');
+  await writeFile(dshEditor, (await readFile(dshEditor, 'utf8')).replaceAll("'../lib/", "'./regex/"));
   await writeFile(join(root, 'client.js'), (await readFile(join(browser, 'src', 'client', 'entry.js'), 'utf8')).replace(/^export \{\};?\s*$/gm, ''));
   // Request preview remains a classic script loaded before the workbench module.
   await writeFile(join(root, 'web', 'request-preview.js'), (await readFile(join(browser, 'src', 'client', 'request-preview.js'), 'utf8')).replace(/^export \{\};?\s*$/gm, ''));

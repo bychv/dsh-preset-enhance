@@ -2,12 +2,12 @@ import type { AgentHandle, PluginContext, SessionLike } from '../host-types.mjs'
 import { planToolRestriction } from './tool-presets.mjs';
 import type { ToolPolicySnapshot } from './tool-presets.mjs';
 
-type Preparation = { agent?: AgentHandle; toolSet?: unknown };
+export type Preparation = { agent?: AgentHandle; toolSet?: unknown; [key: string]: unknown };
 type PrepareMethod = (this: unknown, context: Preparation) => Promise<unknown>;
 
 /** Install a reversible service-method bridge, preserving Cordis caller tracing. */
 function beforePreparation(ctx: PluginContext, service: object, name: string,
-  before: (context: Preparation) => Promise<void>): void {
+  before: (context: Preparation) => Promise<void>, after?: (result: unknown, context: Preparation) => void): void {
   // Reading service[name] binds it to the plugin's Cordis context. Read the raw
   // descriptor instead so calls from agent scopes retain their original `this`.
   let owner: object | null = service;
@@ -18,7 +18,9 @@ function beforePreparation(ctx: PluginContext, service: object, name: string,
   let active = true;
   const wrapped: PrepareMethod = async function(context = {}) {
     if (active) await before(context);
-    return original.call(this, context);
+    const result = await original.call(this, context);
+    if (active) after?.(result, context);
+    return result;
   };
   ctx.effect(() => {
     Object.defineProperty(service, name, { configurable: true, writable: true, value: wrapped });
@@ -36,6 +38,7 @@ export function installToolRestrictions(
   ctx: PluginContext, snapshot: () => ToolPolicySnapshot,
   modeOf: (session: SessionLike | undefined) => string,
   prepareTools?: (agent: AgentHandle) => Promise<void>,
+  acceptedAssembly?: (result: unknown, context: Preparation) => void,
 ): void {
   const systemPrompt = typeof ctx.get === 'function'
     ? ctx.get('systemPrompt') : (ctx as { systemPrompt?: object }).systemPrompt;
@@ -85,5 +88,5 @@ export function installToolRestrictions(
   // Keep the bridge limited to the public preparation methods, with owned cleanup.
   beforePreparation(ctx, ctx.tools, 'resolve', prepare);
   beforePreparation(ctx, systemPrompt, 'assemble', context =>
-    context.toolSet === undefined ? prepare(context) : Promise.resolve());
+    context.toolSet === undefined ? prepare(context) : Promise.resolve(), acceptedAssembly);
 }

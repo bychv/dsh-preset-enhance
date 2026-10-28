@@ -2,6 +2,7 @@ import { createSPresetTools, spresetSettings, consumeSPresetStream } from './lib
 import { planDisplayRegex } from './lib/display-regex.mjs';
 import { installDisplayConfig } from './lib/display-config.mjs';
 import { readDshSystemTemplate, withoutDshPrompt } from './lib/dsh-system-template.mjs';
+import { createDshAssemblyTracker } from './lib/dsh-assembly.mjs';
 import { readRequestSettings } from './lib/request-settings.mjs';
 import { createPresetReader, PRESET_READ_BASE } from './lib/preset-reader.mjs';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
@@ -297,8 +298,9 @@ export async function apply(ctx, config = {}) {
         const record = binding?.enabled ? state.presets.find(row => row.id === binding.presetId) : undefined;
         return record ? { id: record.id, preset: record.preset, characterId: binding?.characterId } : undefined;
     }, (agent, tool) => effectiveToolEnabled(policySnapshot, agent.session?.id, sessionModeId(agent.session), tool));
+    const dshAssemblies = createDshAssemblyTracker(ctx, sessionModeId);
     if (!startupError)
-        installToolRestrictions(ctx, () => policySnapshot, sessionModeId, agent => spresetTools.prepare(agent));
+        installToolRestrictions(ctx, () => policySnapshot, sessionModeId, agent => spresetTools.prepare(agent), dshAssemblies.capture);
     const tools = ctx.tools;
     if (tools?.guard && !startupError) {
         const guard = tools.guard.bind(tools);
@@ -357,8 +359,9 @@ export async function apply(ctx, config = {}) {
         const dynamic = initialBinding?.enabled && initialRecord && Object.values(templateBindings(initialRecord.preset, templateCatalog)).some(ref => ref?.mode === 'linked-dynamic');
         const needsDsh = initialBinding?.enabled && initialRecord && !exclusive && dshSystemPromptEnabled(initialRecord.preset);
         const expectedDependency = dynamic || needsDsh ? dependencyKey(initial) : undefined;
-        const dshSystemTemplate = needsDsh ? await lifecycle.track(readDshSystemTemplate(ctx, sessionId, modeId, options.signal, options)) : undefined;
-        if (needsDsh && !dshSystemTemplate?.available && Object.hasOwn(initialRecord.preset.dsh_system_prompt_templates ?? {}, modeId))
+        const dshSystemTemplate = needsDsh ? dshAssemblies.forRequest(options, modeId)
+            ?? await lifecycle.track(readDshSystemTemplate(ctx, sessionId, modeId, options.signal, options)) : undefined;
+        if (needsDsh && !dshSystemTemplate?.available && (Object.hasOwn(initialRecord.preset.dsh_system_prompt_templates ?? {}, modeId) || Object.hasOwn(initialRecord.preset.dsh_system_prompt_sections ?? {}, modeId)))
             throw new Error('当前无法读取 DSH 提示词服务，无法展开自定义模式模板');
         const preparedHistory = (preset) => exclusive || !dshSystemPromptEnabled(preset)
             ? presetModeHistory(history) : dshSystemTemplate?.available ? withoutDshPrompt(history) : history;
@@ -510,8 +513,9 @@ export async function apply(ctx, config = {}) {
         [`${BASE}/workbench-activity.js`, ['web/workbench-activity.js', 'text/javascript']],
         [`${BASE}/request-events.js`, ['web/request-events.js', 'text/javascript']],
         [`${BASE}/display-availability.js`, ['web/display-availability.js', 'text/javascript']],
-        ...['display-regex', 'prompt-regex', 'macros', 'compaction'].map(file => [`${BASE}/regex/${file}.mjs`, [`lib/${file}.mjs`, 'text/javascript']]),
+        ...['display-regex', 'prompt-regex', 'macros', 'compaction', 'dsh-template-source'].map(file => [`${BASE}/regex/${file}.mjs`, [`lib/${file}.mjs`, 'text/javascript']]),
         [`${BASE}/spreset-tools.js`, ['web/spreset-tools.js', 'text/javascript']],
+        [`${BASE}/dsh-template-editor.js`, ['web/dsh-template-editor.js', 'text/javascript']],
         [`${BASE}/disclosures.js`, ['web/disclosures.js', 'text/javascript']],
         [`${BASE}/scroll-state.js`, ['web/scroll-state.js', 'text/javascript']],
         [`${BASE}/editor.js`, ['web/editor.js', 'text/javascript']],
@@ -730,7 +734,7 @@ export async function apply(ctx, config = {}) {
                     res.on?.('close', () => controller.abort(new Error('预览已取消')));
                     const dshSystemTemplate = mode !== AGENT_PRESET_ID && dshSystemPromptEnabled(body.preset)
                         ? await readDshSystemTemplate(ctx, sessionId, mode, controller.signal) : undefined;
-                    if (mode !== AGENT_PRESET_ID && dshSystemPromptEnabled(body.preset) && !dshSystemTemplate?.available && Object.hasOwn(body.preset.dsh_system_prompt_templates ?? {}, mode))
+                    if (mode !== AGENT_PRESET_ID && dshSystemPromptEnabled(body.preset) && !dshSystemTemplate?.available && (Object.hasOwn(body.preset.dsh_system_prompt_templates ?? {}, mode) || Object.hasOwn(body.preset.dsh_system_prompt_sections ?? {}, mode)))
                         throw new Error('当前无法读取 DSH 提示词服务，无法展开自定义模式模板');
                     if (dshSystemTemplate?.available)
                         history = withoutDshPrompt(history);

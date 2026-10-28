@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { dshTemplateUiScript } from './fixtures/dsh-template-ui.mjs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -219,7 +220,7 @@ function editor(presetValue = basePreset(), fetchImpl) {
     requests.push(JSON.parse(options.body));
     return { ok: true, json: async () => ({ revision: 1 }) };
   });
-  const script = readFileSync(new URL('../web/spreset-tools.js', import.meta.url), 'utf8').replace(/^export /gm, '') + '\n' + readFileSync(new URL('../web/request-preview.js', import.meta.url), 'utf8') + '\n' + readFileSync(new URL('../web/editor.js', import.meta.url), 'utf8')
+  const script = dshTemplateUiScript() + readFileSync(new URL('../web/spreset-tools.js', import.meta.url), 'utf8').replace(/^export /gm, '') + '\n' + readFileSync(new URL('../web/request-preview.js', import.meta.url), 'utf8') + '\n' + readFileSync(new URL('../web/editor.js', import.meta.url), 'utf8')
     .replace(/^import .*;\r?\n/gm, '').replace('await guard(() => reload())();', '');
   const context = {
     URLSearchParams, structuredClone, console, fetch, __initialPreset: presetValue,
@@ -559,4 +560,40 @@ test('display regex-test uses display applicability without executing prompt-onl
   ui.preset().extensions['dsh-preset-enhance'].displayRegex.enabled = false;
   ui.availability(false); ui.availability(true);
   assert.equal(ui.get('regex-display-enabled').checked, false);
+});
+
+test('DSH section controls write the shared preset draft, keep inherited sections and reveal missing sources', async () => {
+  const info={available:true,modeId:'standard',template:'{{dsh::section::identity}}',text:'Default model',values:{'dsh::section::identity':'Default model','dsh::var::model':'model'},variables:['model'],sections:[{name:'identity',template:'Default {{dsh::var::model}}',text:'Default model',macro:'{{dsh::section::identity}}'}],contexts:[{name:'cwd',text:'/fictional'}]};
+  const ui=editor(basePreset());ui.openDsh(info);
+  assert.equal(ui.get('content-field').hidden,true);
+  const root=ui.get('dsh-template-sections');
+  const preview=root.children.find(n=>n.tagName==='details'&&n.children[0].textContent==='完整组装预览');
+  preview.open=true;preview.ontoggle({target:preview});
+  const panel=root.children.find(n=>n.tagName==='details'&&n.children[0].textContent==='identity');
+  const select=panel.children[1].children[0],input=panel.children[2];
+  select.value='custom';select.onchange();input.value='Edited {{dsh::var::model}}';input.oninput();
+  assert.equal(ui.preset().dsh_system_prompt_sections.standard.identity.template,input.value);
+  assert.match(textOf(root),/Edited model/);
+  select.value='disabled';select.onchange();assert.equal(ui.preset().dsh_system_prompt_sections.standard.identity.mode,'disabled');
+  select.value='default';select.onchange();assert.equal(ui.preset().dsh_system_prompt_sections.standard,undefined);
+  input.value='Saved';select.value='custom';select.onchange();await ui.savePreset();
+  assert.equal(ui.requests.find(r=>r.action==='save').preset.dsh_system_prompt_sections.standard.identity.template,'Saved');
+  ui.openDsh({...info,sections:[]});assert.match(textOf(root),/来源不可用/);
+  assert.equal(ui.preset().dsh_system_prompt_sections.standard.identity.template,'Saved');
+});
+
+test('whole-body/section switches are explicit and preserve overrides of other modes', () => {
+  const ui=editor(basePreset({dsh_system_prompt_templates:{standard:'Old entire body',other:'Other body'},dsh_system_prompt_sections:{other:{x:{mode:'disabled'}}}}));
+  const info={available:true,modeId:'standard',template:'',values:{},variables:[],sections:[]};ui.openDsh(info);
+  assert.equal(ui.get('content-field').hidden,false);assert.equal(ui.get('content').value,'Old entire body');
+  ui.get('dsh-template-sections').children[0].children[0].onclick();
+  ui.openDsh(info);
+  assert.equal(ui.preset().dsh_system_prompt_templates.standard,undefined);
+  assert.equal(ui.get('content-field').hidden,true);
+  assert.equal(ui.preset().dsh_system_prompt_templates.other,'Other body');
+  assert.equal(ui.preset().dsh_system_prompt_sections.other.x.mode,'disabled');
+  ui.get('dsh-template-sections').children[0].children[0].onclick();
+  ui.openDsh(info);
+  assert.equal(ui.preset().dsh_system_prompt_templates.standard,'');
+  assert.equal(ui.get('content-field').hidden,false);
 });

@@ -13,14 +13,14 @@
 | 查看消息、折叠历史、结构化 Raw 与工具续轮 | [请求预览](guides/REQUEST_PREVIEW.md) |
 | SPreset 正则编辑、可选正文显示包与配置接口 | [正文正则](api/DISPLAY_REGEX.md) |
 | 实验性 SPreset 工具注册、调用消费与脚本边界 | [SPreset 工具](api/SPRESET_TOOLS.md) |
-| 按模式编辑 DSH 正文、动态宏、输出上限与流式开关 | [系统模板与请求参数](api/DSH_SYSTEM_TEMPLATE.md) |
+| 按模式分段编辑 DSH 正文、动态宏、输出上限与流式开关 | [系统模板与请求参数](api/DSH_SYSTEM_TEMPLATE.md) |
 | 导入、导出和分享字段 | [单文件格式](../PRESET_FORMAT.md) |
 | 外部模板注册、动态解析、marker 自动关联与 chatHistory 修改 | [模板 API](api/TEMPLATE_API.md) |
 | 内部 agent 查询预设、HTTP 凭证与权限边界 | [预设只读 API](api/PRESET_READ_API.md) |
 
 ## 当前实现范围
 
-已实现外部静态/动态模板、marker 自动关联与冲突选择、chatHistory 深度修改、提供者启停和热重载跟踪、实际请求预览、紧凑结构化 Raw 与工具字段摘要、分享包预填充配置恢复、预设只读查询，以及可编辑的模式系统模板和请求参数。
+已实现外部静态/动态模板、marker 自动关联与冲突选择、chatHistory 深度修改、提供者启停和热重载跟踪、实际请求预览、紧凑结构化 Raw 与工具字段摘要、分享包预填充配置恢复、预设只读查询，以及按模式分段编辑的系统模板、本轮组装复用和请求参数。
 
 已加入 SPreset 附加功能正则编辑器及可选正文正则显示包。通用提示词序列处理链尚未实现。已提供可开关的实验性 SPreset 纯数据脚本与工具支持；组件、选项栏、MVU 及通用脚本运行时相关设计不代表本分支已有可调用接口。接口调用以 `api/` 为准，规划及交接见 `plans/`。
 
@@ -28,6 +28,7 @@
 
 | 文档 | 范围 |
 | --- | --- |
+| [2026-10-28 系统模板验证](testing/2026-10-28-SYSTEM_TEMPLATE_SECTIONS.md) | 分段覆盖、整篇兼容、实际宿主组装复用与工具续轮 |
 | [2026-10-28 实验工具验证](testing/2026-10-28-SPRESET_TOOLS.md) | 官方注册与执行、调用消费、失败恢复及非流式预填充 DSML |
 | [DSH 0.2.2 兼容记录](compatibility/DSH_0.2.2_COMPATIBILITY.md) | 工具准入、模型选择、真实宿主假接口与旧版核心服务验证 |
 | [DSH 0.2.1 兼容记录](compatibility/DSH_0.2.1_COMPATIBILITY.md) | 初始适配基线与后续验证入口 |

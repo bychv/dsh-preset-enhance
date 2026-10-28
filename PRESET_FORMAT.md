@@ -68,7 +68,20 @@
 
 `preset.data.dsh_system_prompt_enabled` 是可选布尔值，省略时按 `true` 处理。它对应工作台置顶的“DSH 系统提示词”模板：在其他 DSH 模式中启用该预设时，`true` 保留模式原有系统提示与运行时注入，`false` 将其移除。专用“预设模式”始终移除这些内容。
 
-`preset.data.dsh_system_prompt_templates` 是可选的「模式 ID → 正文」对象。同一预设中各模式的编辑互不覆盖；没有对应键时动态使用该模式的默认正文，有键时使用保存的修改（包括空字符串）。恢复默认只删除当前模式的键。运行时变量与段落保持宏源文本，未解析的值不写入分享文件。
+`preset.data.dsh_system_prompt_templates` 是可选的「模式 ID → 正文」对象。同一预设中各模式的编辑互不覆盖；没有对应键时动态使用该模式的默认正文，有键时使用保存的修改（包括空字符串）。该字段存在时优先使用整篇模板，不叠加段落覆盖。运行时变量与段落保持宏源文本，未解析的值不写入分享文件。
+
+`preset.data.dsh_system_prompt_sections` 是可选的「模式 ID → 段落名称 → 覆盖」对象，随当前格式 version 1 原样保存和分享：
+
+```json
+{
+  "standard": {
+    "deployment:persona-prefix": { "mode": "custom", "template": "使用 {{dsh::var::model}}。" },
+    "deployment:persona-suffix": { "mode": "disabled" }
+  }
+}
+```
+
+未配置的段落跟随宿主默认；`custom` 必须带字符串 `template`（允许空串），`disabled` 不注入该段落。配置最多 4096 项，模板合计最多 200 万字符。未知附加字段保留；不支持的 mode 会拒绝导入。缺失来源的覆盖暂不注入，数据保留待来源恢复。恢复整个模式的默认会同时删除该模式的整篇模板和段落覆盖，其他模式不受影响。
 
 `preset.data.dsh_request` 是可选请求配置：`max_tokens` 为 `0–1000000` 整数，缺省或 `0` 沿用接口默认；`stream` 为布尔值，缺省为 `true`。这些参数随预设保存与导出，仅在预设注入启用时生效。
 

@@ -1,4 +1,5 @@
 import { renderSPresetTools, bindSPresetTools } from './spreset-tools.js';
+import { renderDshSections } from './dsh-template-editor.js';
 import { observeRequestEvents } from './request-events.js';
 import { observeDisplayAvailability } from './display-availability.js';
 import { mcpTabNames } from './tool-labels.js';
@@ -1723,8 +1724,13 @@ function renderEditor() {
   $('content').value = chatHistory ? '此内容从当前聊天记录读取' : templateRef?.target === 'marker' ? templateRef.contentSnapshot ?? '' : prompt.content ?? '';
   for (const id of ['prompt-name', 'role', 'position', 'depth', 'priority']) $(id).disabled = fixed;
   $('content').disabled = fixed ? !state.dshSystemTemplate?.available : !!prompt.marker || isLinkedTemplate(prompt.identifier);
+  const wholeDshTemplate = Object.hasOwn(preset.dsh_system_prompt_templates ?? {}, state.sessionMode ?? '');
+  $('content-field').hidden = fixed && !wholeDshTemplate;
   $('dsh-template-controls').hidden = !fixed;
-  if (fixed) { dshTemplateEditMode = state.sessionMode ?? ''; renderDshTemplateMacros(); }
+  if (fixed) {
+    dshTemplateEditMode = state.sessionMode ?? ''; renderDshTemplateMacros();
+    renderDshSections({ preset, info: state.dshSystemTemplate, mode: dshTemplateEditMode, changed: markDirty, refresh: renderEditor });
+  }
   $('role').disabled = fixed || isLinkedTemplate(prompt.identifier);
   $('prompt-enabled').checked = fixed ? preset.dsh_system_prompt_enabled !== false : item?.enabled ?? false;
   $('prompt-enabled').disabled = !used;
@@ -1747,6 +1753,7 @@ for (const [id, key, numeric] of [
         preset.dsh_system_prompt_templates ??= {};
         Object.defineProperty(preset.dsh_system_prompt_templates, dshTemplateEditMode, { value: $(id).value, writable: true, configurable: true, enumerable: true });
         markDirty();
+        renderDshSections({ preset, info: state.dshSystemTemplate, mode: dshTemplateEditMode, changed: markDirty, refresh: renderEditor });
       }
       return;
     }
@@ -1789,6 +1796,7 @@ function renderDshTemplateMacros() {
     summary.textContent = section.name + ' · ' + section.macro;
     text.textContent = section.text;
     const expand = document.createElement('button'); expand.type = 'button'; expand.textContent = '将此段落展开为可编辑正文';
+    expand.hidden = !Object.hasOwn(preset.dsh_system_prompt_templates ?? {}, dshTemplateEditMode);
     expand.onclick = () => {
       const content = current()?.content ?? '';
       if (!content.includes(section.macro)) { status('当前模板未使用此段落宏'); return; }
@@ -1806,6 +1814,7 @@ $('dsh-template-reset').onclick = guard(async () => {
   if (!info.available) throw new Error('当前无法读取 DSH 模式模板');
   if (state.sessionMode === modeId) state.dshSystemTemplate = info;
   if (preset.dsh_system_prompt_templates) delete preset.dsh_system_prompt_templates[modeId];
+  if (preset.dsh_system_prompt_sections) delete preset.dsh_system_prompt_sections[modeId];
   markDirty(); renderEditor(); status('已恢复当前模式的默认系统提示词');
 });
 $('prompt-enabled').onchange = () => {

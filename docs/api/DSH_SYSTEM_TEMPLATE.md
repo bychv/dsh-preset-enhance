@@ -4,12 +4,16 @@
 
 ## 按模式保存
 
-修改保存在**当前预设**的 `dsh_system_prompt_templates` 中，以 DSH 模式 ID 为键。不同会话使用同一预设、同一模式时共享该模式的修改；不同预设或模式互不覆盖。
+新编辑默认按段落保存到当前预设的 `dsh_system_prompt_sections`，依次以模式 ID、宿主段落名称为键。同一预设、同一模式的会话共享修改；不同预设和模式互不覆盖。
 
-- 切换到已编辑的模式：使用该模式保存的正文。
-- 切换到未编辑的模式：从 DSH 当前模式的提示词服务读取默认内容。
-- 恢复默认：只删除当前模式的修改，下次请求继续使用该模式的最新默认内容。
-- 空字符串是有意保存的空模板，和未配置有区别。
+- **跟随默认**：不保存正文，每次跟随宿主的当前内容。新段落自动出现，暂时为空的段落后续也能恢复。
+- **自定义**：只保存当前段落的模板，变量宏继续解析；其他段落仍跟随默认。
+- **禁用**：只从本插件发送的系统正文中排除该段落，不改变工具权限。
+- **恢复默认**：删除单段覆盖；「当前模式全部恢复默认」同时删除本模式的段落覆盖和整篇修改。
+
+各段落可以折叠，展开状态保存在浏览器。来源插件停用或段落消失后，自定义配置仍保留并显示「来源不可用」，暂不注入；来源恢复后重新生效。宿主顺序保持不变。面板另有完整组装预览，以及只读的运行环境上下文；正文中的其他酒馆宏需要通过下方「解析当前草稿」结合会话值调试。
+
+旧 `dsh_system_prompt_templates` 的整篇字符串继续生效，包括空字符串；存在本模式的整篇模板时优先使用它，不叠加段落覆盖。点击「改为分段编辑」并确认后才移除本模式的整篇修改，不自动猜测、拆解旧正文。分段模式也可点击「编辑整篇」转为当前模板的完整副本。整篇副本保存的是当时的段落集合，后续新增段落不会自动纳入。
 
 输入文字后 DSH 可能已经创建空白会话；工作台从 `retainedBy.mainView` 获取输入框所属会话，并订阅它的模式状态与宿主确认事件，不继续读取无会话的模式状态。旧版宿主仍兼容 `current` 字段。
 
@@ -21,7 +25,11 @@
 
 ## 动态宏
 
-插件读取 DSH 的公共 `systemPrompt.assemble({ agent, scope, signal })`，保留当前模式的作用域及段落顺序，读取尚未插值的正文与变量。既不复制一份固定官方提示词，也不通过替换当前模型名、目录等实际字符串来猜测变量位置。
+正常 Agent 请求优先复用宿主本轮 `systemPrompt.assemble` 的最终返回结果，保留变量、作用域、段落顺序以及与本轮 `toolSet` 一致的 SDK 说明，不为注入再次调用 provider。它包含 waterfall 和宿主 `complete` 规则处理后的结果，不是中间事件入口的数据。
+
+关联按实际 Agent、turn/step、请求信号及模型建立，发送时核对宿主系统正文和工具 schemas。工具续轮更新关联，传输重试复用本轮数据；step/turn 结束、模式切换或插件停用会清理。预览使用独立标记，不覆盖本轮结果。无法关联的手工请求、旧式嵌入调用仍通过公共组装 API 独立读取；已关联但请求内容不符时明确报错，避免混入另一轮的数据。
+
+草稿预览和未发送的工作台独立读取 `systemPrompt.assemble({ agent, scope, modelSelection, signal })`；它们和实际发送共享段落选择与宏编译逻辑，但动态数据在两次读取之间可以变化。最近实际请求和 Raw 始终读取发送快照，不用新草稿替代。
 
 | 宏 | 来源 |
 | --- | --- |
@@ -32,9 +40,9 @@
 | `{{dsh::section::段落标识}}` | 当前模式中的一个完整段落，标识由面板提供，直接保留可读名称，例如 `tools:sdk` |
 | `{{dsh::prompt}}` | 当前模式完整的默认系统提示词 |
 
-源码中直接注册的通用变量是 `provider`、`model`、`cwd`。模式人格正文里的 `{{model}}`、`{{cwd}}` 等会变成对应的 `dsh` 宏。工具说明、SDK、MCP 服务说明、计划状态、文件引用规则、源码位置与 Web 地址等由函数或运行环境生成，因此使用完整段落宏，避免在保存修改后把这些动态内容冻结。暂时为空的动态段落也保留宏，例如未进入计划模式时的计划规则。
+源码中直接注册的通用变量是 `provider`、`model`、`cwd`。展开段落时，正文里的 `{{model}}`、`{{cwd}}` 等会变成对应的 `dsh` 宏。默认对所有段落保留引用，包括第三方及空段落，不再靠名称名单判断动态性；只编辑一段不会固定其他段落的工具说明、SDK、MCP 或计划状态。
 
-「动态宏与段落」可查看当前解析结果，也可将某个段落展开为可编辑正文。展开后，DSH 注册变量的宏继续更新；直接写入正文的其他文字会保持用户的编辑。第三方新增的动态段落也可通过面板中的段落宏引用。
+分段模式选择「自定义」会展开该段落的模板；整篇模式可在「动态宏与段落」将某个引用展开。展开后，DSH 注册变量的宏继续更新；其他写入正文的文字按用户修改保存，不再执行原段落的动态函数。
 
 旧版本保存的 URI 编码段落宏继续兼容，新生成的宏名称直接使用 `tools:sdk`、`plan:policy` 等可读标识。
 
@@ -53,8 +61,11 @@ DSH 的运行环境快照和时间消息有独立来源，不属于可编辑的�
 ```json
 {
   "dsh_system_prompt_enabled": true,
-  "dsh_system_prompt_templates": {
-    "standard": "使用 {{dsh::var::model}}。工作目录：{{dsh::var::cwd}}。\n{{dsh::section::tools:sdk}}"
+  "dsh_system_prompt_sections": {
+    "standard": {
+      "deployment:persona-prefix": { "mode": "custom", "template": "使用 {{dsh::var::model}}。" },
+      "deployment:persona-suffix": { "mode": "disabled" }
+    }
   },
   "dsh_request": { "max_tokens": 0, "stream": true },
   "prompts": [{ "identifier": "chatHistory", "marker": true }]
@@ -67,17 +78,14 @@ DSH 的运行环境快照和时间消息有独立来源，不属于可编辑的�
 { "action": "dsh-system-template", "sessionId": "当前会话 ID", "modeId": "standard" }
 ```
 
-返回 `available`、`modeId`、默认 `template`、当前 `text`、变量名和各段落的模板/宏/解析结果。工作台默认数据同时返回当前模式的 `dshSystemTemplate`。该接口用于工作台现有认证路径，不改变内部 agent 只读 API 的授权边界。
+返回 `available`、`modeId`、默认 `template`、当前 `text`、变量名、各段落的模板/宏/解析结果，以及只读 `contexts`（名称和已解析文本）。返回的是宿主默认数据，预设覆盖由编译和编辑器应用。工作台默认数据同时返回当前模式的 `dshSystemTemplate`。该接口用于工作台现有认证路径，不改变内部 agent 只读 API 的授权边界。
 
 ## 源码核对与验证
 
-核对 alpha 槽位官方源码 `5badb15009ae1756c3afe0ae0cef1faafc290ccc`：
+当前实现核对 DSH `0.2.2-alpha.2`，提交 `f3803c96974ad4a94195fb97e5c637e9c2a3afe3`：
 
-- `packages/core/system-prompt/src/index.ts`：组装、作用域、变量、独立运行环境上下文。
-- `packages/core/agent/src/dispatch.ts`：组装上下文中的 agent 与 scope。
-- `packages/core/agent-loop/src/index.ts`：通用变量注册。
-- `packages/client/ui-agent-preset/src/client/index.ts`、`seat-store.ts` 与 `ui-renderer`：输入框模式的公开 slot face / store 及订阅。
-- `packages/preset/persona/src/index.ts` 与 Web standard 模式声明：模式人格与模型、工作目录变量。
-- tools、MCP、plan-mode、file-reference、app-boot、web-app、tool-subagent：运行时段落。
+- `packages/core/system-prompt/src/index.ts`：作用域合并、变量、waterfall、complete 和独立运行环境刷新。
+- `packages/core/agent-loop/src/agent.ts`：工具准入、组装、pre-step、请求构建与工具续轮。
+- `packages/core/tools/src/index.ts`：基于本轮 toolSet 生成 SDK/工具声明。
 
-自动验证覆盖参数范围、控件同步与保存、模式分别编辑/默认/恢复、动态宏与缓存、Raw 草稿和发送一致、非流式多工具响应、思考字段、用量、结束原因与 DSML。真实 `0.2.1-alpha.1` 沙盒验证使用宿主创建并挂载的 agent 与真实提示词服务，不向模型 API 发起收费请求。
+分段覆盖的自动验证和真实宿主本地假接口记录见[本次验证](../testing/2026-10-28-SYSTEM_TEMPLATE_SECTIONS.md)。输入框模式跟随的历史交互验证见[2026-10-04 记录](../testing/2026-10-04-SYSTEM_TEMPLATE.md)。历史记录不表示本次重新运行全部浏览器测试。
