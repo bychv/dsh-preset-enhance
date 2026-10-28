@@ -1,79 +1,95 @@
-# SPreset 内嵌工具与脚本兼容
+# SPreset 内嵌工具与脚本的最小兼容
 
 Status: proposed
 
-## 调研范围与结论
+## 调研依据与纠正
 
-2026-10-28 静态检查用户指定的本地预设、当前 next-ver 源码及沙盒 DSH 0.2.2-alpha.2 工具服务。未执行样本脚本、未加载其远程脚本、未发送模型请求。本文不复制样本正文、工具名称或外部加载地址。
+2026-10-28 只读检查本地样本、样本加载器指向的远端 inject.js、SillyTavern release 分支 tool-calling.js，以及沙盒 DSH 0.2.2-alpha.2 源码。下载文件在忽略的 sample/spreset-research/，未执行远端脚本或样本函数，未发送模型请求。
 
-应兼容 SPreset 的数据契约与脚本阶段，而非特判某个预设。样本不是单纯的工具 schema：它组合工具定义、调用转正文、输出缓冲及最终请求改写。只注册工具会改变其原意，尤其可能额外触发 DSH 工具续轮。
+远端 inject.js SHA-256：3dc23dcd6e3653675653ac5d65139fd5ed5050687123af1143cdb7a7b51ff783。这个地址可变，不能证明获取版本与预设发布时一致；文件中的 versionNumber=10000 不能当作稳定发布标识。尚未确认该脚本的开源许可，不复制其实现到发布包。
 
-样本的 tavern_helper 脚本实际是注入远程 SPreset 的加载器，并非完整运行时。以下字段结构与脚本行为可由样本确认；启用优先级、调用消费是否仍执行 action、stealth 的具体语义及所有阶段的原始执行顺序，仍需核对 SPreset 对应版本源码，不能视为已确认。
+**纠正首轮假设：SPreset 没有“执行型/输出型”工具类型，也不自动判断工具用途。** 所有绑定注册为普通酒馆工具；OutputPreprocessing.consumeToolCalls 是请求输出层的全局策略。不能根据工具名、参数形状或 action 返回简单确认值来分类。
 
-## 已观察的数据契约
+## 远端已确认的行为
 
-| 字段 | 样本结构及作用 |
-| --- | --- |
-| extensions.SPreset.ToolBindings | 以 prompt identifier 为键的记录；包含 enabled、uuid、code、valid、resolvedName、editorMode、form |
-| code | 函数体形式，return 一个含 name、description、parameters、action、stealth 的对象；不是 JSON |
-| form | 表单镜像，包含 name、displayName、description、参数列表、actionBody、formatMessageBody、stealth |
-| OutputPreprocessing | enabled、script；脚本接收 buffer/final/state，返回 output/hold/state |
-| consumeToolCalls | 样本配置为 true，配合 formatter 将工具参数转换为输出文本；是否同时执行 action 待核对运行时 |
-| toolCallFormatter | 对象 { enabled, script }；脚本接收 calls，使用 call.name 和已解析的 call.arguments |
-| FinalRequestProcessing | { enabled, script }；接收 request，返回修改后的请求 |
+### 工具定义与启用
 
-样本有两条工具绑定，其中一条开启、一条关闭；均具有表单及代码两种表示。action 返回简单确认值，正文来自 formatter 对调用参数的提取。最终请求脚本在条件满足时把部分消息移动到动态工具 description，并重建 messages，因此它不等价于普通提示词序列处理器。条件不满足时原样返回。另有 ChatSquash 后处理和提示词条件脚本，属于独立阶段，不应混成一个万能 eval。
+- syncSPresetToolRegistrations（inject.js 5674 行附近）检查 binding.valid、binding.enabled，以及关联 identifier 是否在激活顺序表中。
+- getActiveEntryIdentifiers（5644 行）取 character_id=100001 的顺序表，先应用条目条件脚本决策，再选 enabled !== false 的条目。不是直接读取 prompts 中 enabled。
+- 实际执行 binding.code 工厂，返回 name/description/parameters/action 等定义；form/editorMode 是编辑数据，注册路径不读取 form 替代 code。
+- 同一批工具名称重复保留第一个并报告错误；uuid 用于注册更新，code 也用于定义缓存校验。接入 DSH 不能照搬其只比较 uuid 的更新路径，脚本内容修改也必须失效。
+- 通过酒馆 registerFunctionTool 注册 action、formatMessage、stealth、shouldRegister；停止使用时 unregister。
 
-## 当前实现缺口
+### 消费开关与 action
 
-- [s-preset-library](../../../../src/lib/s-preset-library.mts)保留 ToolBindings，编辑器工具页目前仅展示原始配置，没有注册或执行。
-- normalizeSPresetData 的 OutputPreprocessing 默认 toolCallFormatter 为字符串，mergeDefaults 遇到对象会落回空字符串。镜像同步及规范化展示经过该路径时有丢失风险；应先支持实际对象结构及旧字符串格式，并验证保存、分享、编辑往返。
-- [现有响应转换](../../../../src/lib/toolcall-prefill.mts)将原生/正文/思考中的调用恢复为标准工具调用，由 DSH 执行；没有调用转正文的独立消费阶段。
-- 脚本运行时与 promptSequence 仍是[规划](../../../../docs/plans/PLUGIN_TEMPLATE_CONTRACT_PLAN.md)，不得把预留名称视作可调用服务。
+wrapSPresetOutputGenerator（1374 行附近）在输出预处理开启时包装流式生成器：
 
-## 建议实现边界
+1. 正文先进入输出预处理 session，普通文本继续流式返回。
+2. consumeToolCalls 开启时缓存最新累计 toolCalls，每个流包向酒馆暴露 toolCalls=[]。
+3. 流结束后调用 formatter，把生成文本追加到原正文，再输入同一个输出预处理 session，最后 finish 刷新 hold。
+4. 成功后不向酒馆恢复调用，因此 **action 不执行，也没有正常工具续轮**。
+5. formatter 或输出预处理失败时，最后一个包恢复原 toolCalls，交回酒馆正常工具流程。
 
-### 1. 先建立统一的工具描述
+没有工具归属过滤：包含其他扩展工具在内的全部调用都会进入 formatter。非流式走 consumeSPresetToolCallsFromResponse，在响应副本上追加正文并删除调用；tool_calls/function_call 正常结束改为 stop，失败返回原响应。不是仅显示替换，真实消息内容也发生变化。
 
-引入内部规范化描述，包含预设身份、绑定 ID、模型可见名称、schema、启用条件、执行脚本引用及输出处理引用。form 是可编辑结构，code 是可执行定义；不能在二者冲突时悄悄选取有利的一份。先核对 SPreset 的 editorMode/生成规则，未知版本冲突应显示诊断。valid/resolvedName 只作缓存提示，导入后重新校验。
+formatSPresetToolCalls（1166 行附近）传入 calls、defaultText、provider、stream、final:true、channel；calls.arguments 已解析。返回字符串或包含 output/text/content 的对象。formatter 未启用时有默认参数转文本规则，不等于停用消费。默认规则对单字段文本解包，其余值 JSON 序列化并用换行连接。
 
-启用状态应结合实际选中的预设、关联条目与顺序表状态、绑定开关及工具策略；精确优先级待原运行时验证。内部身份使用预设 ID + 绑定 ID，不用名称做身份。同名宿主/MCP/其他预设工具不得覆盖；优先报告冲突，不自动改模型名称破坏脚本引用。
+### stealth 和最终请求处理
 
-### 2. 区分执行与输出消费
+SillyTavern 的 [tool-calling.js](https://github.com/SillyTavern/SillyTavern/blob/release/public/scripts/tool-calling.js) 显示：formatMessage 用于调用通知，不是把结果转成 assistant 正文；stealth 仍执行 action，但不保存普通 invocation，契约声明不触发后续生成。它与 consumeToolCalls 是不同机制。
 
-执行型工具通过 DSH tools.register 接入，schema 与 action 映射到工具定义及 execute，输出契约也要补齐；不能只向 HTTP tools 追加一个宿主找不到的工具。注册和准入要在 tools.resolve 前准备，并与现有[工具策略](../../../../src/lib/tool-restrictions.mts)统一，支持会话隔离、切换预设、停用、热重载释放。当前策略特别处理 agent-local 工具，新增工具须同时验证 schema 可见性与执行守卫，不只依赖 restrict。
+FinalRequestProcessing（inject.js 1590–1663 行附近）在酒馆 chat completion generate 的 fetch 前处理 JSON 请求副本。可原地修改并返回 undefined，或返回请求对象；不能改变 stream/chat_completion_source，失败中止发送。它面对酒馆的请求结构，不能直接假定等同于 DSH GenerateOptions 或任意厂商 wire JSON。
 
-输出型工具在模型响应边界恢复成统一调用后，通过所选 formatter 转成 assistant 文本。仅消费当前请求明确归属的预设工具；宿主/MCP 工具照常交给 DSH。不能把一个全局 consumeToolCalls 直接应用到所有调用，否则样本 formatter 的兜底分支可能吞掉正常工具。
+## 当前插件缺口
 
-同一响应混合输出型与执行型调用时，只移除已成功消费的调用，保留其余调用的 ID、参数、顺序与工具结束语义。全部被消费且正常结束才可按普通正文完成；错误、取消、长度截断不得伪装成成功。不完整 JSON 不执行 formatter，也不杜撰参数。action 是否运行及运行顺序，必须按已确认的 SPreset 语义实现，不能默认用执行 action 然后再生成一轮正文来替代。
+- [s-preset-library](../../../../src/lib/s-preset-library.mts)保留 ToolBindings，但未运行注册；编辑器只展示。
+- OutputPreprocessing 的默认 toolCallFormatter 为字符串，mergeDefaults 会把远端实际使用的对象形态转为空字符串。先修复此处及分享/镜像往返，兼容旧字符串，不重写用户脚本。
+- [响应转换](../../../../src/lib/toolcall-prefill.mts)目前把原生及正文/思考中的 DSML 还原成普通工具调用，没有 SPreset 消费阶段。
+- [脚本运行时方案](../../../../docs/plans/PLUGIN_TEMPLATE_CONTRACT_PLAN.md)仍未落地。
 
-这属于响应语义转换，应发生在 DSH 保存 assistant 消息之前，不放进显示正则包。否则屏幕看起来有正文，下一轮历史仍是另一套内容。Raw 保留真实出站请求，另区分原始响应与转换后内容，不用转换结果冒充线上原文。
+## 最小适配：复用 DSH 的操作接口
 
-### 3. 最小脚本运行能力
+不新建工具类型、通用工作流系统、第二套工具执行器，也不照搬全局 fetch monkey patch 或酒馆 DOM 操作。工具定义 + 消费策略足够表达首批功能。
 
-采用可终止、资源受限的隔离运行时；导入和预览不执行 action，脚本授权不随分享文件携带。不能在宿主直接 new Function/eval，也不能把 node:vm 或普通 Worker 本身宣称为安全沙盒。
+| 需求 | 优先采用的 DSH 入口 | 适配职责 |
+| --- | --- | --- |
+| 工具注册及释放 | tools.register / 返回释放函数 / Cordis 生命周期 | code 产出 schema；action 代理到脚本执行器 |
+| 本轮启用 | ToolRegistrationOptions.when | 关联条目决策及选中预设，在 tools.resolve 准入前确定；与已有工具策略一致 |
+| 执行、取消、审批、结果记录 | tools 原生执行管线与 exec.signal | 不绕过 tools.execute；保留现有守卫、超时、工具历史 |
+| 结果与卡片 | output.schema/render、presentCall/presentResult | 保留 action 返回类型；formatMessage 仅有可确认的展示映射，不冒充正文 |
+| 调用转正文 | llm/stream 官方 waterfall | 拦截统一 StreamChunk，消费完成调用后生成标准文本事件 |
+| 调试 | 现有请求预览/Raw 和宿主工具记录 | 保留真实 wire 请求；标记消费阶段结果及失败原因，避免把未执行 action 记成成功工具执行 |
 
-首批支持纯函数定义与数据处理：工具定义工厂、formatter、输出缓冲脚本。跨边界仅传 JSON 数据，明确 console 的受限实现；状态按请求/choice 隔离，取消与卸载后丢弃迟到结果。文件、网络、DOM、SillyTavern 全局、远程 import 均不隐式开放。带这些依赖的脚本给出缺失能力，不能默默返回成功。
+DSH 依据：沙盒官方源码 packages/core/tools/src/contracts.ts、index.ts，packages/llm/llm/src/index.ts 的 llm/stream 声明，以及 types.ts 的 StreamChunk。对应源码标签 dsh-v0.2.2-alpha.2（f3803c96974ad4a94195fb97e5c637e9c2a3afe3）。本插件已在 [src/index.mts](../../../../src/index.mts)使用 llm/stream，不需要为消费逻辑再改宿主服务方法。
 
-form 可直接用于静态 schema 预览，但任意 actionBody/code 的兼容仍需要运行时；不通过匹配某段 return 常量源码来绕过脚本支持。表单与代码统一编译到上述描述，避免两套生命周期。
+### 注册与执行
 
-### 4. 明确流水线
+内部身份按预设 ID + binding ID 保存，模型名称沿用定义；同名宿主/MCP 冲突显式报告，不覆盖。会话隔离不能只靠同名全局注册加 when：需在对应 agent scope 下建立生命周期，验证动态注册早于准入；不同会话可有同名不同定义。when 只判断，不在回调里修改注册。
 
-建议本插件的处理阶段为：预设编译与宏/提示词正则 → 工具定义及协议请求准备 → 受限最终请求脚本 → 参数与协议完整性校验 → 预填充工具兼容转换 → 实际请求快照 → HTTP。
+工具 action 返回字符串时按字符串结果呈现，不随意 JSON.parse 改变返回类型。DSH 0.2.2 的 output 声明是必需项；未知输出约束须采用宿主支持的 JSON 契约并验证，不能只填 execute。所有调用包括消费失败恢复后的调用均受 DSH 原有权限控制。
 
-FinalRequestProcessing 接收的是协议请求副本，不是只有 messages 的 promptSequence。限制可修改的字段，不向脚本传鉴权头、密钥或任意 URL 配置；新增动态工具必须声明为输出用途或有已登记执行处理器，不能制造无人处理的工具。与预填充转换的先后是本插件设计，需用 SPreset 源码和虚构夹具验证语义差异。
+### 响应消费
 
-响应顺序建议：原生/DSML 调用统一恢复 → 预设调用消费与格式化 → 输出缓冲脚本 → 现有正文提取与宿主事件。当前提取与 DSML 在同一模块交织，需要拆清职责后验证，不能再新增一套竞争解析器。所有已有 DSML 格式与思考/正文捕获兜底保留。
+通过已有 llm/stream 路径包装本次请求的 next()，仅作用于明确启用预设的用户生成请求，不能误处理标题等辅助调用。请求开始固定预设/脚本版本与消费设置，处理中切换预设不混用新旧 formatter。
 
-任意 formatter 可能依赖完整 calls，首版等完整调用参数再格式化，普通正文继续流式。不要承诺任意脚本输出都能逐 token 展示。缓冲脚本要限制 hold 大小及状态体积，并在最终完成时明确刷新规则。
+统一流已经把不同协议变成 block-start/tool-call-delta/block-end/finish 等事件，可避免分别实现 OpenAI/Gemini/Claude 消费器。完整缓存待消费工具块，普通正文按已有流继续输出；不能只删 delta 而留下 block-end 中完整 tool-call。调用收齐且正常结束后执行 formatter，把结果作为新文本块交给宿主。保证 block index 唯一、start/end 配对、usage 不丢，最终 finish 在刷新后发送。原始 replayState 可能引用已删除的工具块，需按官方 replay 契约同步处理或明确放弃不再有效的元数据。
 
-## 实施顺序与验收
+消费失败恢复缓存的原工具块，交 DSH 执行；不能自行直接执行 action。error/aborted/max-tokens 不改写成正常结束，也不执行残缺参数。保持已有 DSML 兼容恢复层，在其输出标准工具事件之后消费，不新增竞争解析器。
 
-1. 修复字段无损保留，增加虚构的 form/code/object formatter 分享往返测试；工作台显示支持状态。
-2. 获取并核对对应 SPreset 运行时版本与许可，固定字段优先级、启用规则、consume/stealth 及阶段契约。远程加载器不可直接放进 DSH 页面执行。
-3. 实现隔离纯函数运行与工具规范化，先完成普通 Chat 的输出型调用闭环，再接执行型 action。随后验证 Messages、预填充 DSML 及 PTC；不支持的组合明确标识。
-4. 按需求接最终请求处理、ChatSquash 和条件脚本，避免第一步就重建整个酒馆环境。
+**默认按原 SPreset 语义消费全部调用**，不能静默收窄为仅预设工具。界面应简短说明该模式会跳过工具执行，用户可用现有工具面板禁用不需要的宿主工具。若未来增加消费范围，必须作为明确的 DSH 扩展配置，而不是推断工具类型。PTC 把真实工具包装为 run_code，无法假装和原生消费等价；首版不承诺 PTC 消费兼容。
 
-重点验收：绑定/顺序表开关组合、两会话不同预设同名工具、切换及热重载、中途停用；普通原生调用与 DSML、思考中的调用、混合调用、跨 chunk 参数、错误/取消/截断；历史中的正文与工具配对；Raw 和实际出站一致；纯函数失败与超时不吞正常工具；导入和预览无副作用。
+### 脚本支持与范围
 
-未实现以上功能。本轮仅静态调研与记录，没有修改运行代码或执行测试。
+复用同一个最小隔离执行器处理 code 工厂、action 和 formatter/输出预处理，不按某个脚本源码字符串做特例。仅 JSON 输入输出，可终止并限制时间与状态体积；不在宿主直接 new Function/eval。普通 Worker 或 node:vm 不等于安全隔离。可评估受限 JS 引擎，具体依赖和维护成本另行验证，不先搭完整脚本平台。
+
+首版保留官方纯数据参数契约，不模拟 SillyTavern、DOM、任意网络/文件、远程 import。依赖这些能力的脚本明确标为不支持。导入与预览不执行 action，分享配置不能携带用户授权。使用虚构数据测试定义和 formatter；正式预览执行纯函数也必须有超时控制。
+
+普通工具 + consumeToolCalls + formatter + 输出 session 是首个闭环。stealth 的隐藏持久化及终止续轮语义暂不适配，不能用隐藏卡片冒充兼容。条件脚本影响条目激活，遇到已启用但尚未支持的条件脚本必须提示，不能假装条件已计算。
+
+FinalRequestProcessing 放下一步：先确认脚本所需的酒馆请求字段，构造窄兼容对象；能映射的修改回写官方 GenerateOptions，确需协议 wire 字段的再接本插件已有请求桥接。任意新增 schema 没有执行器的问题必须显式处理。仅工具注册和消费成功不代表样本的整个最终请求改写、ChatSquash 已兼容。
+
+## 验收与边界
+
+先做字段往返，再用虚构工具验证普通 Chat 的注册→原生执行与消费→正文两条路径，然后验证现有预填充 DSML。检查消费开关/formatter 开关组合、失败恢复、多个工具、流式/非流式、取消/截断、思考中 DSML、真实历史与 Raw、不同会话同名工具、切换及热重载。PTC、stealth、酒馆全局依赖单独列为不支持，不能宣称全兼容。
+
+本轮完成远端及官方接口静态核对，未修改运行代码、未执行第三方脚本、未运行模型/沙盒调用。仅文档链接与格式检查。下载源码留在 sample，不提交或打包；后续实现按协议独立编写 TypeScript。
