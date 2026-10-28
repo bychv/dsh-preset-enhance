@@ -28,7 +28,7 @@
 
 | 文档 | 范围 |
 | --- | --- |
-| [2026-10-28 系统模板验证](testing/2026-10-28-SYSTEM_TEMPLATE_SECTIONS.md) | 分段覆盖、整篇兼容、实际宿主组装复用与工具续轮 |
+| [2026-10-28 系统模板验证](testing/2026-10-28-SYSTEM_TEMPLATE_SECTIONS.md) | 分段覆盖、整篇兼容、实际宿主组装复用、工具续轮及模块缺失时的配置加载 |
 | [2026-10-28 实验工具验证](testing/2026-10-28-SPRESET_TOOLS.md) | 官方注册与执行、调用消费、失败恢复及非流式预填充 DSML |
 | [DSH 0.2.2 兼容记录](compatibility/DSH_0.2.2_COMPATIBILITY.md) | 工具准入、模型选择、真实宿主假接口与旧版核心服务验证 |
 | [DSH 0.2.1 兼容记录](compatibility/DSH_0.2.1_COMPATIBILITY.md) | 初始适配基线与后续验证入口 |

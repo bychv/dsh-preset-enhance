@@ -82,6 +82,7 @@ flowchart TD
 | `src/lib/dsh-system-template.mts`、`src/lib/request-settings.mts`、`src/lib/buffered-response.mts` | 模式系统模板与动态 DSH 宏、请求参数与非流式响应接入 |
 | `src/lib/dsh-assembly.mts`、`src/lib/dsh-template-source.mts`、`src/client/dsh-template-editor.ts` | 本轮组装关联、共享段落选择、分段编辑和只读上下文预览 |
 | `src/lib/preset.mts`、`src/lib/macros.mts` | 顺序表、深度注入、变量宏、最终消息和预填充判定 |
+| `src/lib/spreset-tools.mts`、`src/lib/spreset-script.mts`、`src/client/spreset-tools.ts` | 实验性工具注册、输出调用消费、受限脚本执行与编辑界面 |
 | `src/lib/tool-presets.mts`、`src/lib/tool-restrictions.mts` | 工具策略、分组、会话作用域限制和 PTC 工具可见性 |
 | `src/lib/connection.mts`、`src/lib/protocol.mts`、`src/lib/messages.mts` | 读取实际连接协议、记录协议观察结果、Messages 消息适配 |
 | `src/lib/deepseek-beta.mts`、`src/lib/toolcall-prefill.mts`、`src/lib/output-extractor.mts` | 请求匹配、预填充兼容、DSML 转换和实验性正文提取 |
@@ -118,6 +119,8 @@ flowchart TD
 
 `disclosures.ts` 保存固定区域的折叠偏好；`scroll-state.ts` 为工作台完整导航和刷新保存滚动快照。进入 SPreset 时保留上次快照，避免导航按钮引起的临时滚动覆盖返回位置。这些界面状态不写入分享文件。
 
+工作台入口以受保护的动态 import 加载分段编辑模块。该模块或其依赖加载失败时，只禁用 DSH 模板编辑并提示重启，主配置加载仍继续；这不代表所有资源缺失都能恢复。CLI 更新磁盘快照后，旧进程可能仍缺少新增资源路由，必须确认插件重新加载或重启宿主。
+
 ### 启动与运行时启停
 
 初始化会读取状态并根据宿主的 `standard` 组成注册预设模式。状态损坏、模式组成缺失或目录不可写时，插件保留工作台并显示原因，停止注入和写入，不自动清空数据。修复后重新启用即可。
@@ -127,7 +130,7 @@ flowchart TD
 
 ### 外部模板与只读查询
 
-外部插件通过 `presetTemplates` 注册普通模板、动态模板及 marker 关联。主包跟踪提供者的启停和热重载，失效引用保留用于恢复；冲突及固定版本由工作台处理。当前支持模板和 chatHistory 的约定扩展，通用提示词序列处理链、脚本、MVU 和组件状态服务仍属规划，不能按方案接口直接调用。
+外部插件通过 `presetTemplates` 注册普通模板、动态模板及 marker 关联。主包跟踪提供者的启停和热重载，失效引用保留用于恢复；冲突及固定版本由工作台处理。当前支持模板和 chatHistory 的约定扩展，通用提示词序列处理链、通用脚本运行时、MVU 和组件状态服务仍属规划；已实现的受限 SPreset 工具脚本不提供这些接口，不能按方案接口直接调用。
 
 工作台编辑 API 与显示配置 API 使用 DSH Web 登录边界。内部 agent 的只读查询由 `src/lib/preset-reader.mts` 发放绑定 agent 的短期凭证，不沿用浏览器登录作为外部公开授权；当前不提供外部匿名读取。公开契约见[模板 API](api/TEMPLATE_API.md)和[只读 API](api/PRESET_READ_API.md)。
 

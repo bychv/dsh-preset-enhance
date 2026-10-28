@@ -19,7 +19,7 @@
     "format": "sillytavern",
     "data": {
       "dsh_system_prompt_enabled": true,
-      "dsh_system_prompt_templates": {},
+      "dsh_system_prompt_sections": {},
       "dsh_request": { "max_tokens": 0, "stream": true },
       "prompts": [
         { "identifier": "chatHistory", "marker": true, "role": "user" }
@@ -68,7 +68,7 @@
 
 `preset.data.dsh_system_prompt_enabled` 是可选布尔值，省略时按 `true` 处理。它对应工作台置顶的“DSH 系统提示词”模板：在其他 DSH 模式中启用该预设时，`true` 保留模式原有系统提示与运行时注入，`false` 将其移除。专用“预设模式”始终移除这些内容。
 
-`preset.data.dsh_system_prompt_templates` 是可选的「模式 ID → 正文」对象。同一预设中各模式的编辑互不覆盖；没有对应键时动态使用该模式的默认正文，有键时使用保存的修改（包括空字符串）。该字段存在时优先使用整篇模板，不叠加段落覆盖。运行时变量与段落保持宏源文本，未解析的值不写入分享文件。
+`preset.data.dsh_system_prompt_templates` 是可选的「模式 ID → 正文」对象。同一预设中各模式的编辑互不覆盖；没有对应模式的键时使用下述分段配置，未覆盖的段落跟随宿主默认；有键时使用保存的修改（包括空字符串）。仅当前模式有整篇模板时才优先使用它，不叠加该模式的段落覆盖。运行时变量与段落保持宏源文本，未解析的值不写入分享文件。
 
 `preset.data.dsh_system_prompt_sections` 是可选的「模式 ID → 段落名称 → 覆盖」对象，随当前格式 version 1 原样保存和分享：
 

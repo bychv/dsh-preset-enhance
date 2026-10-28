@@ -16,9 +16,13 @@ node tests/fixtures/protocol-server.mjs
 
 具备本机沙盒环境时，`npm run test:mcp:candidate` 可在 **candidate 槽位**启动两个隔离的 stdio MCP 服务，检查发现、调用和分组；结束后关闭测试服务，不写入 candidate 配置。
 
-
+## 工作台资源加载检查
 
 通过沙盒 CLI 安装新快照后，需确认运行中的 DSH 已完成插件热重载；未重新加载时重启对应槽位。磁盘资源更新不代表进程内的新静态路由已注册。新增工作台模块时，要检查实际 HTTP 模块依赖是否全部返回 200，不能只验证配置 API 或将模块内联的模拟 DOM 测试。
+
+分段编辑相关资源为 `/preset-enhance/dsh-template-editor.js`、`/preset-enhance/regex/dsh-template-source.mjs` 和 `/preset-enhance/regex/macros.mjs`。沿工作台入口递归检查模块依赖，确认状态为 200 且响应类型为 JavaScript；不能将返回 HTML 页面的 200 当成成功。模块缺失时入口应继续加载预设，只在 DSH 模板编辑区显示错误。检查使用当前测试槽位及其 Web 认证，不把登录凭证写进文档。
+
+系统模板的定向回归入口为 `node --test tests/dsh-assembly.test.mjs tests/dsh-system-template.test.mjs tests/regex-ui.test.mjs tests/preset-package.test.mjs`。历史验证与浏览器检查边界见[系统模板验证](testing/2026-10-28-SYSTEM_TEMPLATE_SECTIONS.md)。
 
 ## 本地化与文档维护
 
