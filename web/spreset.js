@@ -784,7 +784,7 @@ function renderInspector() {
   if (inspectorTab === '内容') body.append(contentField, counter);
   else if (inspectorTab === '注入') body.append(isTemplate ? templateInjectionTab(target.entry) : injectionTab(source));
   else if (inspectorTab === '工具') body.append(readOnlyBlock('工具与消息注入（extensions.SPreset.ToolBindings / MessageInjections）',
-    { ToolBindings: preset?.extensions?.SPreset?.ToolBindings ?? null, MessageInjections: preset?.extensions?.SPreset?.MessageInjections ?? null }));
+    { ToolBindings: preset?.extensions?.SPreset?.ToolBindings ?? null, MessageInjections: preset?.extensions?.SPreset?.MessageInjections ?? null }, '工具可在工作台开启实验支持；消息注入仅保留配置。'));
   else body.append(structuredTab(target, isTemplate, source));
 
   if (isTemplate) {
@@ -847,10 +847,10 @@ function templateInjectionTab(entry) {
   wrap.append(field('injection_trigger（逗号分隔）', trigger));
   return wrap;
 }
-function readOnlyBlock(title, value) {
+function readOnlyBlock(title, value, note = NOT_IMPLEMENTED) {
   const wrap = el('div', 'field');
   wrap.append(el('span', '', title));
-  wrap.append(el('p', 'muted', NOT_IMPLEMENTED));
+  wrap.append(el('p', 'muted', note));
   wrap.append(el('pre', 'json', JSON.stringify(value, null, 2)));
   return wrap;
 }

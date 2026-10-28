@@ -35,6 +35,7 @@ function beforePreparation(ctx: PluginContext, service: object, name: string,
 export function installToolRestrictions(
   ctx: PluginContext, snapshot: () => ToolPolicySnapshot,
   modeOf: (session: SessionLike | undefined) => string,
+  prepareTools?: (agent: AgentHandle) => Promise<void>,
 ): void {
   const systemPrompt = typeof ctx.get === 'function'
     ? ctx.get('systemPrompt') : (ctx as { systemPrompt?: object }).systemPrompt;
@@ -55,6 +56,8 @@ export function installToolRestrictions(
     }
     releases.get(agent)?.();
     releases.delete(agent);
+    await prepareTools?.(agent);
+    if (closed || retired.has(agent)) return;
     const modeId = modeOf(agent.session);
     const lease = await ctx.agentPresets?.acquireScope?.(modeId || undefined);
     try {

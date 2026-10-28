@@ -180,6 +180,7 @@ export interface PromptOrderGroup {
 
 export interface SillyTavernPreset {
   dsh_prefill_target?: 'reasoning' | 'content';
+  dsh_spreset_tools_enabled?: boolean;
   prompts: PresetPrompt[];
   prompt_order?: PromptOrderGroup[];
   assistant_prefill?: string;

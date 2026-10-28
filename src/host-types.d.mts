@@ -83,6 +83,7 @@ export interface SessionLike {
 
 /** The agent-scoped tool surface. restrict() lives here, not on the plugin context. */
 export interface AgentToolScope {
+  register?(definition: unknown, options?: { when?: (context: unknown) => boolean | Promise<boolean> }): (() => void) | void;
   get?(name: string, scope?: unknown): unknown;
   /** 0.1.7 accepts an optional scope key; the plugin context has no scope of its own. */
   schemas(scope?: unknown): ToolSchemaRow[];

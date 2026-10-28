@@ -219,7 +219,7 @@ function editor(presetValue = basePreset(), fetchImpl) {
     requests.push(JSON.parse(options.body));
     return { ok: true, json: async () => ({ revision: 1 }) };
   });
-  const script = readFileSync(new URL('../web/request-preview.js', import.meta.url), 'utf8') + '\n' + readFileSync(new URL('../web/editor.js', import.meta.url), 'utf8')
+  const script = readFileSync(new URL('../web/spreset-tools.js', import.meta.url), 'utf8').replace(/^export /gm, '') + '\n' + readFileSync(new URL('../web/request-preview.js', import.meta.url), 'utf8') + '\n' + readFileSync(new URL('../web/editor.js', import.meta.url), 'utf8')
     .replace(/^import .*;\r?\n/gm, '').replace('await guard(() => reload())();', '');
   const context = {
     URLSearchParams, structuredClone, console, fetch, __initialPreset: presetValue,

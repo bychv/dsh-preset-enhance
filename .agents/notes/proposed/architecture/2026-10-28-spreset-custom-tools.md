@@ -2,6 +2,8 @@
 
 Status: proposed
 
+已部分实现：next-ver 提供默认关闭的工具注册、受限 QuickJS、输出 session 与调用消费。操作与实际边界见 [SPreset 工具](../../../../docs/api/SPRESET_TOOLS.md)。FinalRequestProcessing、stealth、条目条件及其他阶段仍待实施，本文的总体兼容目标未全部完成。
+
 ## 调研依据与纠正
 
 2026-10-28 只读检查本地样本、样本加载器指向的远端 inject.js、SillyTavern release 分支 tool-calling.js，以及沙盒 DSH 0.2.2-alpha.2 源码。下载文件在忽略的 sample/spreset-research/，未执行远端脚本或样本函数，未发送模型请求。
@@ -92,4 +94,4 @@ FinalRequestProcessing 放下一步：先确认脚本所需的酒馆请求字段
 
 先做字段往返，再用虚构工具验证普通 Chat 的注册→原生执行与消费→正文两条路径，然后验证现有预填充 DSML。检查消费开关/formatter 开关组合、失败恢复、多个工具、流式/非流式、取消/截断、思考中 DSML、真实历史与 Raw、不同会话同名工具、切换及热重载。PTC、stealth、酒馆全局依赖单独列为不支持，不能宣称全兼容。
 
-本轮完成远端及官方接口静态核对，未修改运行代码、未执行第三方脚本、未运行模型/沙盒调用。仅文档链接与格式检查。下载源码留在 sample，不提交或打包；后续实现按协议独立编写 TypeScript。
+调研阶段完成远端及官方接口静态核对，未执行第三方脚本。后续实验性实现使用虚构工具测试隔离、注册与消费；实际验证范围见功能文档及提交说明。下载源码留在 sample，不提交或打包；后续实现按协议独立编写 TypeScript。

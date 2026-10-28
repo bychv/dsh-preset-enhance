@@ -1,3 +1,4 @@
+import { createSPresetTools, spresetSettings, consumeSPresetStream } from './lib/spreset-tools.mjs';
 import { planDisplayRegex } from './lib/display-regex.mjs';
 import { installDisplayConfig } from './lib/display-config.mjs';
 import { readDshSystemTemplate, withoutDshPrompt } from './lib/dsh-system-template.mjs';
@@ -311,7 +312,17 @@ const chatConnection = () => {
   ctx.effect(() => () => templateRegistry.close(), 'preset-enhance: template registry');
   const templateServiceAvailable = !startupError && typeof ctx.provide === 'function';
   if (templateServiceAvailable) ctx.provide!(PRESET_TEMPLATES_SERVICE, templateRegistry.service);
-  if (!startupError) installToolRestrictions(ctx, () => policySnapshot, sessionModeId);
+  const spresetTools = createSPresetTools(ctx, async agent => {
+    const session = agent.session;
+    if (!session?.id || ctx.agents?.get(session.id) !== agent) return undefined;
+    const state = await store.read() as PresetState;
+    refreshPolicies(state);
+    const binding = ownGet(state.bindings, session.id) ??
+      (shouldAutoEnable(state, session) ? defaultBinding(state) : undefined);
+    const record = binding?.enabled ? state.presets.find(row => row.id === binding.presetId) : undefined;
+    return record ? { id: record.id, preset: record.preset, characterId: binding?.characterId } : undefined;
+  }, (agent, tool) => effectiveToolEnabled(policySnapshot, agent.session?.id, sessionModeId(agent.session), tool));
+  if (!startupError) installToolRestrictions(ctx, () => policySnapshot, sessionModeId, agent => spresetTools.prepare(agent));
   const tools = ctx.tools;
   if (tools?.guard && !startupError) {
     const guard = tools.guard.bind(tools);
@@ -448,6 +459,10 @@ const chatConnection = () => {
     const messagesChanged = compiled !== null || messages !== options.messages;
     if (!toolsChanged && !messagesChanged) { onDispatch(); yield* traceRequest(snapshots, sessionId, options, next()); return; }
 
+    const spreset = compiled && initialRecord ? spresetSettings(initialRecord.preset) : undefined;
+    if (spreset?.OutputPreprocessing?.enabled && spreset.OutputPreprocessing.consumeToolCalls && filteredTools.some(tool => tool.name === 'run_code')) {
+      throw new Error('实验性 SPreset 调用消费暂不支持 PTC，请切换到原生工具模式或关闭消费');
+    }
     const request = routedRequest({ ...options, ...(requestSettings?.maxTokens ? { maxTokens: requestSettings.maxTokens } : {}) }, messages, filteredTools);
     // The compatibility bridge is chat-completions only: under the Messages mode it
     // must never arm, so an unadapted prefix is never sent.
@@ -473,7 +488,7 @@ const chatConnection = () => {
       extractOutput: initial.prefixOutputExtraction === true,
     }) : () => {};
     routed.add(request);
-    try { onDispatch(); yield* traceRequest(snapshots, sessionId, request, ctx.llm.stream(request), compiled ? { warnings: compiled.warnings, promptRegex: compiled.promptRegex } : undefined); } finally { releaseBeta(); routed.delete(request); }
+    try { onDispatch(); yield* traceRequest(snapshots, sessionId, request, consumeSPresetStream(ctx.llm.stream(request), spreset, { provider: { source:request.provider, model:request.model }, stream:requestSettings?.stream !== false }, options.signal), compiled ? { warnings: compiled.warnings, promptRegex: compiled.promptRegex } : undefined); } finally { releaseBeta(); routed.delete(request); }
   }
 
   ctx.on('llm/stream', async function* (options: StreamOptions, next: () => AsyncIterable<unknown>) {
@@ -499,6 +514,7 @@ const chatConnection = () => {
     [`${BASE}/request-events.js`, ['web/request-events.js', 'text/javascript']],
     [`${BASE}/display-availability.js`, ['web/display-availability.js', 'text/javascript']],
     ...['display-regex', 'prompt-regex', 'macros', 'compaction'].map(file => [`${BASE}/regex/${file}.mjs`, [`lib/${file}.mjs`, 'text/javascript']] as [string, [string, string]]),
+    [`${BASE}/spreset-tools.js`, ['web/spreset-tools.js', 'text/javascript']],
     [`${BASE}/disclosures.js`, ['web/disclosures.js', 'text/javascript']],
     [`${BASE}/scroll-state.js`, ['web/scroll-state.js', 'text/javascript']],
     [`${BASE}/editor.js`, ['web/editor.js', 'text/javascript']],
@@ -1025,6 +1041,7 @@ const chatConnection = () => {
           };
           if (body.action === 'save' || body.action === 'import') {
             const imported = body.action === 'import' ? decodePresetDocument(body.document, String(body.name || '未命名预设')) : null;
+            if (imported?.preset.dsh_spreset_tools_enabled === true) imported.preset.dsh_spreset_tools_enabled = false;
             validatePreset(imported?.preset ?? body.preset);
             // The SPreset editor asks for the settings mirror; every other caller saves verbatim.
             const source = imported?.preset ?? body.preset;

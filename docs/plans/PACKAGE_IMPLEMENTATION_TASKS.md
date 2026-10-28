@@ -1,6 +1,6 @@
 # 分包实施任务索引
 
-本分支 next-ver 已实现 T01/T02 外部提示词模板和酒馆 marker 关联，并按当前拆包边界完成 T04/T05 正文正则。T03 以及 T06–T09 的组件与脚本能力仍未落地。marker 接口与保存规则见 [模板 API](../api/TEMPLATE_API.md)。
+本分支 next-ver 已实现 T01/T02 外部提示词模板和酒馆 marker 关联，并按当前拆包边界完成 T04/T05 正文正则。T03 以及 T06–T09 的组件与通用脚本能力仍未落地；已有独立的[实验性 SPreset 工具](../api/SPRESET_TOOLS.md)纯数据执行路径。marker 接口与保存规则见 [模板 API](../api/TEMPLATE_API.md)。
 
 D01–D04 动态解析与请求预览已实现，并继续加入结构化 Raw、预设只读 API、模式系统模板与请求参数。当前使用入口见 [文档导航](../README.md)，分包与升级验证见 [包与生命周期记录](../testing/2026-10-13-PACKAGE_LIFECYCLE.md)；后文 T01/T02 的测试数量是实施当时的历史记录。
 

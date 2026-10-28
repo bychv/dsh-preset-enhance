@@ -261,7 +261,7 @@ export const SPRESET_DEFAULTS = Object.freeze({
   MacroNest: false,
   ToolBindings: {} as Record<string, unknown>,
   MessageInjections: {} as Record<string, unknown>,
-  OutputPreprocessing: { enabled: false, script: '', consumeToolCalls: false, toolCallFormatter: '' },
+  OutputPreprocessing: { enabled: false, script: '', consumeToolCalls: false, toolCallFormatter: { enabled: false, script: '' } },
   FixedPresetName: '',
   ForcedPostProcessing: {} as Record<string, unknown>,
 });

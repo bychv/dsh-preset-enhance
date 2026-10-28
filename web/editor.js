@@ -1,3 +1,4 @@
+import { renderSPresetTools, bindSPresetTools } from './spreset-tools.js';
 import { observeRequestEvents } from './request-events.js';
 import { observeDisplayAvailability } from './display-availability.js';
 import { mcpTabNames } from './tool-labels.js';
@@ -156,6 +157,7 @@ function loadDraft(id) {
   $('prefill').value = preset.assistant_prefill ?? '';
   $('prefix-to-reasoning').checked = preset.dsh_prefill_target !== 'content';
   renderRequestSettings();
+  renderSPresetTools(preset);
   selectedPrompt = order()[0]?.identifier ?? preset.prompts[0]?.identifier ?? '';
   dirty = false;
   renderList();
@@ -3049,3 +3051,6 @@ if (typeof rememberWorkbenchScroll === 'function') workbenchScroll = rememberWor
 
 observeDisplayAvailability(value => { displayAvailable = value.available; renderRegexPanel(); });
 // The subscription releases on pagehide and reconnects on pageshow (including BFCache).
+
+// The experimental switch follows normal preset save/autosave.
+bindSPresetTools(() => preset, markDirty);

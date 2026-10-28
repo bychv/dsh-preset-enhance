@@ -82,6 +82,7 @@
   },
   "icon": "./icon.svg",
   "dependencies": {
-    "dsh-preset-display-regex": "0.3.6-rc.1"
+    "dsh-preset-display-regex": "0.3.6-rc.1",
+    "quickjs-emscripten": "0.32.0"
   }
 }

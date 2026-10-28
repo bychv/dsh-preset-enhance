@@ -232,3 +232,7 @@ ST 预设的 extensions["dsh-preset-enhance"].templateBindings 保存选用模�
 ### 正文正则
 
 `preset.extensions['dsh-preset-enhance'].displayRegex.enabled` 保存正文显示开关，缺失默认关闭。规则与提示词正则共用 `preset.extensions.regex_scripts`，两个通道分别筛选，不复制规则数组。普通 ST JSON 与单文件分享均保留这些扩展及未知字段。执行需要可选显示包，见[正文正则](docs/api/DISPLAY_REGEX.md)。
+
+## 实验性 SPreset 工具
+
+预设数据的 `dsh_spreset_tools_enabled` 为布尔开关，默认关闭；导入时即使文件为 true 也恢复关闭。`extensions.SPreset.ToolBindings` 和 `OutputPreprocessing` 保留其原有结构，支持范围见[实验性工具](docs/api/SPRESET_TOOLS.md)。

@@ -1,0 +1,17 @@
+export function renderSPresetTools(preset) {
+    const control = document.getElementById('spreset-tools-enabled');
+    if (control)
+        control.checked = preset.dsh_spreset_tools_enabled === true;
+    const notice = document.getElementById('spreset-tools-status');
+    if (notice) {
+        const settings = preset.extensions?.SPreset;
+        const unsupported = settings?.FinalRequestProcessing?.enabled;
+        notice.textContent = unsupported ? '此预设还包含最终请求脚本，本实验暂不执行该部分。' : '脚本仅支持纯 JavaScript；调用消费开启时跳过工具执行。';
+    }
+}
+export function bindSPresetTools(read, changed) {
+    document.getElementById('spreset-tools-enabled')?.addEventListener('change', event => {
+        read().dsh_spreset_tools_enabled = event.target.checked;
+        changed();
+    });
+}
