@@ -221,7 +221,7 @@ function editor(presetValue = basePreset(), fetchImpl) {
     return { ok: true, json: async () => ({ revision: 1 }) };
   });
   const script = dshTemplateUiScript() + readFileSync(new URL('../web/spreset-tools.js', import.meta.url), 'utf8').replace(/^export /gm, '') + '\n' + readFileSync(new URL('../web/request-preview.js', import.meta.url), 'utf8') + '\n' + readFileSync(new URL('../web/editor.js', import.meta.url), 'utf8')
-    .replace(/^import .*;\r?\n/gm, '').replace('await guard(() => reload())();', '');
+    .replace(/^import .*;\r?\n/gm, '').replace("await import('./dsh-template-editor.js')", '({ renderDshSections: globalThis.renderDshSections })').replace('await guard(() => reload())();', '');
   const context = {
     URLSearchParams, structuredClone, console, fetch, __initialPreset: presetValue,
     observeRequestEvents: () => () => {},
@@ -596,4 +596,40 @@ test('whole-body/section switches are explicit and preserve overrides of other m
   ui.openDsh(info);
   assert.equal(ui.preset().dsh_system_prompt_templates.standard,'');
   assert.equal(ui.get('content-field').hidden,false);
+});
+
+test('a missing optional DSH module does not block the complete workbench bootstrap or saved preset loading', async () => {
+  const nodes=new Map();
+  const get=id=>{if(!nodes.has(id))nodes.set(id,element('div'));return nodes.get(id);};
+  const preset=basePreset();
+  const config={revision:7,presets:[{id:'saved',name:'Fictional saved preset',preset}],selectedPresetId:'saved',sessionMode:'standard',
+    binding:{enabled:true,presetId:'saved',values:{user:'Fictional user',char:'Fictional assistant'},markers:{}},toolCatalogs:{},
+    dshSystemTemplate:{available:true,modeId:'standard',template:'Default',variables:[],sections:[]}};
+  const requests=[];
+  const source=readFileSync(new URL('../web/spreset-tools.js',import.meta.url),'utf8').replace(/^export /gm,'')+'\n'+
+    readFileSync(new URL('../web/request-preview.js',import.meta.url),'utf8')+'\n'+
+    readFileSync(new URL('../web/editor.js',import.meta.url),'utf8').replace(/^import .*;\r?\n/gm,'')
+      .replace("import('./dsh-template-editor.js')","Promise.reject(new Error('404 optional editor unavailable'))");
+  const context={URLSearchParams,structuredClone,AbortController,console,
+    observeRequestEvents:()=>()=>{},observeDisplayAvailability:notify=>{notify({available:true});return ()=>{};},
+    location:{search:'?sessionId=s'},CSS:{escape:value=>value},
+    localStorage:{getItem:()=>null,setItem(){},removeItem(){}},setTimeout:()=>1,clearTimeout(){},
+    confirm:()=>true,crypto:{randomUUID:()=> 'fictional'},
+    Option:function(text,value){const option=element('option');option.textContent=text;option.value=value;return option;},
+    window:{addEventListener(){},matchMedia:()=>({matches:false,addEventListener(){}})},
+    document:{getElementById:get,createElement:element,querySelector:()=>element('div'),addEventListener(){},createTextNode:text=>({_text:text,children:[]})},
+    fetch:async(_url,options)=>{const body=options?.body?JSON.parse(options.body):null;requests.push(body);return {ok:true,json:async()=>body?.action==='prefill-inspect'?{assistantPrefix:{active:false}}:config};},
+  };
+  await runInNewContext('(async()=>{'+source+`;globalThis.openDsh=()=>{selectedPrompt=DSH_SYSTEM_PROMPT_TEMPLATE_ID;renderEditor();};})()`,context);
+  assert.equal(get('status').textContent,'已加载');
+  assert.equal(get('name').value,'Fictional saved preset');
+  assert.equal(get('library').value,'saved');
+  assert.equal(get('enabled').checked,true);
+  assert.equal(get('user').value,'Fictional user');
+  assert.ok(get('used-prompts').children.length>0);
+  context.openDsh();
+  assert.match(get('dsh-template-sections').textContent,/未能加载/);
+  assert.equal(get('content').disabled,true,'failed optional panel cannot accidentally overwrite section settings');
+  assert.equal(get('library').value,'saved');
+  assert.equal(requests.filter(body=>body?.action==='save').length,0,'loading failure never clears or writes saved configuration');
 });

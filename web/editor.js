@@ -1,9 +1,14 @@
 import { renderSPresetTools, bindSPresetTools } from './spreset-tools.js';
-import { renderDshSections } from './dsh-template-editor.js';
 import { observeRequestEvents } from './request-events.js';
 import { observeDisplayAvailability } from './display-availability.js';
 import { mcpTabNames } from './tool-labels.js';
 import { rememberWorkbenchScroll } from './scroll-state.js';
+
+// An optional panel must not prevent the workbench from loading saved presets
+// while a running host still has the previous version's asset routes.
+let dshSectionEditor;
+try { dshSectionEditor = (await import('./dsh-template-editor.js')).renderDshSections; }
+catch { /* Show the failure inside the DSH panel; the rest of the editor remains usable. */ }
 
 const $ = id => document.getElementById(id);
 const sessionId = new URLSearchParams(location.search).get('sessionId') ?? '';
@@ -1723,13 +1728,14 @@ function renderEditor() {
   const templateRef = globalThis.PresetPluginTemplates?.bindings(preset)?.[prompt.identifier];
   $('content').value = chatHistory ? '此内容从当前聊天记录读取' : templateRef?.target === 'marker' ? templateRef.contentSnapshot ?? '' : prompt.content ?? '';
   for (const id of ['prompt-name', 'role', 'position', 'depth', 'priority']) $(id).disabled = fixed;
-  $('content').disabled = fixed ? !state.dshSystemTemplate?.available : !!prompt.marker || isLinkedTemplate(prompt.identifier);
+  $('content').disabled = fixed ? !state.dshSystemTemplate?.available || !dshSectionEditor : !!prompt.marker || isLinkedTemplate(prompt.identifier);
   const wholeDshTemplate = Object.hasOwn(preset.dsh_system_prompt_templates ?? {}, state.sessionMode ?? '');
-  $('content-field').hidden = fixed && !wholeDshTemplate;
+  if ($('content-field')) $('content-field').hidden = fixed && !wholeDshTemplate && !!dshSectionEditor;
   $('dsh-template-controls').hidden = !fixed;
   if (fixed) {
     dshTemplateEditMode = state.sessionMode ?? ''; renderDshTemplateMacros();
-    renderDshSections({ preset, info: state.dshSystemTemplate, mode: dshTemplateEditMode, changed: markDirty, refresh: renderEditor });
+    if (dshSectionEditor) dshSectionEditor({ preset, info: state.dshSystemTemplate, mode: dshTemplateEditMode, changed: markDirty, refresh: renderEditor });
+    else if ($('dsh-template-sections')) $('dsh-template-sections').textContent = '分段编辑器未能加载，请重启 DSH 后刷新页面。';
   }
   $('role').disabled = fixed || isLinkedTemplate(prompt.identifier);
   $('prompt-enabled').checked = fixed ? preset.dsh_system_prompt_enabled !== false : item?.enabled ?? false;
@@ -1753,7 +1759,7 @@ for (const [id, key, numeric] of [
         preset.dsh_system_prompt_templates ??= {};
         Object.defineProperty(preset.dsh_system_prompt_templates, dshTemplateEditMode, { value: $(id).value, writable: true, configurable: true, enumerable: true });
         markDirty();
-        renderDshSections({ preset, info: state.dshSystemTemplate, mode: dshTemplateEditMode, changed: markDirty, refresh: renderEditor });
+        dshSectionEditor?.({ preset, info: state.dshSystemTemplate, mode: dshTemplateEditMode, changed: markDirty, refresh: renderEditor });
       }
       return;
     }

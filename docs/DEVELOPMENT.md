@@ -17,6 +17,9 @@ node tests/fixtures/protocol-server.mjs
 具备本机沙盒环境时，`npm run test:mcp:candidate` 可在 **candidate 槽位**启动两个隔离的 stdio MCP 服务，检查发现、调用和分组；结束后关闭测试服务，不写入 candidate 配置。
 
 
+
+通过沙盒 CLI 安装新快照后，需确认运行中的 DSH 已完成插件热重载；未重新加载时重启对应槽位。磁盘资源更新不代表进程内的新静态路由已注册。新增工作台模块时，要检查实际 HTTP 模块依赖是否全部返回 200，不能只验证配置 API 或将模块内联的模拟 DOM 测试。
+
 ## 本地化与文档维护
 
 三个包各自的 `locale/en.json`、`locale/zh-CN.json` 提供 DSH 插件管理器读取的 `meta.title` 和 `meta.description`。英文文件使用英文显示名称和简介，中文文件保留中文；键结构应一致。适配器名称、工作台及 SPreset 的中文文案仍在源码中，不会因修改这些元数据自动变成英文界面。

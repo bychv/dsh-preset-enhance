@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { dshTemplateUiScript } from './fixtures/dsh-template-ui.mjs';
 const script = dshTemplateUiScript() + readFileSync(new URL('../web/spreset-tools.js', import.meta.url), 'utf8').replace(/^export /gm, '') + '\n' + readFileSync(new URL('../web/request-preview.js', import.meta.url), 'utf8') + '\n' + readFileSync(new URL('../web/editor.js', import.meta.url), 'utf8')
-  .replace(/^import .*;\r?\n/gm, '').replace('await guard(() => reload())();', '');
+  .replace(/^import .*;\r?\n/gm, '').replace("await import('./dsh-template-editor.js')", '({ renderDshSections: globalThis.renderDshSections })').replace('await guard(() => reload())();', '');
 function editor(storage = new Map(), fetch = async () => { throw new Error('offline'); }) {
   const nodes = new Map();
   const node = () => ({ checked: false, value: '', dataset: {}, style: {}, hidden: false,
