@@ -18,6 +18,7 @@ import { prepareDynamicTemplates } from './lib/dynamic-templates.mjs';
 import { RequestSnapshots, traceRequest, previewMessages, messageOrigins } from './lib/request-preview.mjs';
 import { PRESET_TEMPLATES_SERVICE } from './templates.mjs';
 import { compilePreset, validatePreset, getOrder, dshSystemPromptEnabled, lastContentRole } from './lib/preset.mjs';
+import { materializePresetContext } from './lib/preset-context.mjs';
 import { decodePresetDocument, encodePresetPackage, attachPrefillSettings, applyPackagePrefill, ensurePackageExtractionTemplate } from './lib/preset-package.mjs';
 import { deleteLibraryEntry, presetLocks, restoreDefaultTemplates, saveLibraryEntry, setPresetLock, summarizeSPreset, syncSPresetMirror, } from './lib/s-preset-library.mjs';
 import { installDeepSeekBetaBridge, rewriteDeepSeekPrefixFetch } from './lib/deepseek-beta.mjs';
@@ -442,7 +443,20 @@ export async function apply(ctx, config = {}) {
         const policy = effectiveToolPolicy(policySnapshot, sessionId, modeId, options.tools);
         const filteredTools = filterTools(options.tools, policy);
         const toolsChanged = (options.tools?.length ?? 0) !== filteredTools.length;
-        const messages = compiled?.messages ?? history;
+        const compiledMessages = compiled?.messages ?? history;
+        // Preset context files are materialized per request. The compiled result carries their
+        // identity only, so a cached per-session compilation never duplicates the bytes.
+        const context = compiled !== null && initialRecord !== undefined
+            ? await materializePresetContext({
+                preset: initialRecord.preset,
+                messages: compiledMessages,
+                assets: presetShareAssets(initialRecord),
+                admission: presetContextAdmission(ctx),
+            })
+            : undefined;
+        const messages = context === undefined ? compiledMessages : context.messages;
+        if (context !== undefined && context.imageCount > 0)
+            await assertImageInput(ctx, options);
         const messagesChanged = compiled !== null || messages !== options.messages;
         if (!toolsChanged && !messagesChanged) {
             onDispatch();
@@ -480,7 +494,7 @@ export async function apply(ctx, config = {}) {
         routed.add(request);
         try {
             onDispatch();
-            yield* traceRequest(snapshots, sessionId, request, consumeSPresetStream(ctx.llm.stream(request), spreset, { provider: { source: request.provider, model: request.model }, stream: requestSettings?.stream !== false }, options.signal), compiled ? { warnings: compiled.warnings, promptRegex: compiled.promptRegex } : undefined);
+            yield* traceRequest(snapshots, sessionId, request, consumeSPresetStream(ctx.llm.stream(request), spreset, { provider: { source: request.provider, model: request.model }, stream: requestSettings?.stream !== false }, options.signal), compiled ? { warnings: [...compiled.warnings, ...(context?.warnings ?? [])], promptRegex: compiled.promptRegex } : undefined);
         }
         finally {
             releaseBeta();
@@ -1401,6 +1415,59 @@ async function resolveHostErrorFactory() {
     catch {
         return undefined;
     }
+}
+/** Admission capability for preset context files; undefined when the host does not expose it. */
+function presetContextAdmission(ctx) {
+    const attachments = ctx.get?.('attachments');
+    const admitPromptContent = typeof attachments?.admitPromptContent === 'function'
+        ? attachments.admitPromptContent.bind(attachments) : undefined;
+    const admitEncodedFile = typeof attachments?.admitEncodedFile === 'function'
+        ? attachments.admitEncodedFile.bind(attachments) : undefined;
+    if (admitPromptContent === undefined && admitEncodedFile === undefined)
+        return undefined;
+    return {
+        ...(admitPromptContent === undefined ? {} : { admitPromptContent: admitPromptContent }),
+        ...(admitEncodedFile === undefined ? {} : { admitEncodedFile: admitEncodedFile }),
+    };
+}
+/** Share-package assets of one preset record, keyed by sha256. */
+function presetShareAssets(record) {
+    const extensions = record.sharePackage?.extensions;
+    if (extensions === null || typeof extensions !== 'object')
+        return undefined;
+    const assets = extensions.assets;
+    if (assets === null || typeof assets !== 'object')
+        return undefined;
+    return assets;
+}
+/**
+ * Refuse a preset that carries images on a model without image input. The host dispatch layer
+ * projects such images away without telling anyone, so this reproduces the official admission
+ * failure — same code and wording — at the boundary where the plugin hands the request over.
+ */
+async function assertImageInput(ctx, options) {
+    const llm = (ctx.get?.('llm') ?? ctx.llm);
+    const provider = typeof options.provider === 'string' ? options.provider : undefined;
+    const model = typeof options.model === 'string' ? options.model : undefined;
+    if (typeof llm?.resolveModelInfo !== 'function' || provider === undefined || model === undefined)
+        return;
+    let info;
+    try {
+        info = await llm.resolveModelInfo(provider, model);
+    }
+    catch {
+        return;
+    }
+    const modalities = info?.inputModalities;
+    // An undeclared capability is not a refusal: the host only checks declared modalities too.
+    if (!Array.isArray(modalities) || modalities.includes('image'))
+        return;
+    const message = 'Model "' + model + '" does not support image input.';
+    const factory = await resolveHostErrorFactory();
+    const error = factory === undefined
+        ? Object.assign(new Error(message), { code: 'MODEL_DOES_NOT_SUPPORT_IMAGES' })
+        : factory(message, 'MODEL_DOES_NOT_SUPPORT_IMAGES');
+    throw error;
 }
 /**
  * Collect the retained image references of one request and resolve each through the

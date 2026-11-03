@@ -2,6 +2,7 @@ import { isCompactionCheckpoint, isUserAuthored } from './compaction.mjs';
 import { DSH_TEMPLATE_ID, validateDshTemplates, validateDshSections } from './dsh-system-template.mjs';
 import { dshTemplateParts } from './dsh-template-source.mjs';
 import { validateRequestSettings } from './request-settings.mjs';
+import { PRESET_CONTEXT_BLOCK, validateContextFile } from './context-files.mjs';
 import { applyHistoryPatches, historyInsertionIndex, validateHistoryPatches } from './history-patches.mjs';
 import { createMacroContext, renderMacros } from './macros.mjs';
 import { resolveTemplateBindings, templateBindings } from './template-bindings.mjs';
@@ -46,6 +47,7 @@ export function validatePreset(preset: unknown): SillyTavernPreset {
     if (p.injection_depth != null && (!Number.isInteger(p.injection_depth) || (p.injection_depth as number) < 0)) throw new Error('injection_depth 必须是非负整数');
     if (p.injection_order != null && !Number.isInteger(p.injection_order)) throw new Error('injection_order 必须是整数');
     if (p.injection_trigger != null && !Array.isArray(p.injection_trigger)) throw new Error('injection_trigger 必须是数组');
+    validateContextFile(p.contextFile, '提示词 ' + String(p.identifier));
   }
   if (preset.prompt_order != null && !Array.isArray(preset.prompt_order)) throw new Error('prompt_order 必须是数组');
   for (const group of (preset.prompt_order ?? []) as unknown[]) {
@@ -109,13 +111,21 @@ export function lastContentRole(
     // marker itself means the final message belongs to the chat rather than to the preset.
     if (p.identifier === 'chatHistory') return 'other';
     const content = p.marker ? markers?.[p.identifier] ?? '' : p.content ?? '';
-    if (!content.trim()) continue;
+    // A context file is content, but a message that carries one is never a text prefix.
+    if (!content.trim() && p.contextFile === undefined) continue;
+    if (!content.trim() || p.contextFile !== undefined) return 'other';
     return p.role === 'model' || p.role === 'assistant' ? 'assistant' : 'other';
   }
   return 'other';
 }
 
 interface DepthEntry { message: HostMessage; depth: number; order: number }
+
+/** A continuation prefix carries text and nothing else; an image or file block is not a prefix. */
+function isTextOnlyMessage(message: HostMessage | undefined): boolean {
+  const blocks = message?.content ?? [];
+  return blocks.every(block => block.type === 'text');
+}
 
 function textOf(message: HostMessage | undefined): string {
   return message?.content?.filter(b => b.type === 'text').map(b => b.text).join('\n') ?? '';
@@ -188,10 +198,20 @@ export function compilePreset(preset: SillyTavernPreset, history: HostMessage[] 
     const rendered = renderMacros(content, ctx);
     delete ctx.values['dynamic::body'];
     entries.push({ identifier: p.identifier, name: p.name ?? p.identifier, role: p.role ?? 'system', text: rendered });
-    if (!rendered.trim()) continue;
+    // A context file alone is content: the entry must not be dropped just because its text is empty.
+    const contextFile = p.contextFile;
+    if (!rendered.trim() && contextFile === undefined) continue;
     const role = p.role === 'model' ? 'assistant' : p.role ?? 'system';
+    // The bytes stay in the preset; the compiled block carries identity only, so a cached
+    // per-session result never duplicates them. The request path materializes it.
+    const blocks: { type: string; text?: string; identifier?: string; kind?: string; mediaType?: string; name?: string }[] = [];
+    if (rendered.trim()) blocks.push({ type: 'text', text: rendered });
+    if (contextFile !== undefined) {
+      blocks.push({ type: PRESET_CONTEXT_BLOCK, identifier: p.identifier, kind: contextFile.kind, mediaType: contextFile.mediaType,
+        ...(contextFile.name === undefined ? {} : { name: contextFile.name }) });
+    }
     const message: HostMessage = { id: `preset:${options.seed ?? 'preview'}:${p.identifier}`, role,
-      content: [{ type: 'text', text: rendered }], source: { kind: 'plugin', plugin: 'dsh-preset-enhance' } };
+      content: blocks as HostMessage['content'], source: { kind: 'plugin', plugin: 'dsh-preset-enhance' } };
     if (fromMarker && message.id !== undefined) markerMessageIds.add(message.id);
     if (p.injection_position === 1) depthEntries.push({ message, depth: p.injection_depth ?? 4, order: p.injection_order ?? 100 });
     else (hasHistory ? after : before).push(message);
@@ -306,7 +326,7 @@ export function compilePreset(preset: SillyTavernPreset, history: HostMessage[] 
     }
   }
   const assistantPrefix: AssistantPrefix = tail?.role === 'assistant' && tail.source?.kind === 'plugin' &&
-    tail.source.plugin === 'dsh-preset-enhance' && textOf(tail).length > 0 ? {
+    tail.source.plugin === 'dsh-preset-enhance' && textOf(tail).length > 0 && isTextOnlyMessage(tail) ? {
       active: true,
       kind: tail.id === `preset:${options.seed ?? 'preview'}:prefill` ? 'assistant_prefill' : 'ordered-prompt',
       messageId: tail.id,

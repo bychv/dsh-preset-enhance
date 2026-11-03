@@ -1,5 +1,28 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>预设工作台</title><link rel="stylesheet" href="/preset-enhance/editor.css"><link rel="stylesheet" href="/preset-enhance/plugin-templates.css"></head>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>预设工作台</title><link rel="stylesheet" href="/preset-enhance/editor.css"><link rel="stylesheet" href="/preset-enhance/plugin-templates.css"><style>
+#context-file-field{display:flex;flex-direction:column;gap:8px;margin:4px 0 12px;border-top:1px dashed #2a3942;padding-top:10px}
+#context-file-field[hidden],#ctx-preview[hidden],#ctx-paste-zone[hidden]{display:none}
+.ctx-file-head{display:flex;align-items:baseline;gap:10px;font-size:13px;color:#b9d9d2}
+#ctx-preview{display:flex;flex-direction:column;gap:8px}
+#ctx-empty{margin:0;color:#8da2ae;font-size:12px}
+.ctx-card{display:flex;align-items:center;gap:12px;border:1px solid #2a3942;border-radius:9px;background:#131d24;padding:10px 12px}
+.ctx-card-media{flex:0 0 auto;display:flex;align-items:center;justify-content:center;width:72px;height:72px;border:1px solid #293a43;border-radius:7px;background:#0d151b;overflow:hidden}
+.ctx-thumb{display:block;max-width:100%;max-height:100%;object-fit:contain}
+.ctx-file-badge{font-size:11px;letter-spacing:1px;color:#81b7b1}
+.ctx-card-info{display:flex;flex:1 1 auto;min-width:0;flex-direction:column;gap:2px;font-size:13px}
+.ctx-card-info strong{overflow-wrap:anywhere}
+.ctx-card-info .muted{font-size:12px}
+#ctx-remove{flex:0 0 auto}
+#ctx-paste-zone{border:1px dashed #3a4a54;border-radius:9px;background:#16212a;padding:14px;text-align:center;transition:border-color .15s,background .15s}
+#ctx-paste-zone:focus-visible{outline:2px solid #44b5af;outline-offset:2px}
+#ctx-paste-zone.dragging{border-color:#9edfc7;background:#1b2c30}
+#ctx-paste-zone p{margin:0 0 6px;font-size:13px;color:#b9d9d2}
+#ctx-paste-zone p.ctx-paste-sub{margin:0 0 10px;color:#8da2ae;font-size:12px}
+.ctx-actions{display:flex;justify-content:center;gap:8px}
+.ctx-hint{margin:0;min-height:1.2em;font-size:12px;color:#8da2ae}
+.ctx-hint.error{color:#ffae9d}
+.ctx-hint.ok{color:#9edfc7}
+</style></head>
 <body>
 <header><div><small>DSH · PRESET ENHANCE</small><h1>预设工作台</h1></div><span id="status" role="status">正在加载</span></header>
 <section class="connection-select" id="connection-select-bar"><p class="connection-select-title">会话连接<span id="connection-name" class="muted"></span></p><div class="connection-switch" id="connection-switch" role="group" aria-label="会话使用的连接"><button type="button" class="connection-switch-side" id="connection-side-left" aria-pressed="false"></button><button type="button" class="connection-switch-track" id="connection-toggle" role="switch" aria-checked="false" aria-describedby="connection-note"><span class="connection-switch-knob"></span></button><button type="button" class="connection-switch-side" id="connection-side-right" aria-pressed="false"></button></div><p id="connection-note" class="muted"></p></section>
@@ -52,6 +75,16 @@
 <div class="row"><label class="grow">条目名称<input id="prompt-name"></label><label>角色<select id="role"><option>system</option><option>user</option><option>assistant</option><option>model</option></select></label></div>
 <div class="row"><label>位置<select id="position"><option value="0">按顺序表（相对 chatHistory）</option><option value="1">按聊天深度</option></select></label><label>深度<input id="depth" type="number" min="0" value="4"></label><label>同深度顺序<input id="priority" type="number" min="0" value="100"></label></div>
 <p id="marker-note" class="muted"></p><div id="dsh-template-controls" hidden><button id="dsh-template-reset" type="button">当前模式全部恢复默认</button><div id="dsh-template-sections"></div><details data-preset-disclosure="system-macros"><summary>动态宏与段落</summary><div id="dsh-template-macros" class="dsh-template-macros"></div></details></div><label id="content-field">提示词正文<textarea id="content" rows="19" spellcheck="false"></textarea></label>
+<section id="context-file-field" aria-labelledby="ctx-file-title">
+<div class="ctx-file-head"><strong id="ctx-file-title">上下文文件</strong><span class="muted">随本条提示词一起发送的图片或文件（可选）</span></div>
+<div id="ctx-preview" hidden></div>
+<div id="ctx-paste-zone" tabindex="0" aria-label="粘贴图片或拖拽文件到此处" aria-describedby="ctx-file-hint">
+<p>粘贴图片或拖拽文件到此处</p>
+<p class="ctx-paste-sub">支持 PNG / JPEG / WebP / GIF 与 PDF / TXT / JSON，单个不超过 8 MB</p>
+<div class="ctx-actions"><button type="button" id="ctx-choose-file">选择文件</button><input id="ctx-file-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif,application/pdf,text/plain,application/json" hidden></div>
+</div>
+<p id="ctx-file-hint" class="ctx-hint" role="status" aria-live="polite"></p>
+</section>
 <div class="row"><button id="up">↑ 上移</button><button id="down">↓ 下移</button><label class="toggle"><input id="prompt-enabled" type="checkbox">启用条目</label></div>
 </div><details data-preset-disclosure="markers"><summary>角色标记内容（JSON）</summary><p class="muted">例如 charDescription、scenario、worldInfoBefore；未填写的标记会跳过并提示。dshDynamicPrefill 是例外：它不就地注入，而是作为末尾 assistant 预填充发送，可在这里填写内容实现动态续写。</p><textarea id="markers" rows="5" spellcheck="false">{}</textarea></details>
 <details data-preset-disclosure="assistant-prefill"><summary>Assistant 预填充</summary><label class="switch-row"><span>预填充到思考（关闭为正文）</span><span class="switch"><input type="checkbox" id="prefix-to-reasoning" checked><span class="slider" aria-hidden="true"></span></span></label><textarea id="prefill" rows="3"></textarea><p class="muted">作为尾部 assistant 消息发送，是否支持续写取决于模型。</p></details>

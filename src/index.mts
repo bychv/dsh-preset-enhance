@@ -18,6 +18,8 @@ import { prepareDynamicTemplates } from './lib/dynamic-templates.mjs';
 import { RequestSnapshots, traceRequest, previewMessages, messageOrigins } from './lib/request-preview.mjs';
 import { PRESET_TEMPLATES_SERVICE } from './templates.mjs';
 import { compilePreset, validatePreset, getOrder, dshSystemPromptEnabled, lastContentRole } from './lib/preset.mjs';
+import { materializePresetContext } from './lib/preset-context.mjs';
+import type { ContextAdmission } from './lib/preset-context.mjs';
 import { decodePresetDocument, encodePresetPackage, attachPrefillSettings, applyPackagePrefill, ensurePackageExtractionTemplate } from './lib/preset-package.mjs';
 import {
   deleteLibraryEntry, presetLocks, restoreDefaultTemplates, saveLibraryEntry, setPresetLock,
@@ -458,7 +460,19 @@ const chatConnection = () => {
     const policy = effectiveToolPolicy(policySnapshot, sessionId, modeId, options.tools);
     const filteredTools = filterTools(options.tools, policy);
     const toolsChanged = (options.tools?.length ?? 0) !== filteredTools.length;
-    const messages = compiled?.messages ?? history;
+    const compiledMessages = compiled?.messages ?? history;
+    // Preset context files are materialized per request. The compiled result carries their
+    // identity only, so a cached per-session compilation never duplicates the bytes.
+    const context = compiled !== null && initialRecord !== undefined
+      ? await materializePresetContext({
+          preset: initialRecord.preset,
+          messages: compiledMessages,
+          assets: presetShareAssets(initialRecord),
+          admission: presetContextAdmission(ctx),
+        })
+      : undefined;
+    const messages = context === undefined ? compiledMessages : context.messages;
+    if (context !== undefined && context.imageCount > 0) await assertImageInput(ctx, options);
     const messagesChanged = compiled !== null || messages !== options.messages;
     if (!toolsChanged && !messagesChanged) { onDispatch(); yield* traceRequest(snapshots, sessionId, options, next()); return; }
 
@@ -491,7 +505,7 @@ const chatConnection = () => {
       extractOutput: initial.prefixOutputExtraction === true,
     }) : () => {};
     routed.add(request);
-    try { onDispatch(); yield* traceRequest(snapshots, sessionId, request, consumeSPresetStream(ctx.llm.stream(request), spreset, { provider: { source:request.provider, model:request.model }, stream:requestSettings?.stream !== false }, options.signal), compiled ? { warnings: compiled.warnings, promptRegex: compiled.promptRegex } : undefined); } finally { releaseBeta(); routed.delete(request); }
+    try { onDispatch(); yield* traceRequest(snapshots, sessionId, request, consumeSPresetStream(ctx.llm.stream(request), spreset, { provider: { source:request.provider, model:request.model }, stream:requestSettings?.stream !== false }, options.signal), compiled ? { warnings: [...compiled.warnings, ...(context?.warnings ?? [])], promptRegex: compiled.promptRegex } : undefined); } finally { releaseBeta(); routed.delete(request); }
   }
 
   ctx.on('llm/stream', async function* (options: StreamOptions, next: () => AsyncIterable<unknown>) {
@@ -1357,6 +1371,55 @@ async function resolveHostErrorFactory(): Promise<LlmErrorFactory | undefined> {
 interface HostAttachments {
   readImageRequest?(ref: unknown, target: unknown, signal?: AbortSignal): Promise<unknown>;
   imageHostPath?(ref: unknown): string | undefined;
+  admitPromptContent?(content: readonly unknown[]): Promise<readonly unknown[]>;
+  admitEncodedFile?(input: { data: string; name?: string }): Promise<unknown>;
+}
+
+/** Admission capability for preset context files; undefined when the host does not expose it. */
+function presetContextAdmission(ctx: PluginContext): ContextAdmission | undefined {
+  const attachments = ctx.get?.('attachments') as HostAttachments | undefined;
+  const admitPromptContent = typeof attachments?.admitPromptContent === 'function'
+    ? attachments.admitPromptContent.bind(attachments) : undefined;
+  const admitEncodedFile = typeof attachments?.admitEncodedFile === 'function'
+    ? attachments.admitEncodedFile.bind(attachments) : undefined;
+  if (admitPromptContent === undefined && admitEncodedFile === undefined) return undefined;
+  return {
+    ...(admitPromptContent === undefined ? {} : { admitPromptContent: admitPromptContent as ContextAdmission['admitPromptContent'] }),
+    ...(admitEncodedFile === undefined ? {} : { admitEncodedFile: admitEncodedFile as ContextAdmission['admitEncodedFile'] }),
+  };
+}
+
+/** Share-package assets of one preset record, keyed by sha256. */
+function presetShareAssets(record: { sharePackage?: unknown }): Readonly<Record<string, { data?: string }>> | undefined {
+  const extensions = (record.sharePackage as { extensions?: unknown } | undefined)?.extensions;
+  if (extensions === null || typeof extensions !== 'object') return undefined;
+  const assets = (extensions as { assets?: unknown }).assets;
+  if (assets === null || typeof assets !== 'object') return undefined;
+  return assets as Readonly<Record<string, { data?: string }>>;
+}
+
+/**
+ * Refuse a preset that carries images on a model without image input. The host dispatch layer
+ * projects such images away without telling anyone, so this reproduces the official admission
+ * failure — same code and wording — at the boundary where the plugin hands the request over.
+ */
+async function assertImageInput(ctx: PluginContext, options: StreamOptions): Promise<void> {
+  const llm = (ctx.get?.('llm') ?? (ctx as unknown as { llm?: unknown }).llm) as
+    { resolveModelInfo?: (provider: string, model: string) => Promise<unknown> } | undefined;
+  const provider = typeof options.provider === 'string' ? options.provider : undefined;
+  const model = typeof options.model === 'string' ? options.model : undefined;
+  if (typeof llm?.resolveModelInfo !== 'function' || provider === undefined || model === undefined) return;
+  let info: { inputModalities?: readonly string[] } | undefined;
+  try { info = await llm.resolveModelInfo(provider, model) as { inputModalities?: readonly string[] }; } catch { return; }
+  const modalities = info?.inputModalities;
+  // An undeclared capability is not a refusal: the host only checks declared modalities too.
+  if (!Array.isArray(modalities) || modalities.includes('image')) return;
+  const message = 'Model "' + model + '" does not support image input.';
+  const factory = await resolveHostErrorFactory();
+  const error = factory === undefined
+    ? Object.assign(new Error(message), { code: 'MODEL_DOES_NOT_SUPPORT_IMAGES' })
+    : factory(message, 'MODEL_DOES_NOT_SUPPORT_IMAGES');
+  throw error;
 }
 
 /**

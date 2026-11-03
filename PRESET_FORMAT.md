@@ -87,6 +87,27 @@
 
 宏与模式规则见 [DSH 系统模板与请求参数](docs/api/DSH_SYSTEM_TEMPLATE.md)。
 
+## 上下文文件（图片与文件）
+
+提示词条目可以附带一个上下文文件，随该条目一起注入请求。字段是可选的，旧预设与旧导入器都会忽略它：
+
+```json
+{ "identifier": "ref", "role": "user", "content": "看这张图",
+  "contextFile": { "kind": "image", "mediaType": "image/png", "data": "<base64>" } }
+
+{ "identifier": "ref", "role": "user", "content": "",
+  "contextFile": { "kind": "file", "mediaType": "application/pdf", "name": "spec.pdf", "asset": "<sha256>" } }
+```
+
+- `kind`：`image` 或 `file`
+- `mediaType`：图片限 `image/png`、`image/jpeg`、`image/webp`、`image/gif`；文件限 `application/pdf`、`text/plain`、`application/json`
+- 字节来源三选一：`data`（编辑器粘贴产生的规范 base64）、`asset`（sha256，字节随分享包 `extensions.assets` 提供）、`attachmentId`（宿主附件引用缓存）
+- 单文件上限 8 MB；图片可带 `width` / `height`，文件可带 `name`
+
+编译器只把该条目编译成一个**身份块**，字节在请求期才解析：插件把它们交给宿主附件服务入库，再以标准附件引用注入请求，因此官方适配器与本插件的对话补全适配器都支持，且 Files 复用沿用宿主实现。条目只有上下文文件、正文为空时也算有内容，不会被丢弃；但**带上下文文件的 assistant 条目不能作为续写前缀**，不会被识别为预填充。
+
+模型未声明支持图片却收到预设注入的图片时，请求会以 `MODEL_DOES_NOT_SUPPORT_IMAGES` 失败（文案与官方准入层一致）。会话历史里已有的图片不在此列，仍按宿主原有逻辑处理。
+
 ## 预填充配置
 
 `prefill` 非空时，原有字段保持必填；`extractOutput` 是同一主版本新增的可选字段，省略时按 `false` 处理：

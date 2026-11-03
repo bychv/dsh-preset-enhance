@@ -154,11 +154,33 @@ export interface RegexScriptPlan {
 
 export type PresetRole = 'system' | 'user' | 'assistant' | 'model';
 
+/**
+ * One context file a preset prompt carries. Bytes reach the request either from an
+ * editor-pasted `data` payload or from an `asset` shipped with a share package;
+ * `attachmentId` caches the durable reference taken the first time those bytes were
+ * admitted by the host attachment service.
+ */
+export interface PresetContextFile {
+  kind: 'image' | 'file';
+  mediaType: string;
+  /** Canonical base64 without a data-URL prefix. */
+  data?: string;
+  /** sha256 hex of the bytes, when the bytes travel with the package assets. */
+  asset?: string;
+  /** Durable host attachment reference cached after the first admission. */
+  attachmentId?: string;
+  name?: string;
+  width?: number;
+  height?: number;
+}
+
 export interface PresetPrompt {
   identifier: string;
   name?: string;
   content?: string;
   role?: PresetRole;
+  /** Optional image/file injected with this prompt, ahead of its text. */
+  contextFile?: PresetContextFile;
   injection_position?: number;
   injection_depth?: number;
   injection_order?: number;

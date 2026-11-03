@@ -1715,7 +1715,7 @@ function renderEditor() {
   const prompt = current();
   $('editor').hidden = !prompt;
   $('empty').hidden = !!prompt;
-  if (!prompt) return;
+  if (!prompt) { renderContextFileField(null); return; }
   const item = order().find(entry => entry.identifier === prompt.identifier);
   const fixed = isDshSystemPromptTemplate(prompt);
   const used = fixed || !!item;
@@ -1731,6 +1731,7 @@ function renderEditor() {
   $('content').disabled = fixed ? !state.dshSystemTemplate?.available || !dshSectionEditor : !!prompt.marker || isLinkedTemplate(prompt.identifier);
   const wholeDshTemplate = Object.hasOwn(preset.dsh_system_prompt_templates ?? {}, state.sessionMode ?? '');
   if ($('content-field')) $('content-field').hidden = fixed && !wholeDshTemplate && !!dshSectionEditor;
+  renderContextFileField(prompt);
   $('dsh-template-controls').hidden = !fixed;
   if (fixed) {
     dshTemplateEditMode = state.sessionMode ?? ''; renderDshTemplateMacros();
@@ -1747,6 +1748,252 @@ function renderEditor() {
     (templateRef?.target === 'marker' ? `标记 ${prompt.identifier}：正文由插件模板提供；可在插件模板区恢复原标记。` : `标记 ${prompt.identifier}：chatHistory 展开真实会话；其他标记在下方 JSON 中填写。`) :
     `${prompt.identifier}${used ? '' : ' · 当前为闲置条目，加入顺序表后才会参与注入'}${isLinkedTemplate(prompt.identifier) ? ' · 插件关联正文只读；请在插件模板区更新版本或转为本地副本' : ''}`;
 }
+
+/* ---------- 上下文文件：粘贴 / 拖拽 / 选择文件 ---------- */
+
+// 与宿主 src/lib/context-files.mts 使用同一份白名单与上限；编辑器只做编辑期拦截，
+// 导入与请求侧仍是硬保证。
+const CONTEXT_IMAGE_MEDIA_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+const CONTEXT_FILE_MEDIA_TYPES = ['application/pdf', 'text/plain', 'application/json'];
+const CONTEXT_FILE_MAX_BYTES = 8 * 1024 * 1024;
+const CONTEXT_MEDIA_TYPE_BY_EXTENSION = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif',
+  pdf: 'application/pdf', txt: 'text/plain', json: 'application/json',
+};
+// 读取文件是异步的：切换条目或换文件后，晚到的结果不能再写进当前草稿。
+let contextFileToken = 0;
+
+function formatFileSize(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return '';
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / 1024 / 1024).toFixed(2) + ' MB';
+}
+function contextFileHint(text = '', kind = '') {
+  const hint = $('ctx-file-hint');
+  if (!hint) return;
+  hint.textContent = text;
+  hint.className = 'ctx-hint' + (kind ? ' ' + kind : '');
+}
+function contextFileMediaType(file) {
+  const declared = String(file?.type ?? '').trim().toLowerCase();
+  const normalized = declared === 'image/jpg' ? 'image/jpeg' : declared;
+  if (CONTEXT_IMAGE_MEDIA_TYPES.includes(normalized) || CONTEXT_FILE_MEDIA_TYPES.includes(normalized)) return normalized;
+  // 部分系统从磁盘选文件时 MIME 为空，按扩展名兜底；浏览器明确给出不支持的类型时直接拒绝。
+  if (declared) return '';
+  const extension = String(file?.name ?? '').split('.').pop()?.toLowerCase() ?? '';
+  return CONTEXT_MEDIA_TYPE_BY_EXTENSION[extension] ?? '';
+}
+function contextFileBase64(dataUrl) {
+  const comma = dataUrl.indexOf(',');
+  const base64 = comma < 0 ? '' : dataUrl.slice(comma + 1);
+  if (!base64 || base64.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(base64)) throw new Error('读取文件失败：编码无效，未写入');
+  return base64;
+}
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ''));
+    reader.onerror = () => reject(new Error('读取文件失败，未写入'));
+    reader.readAsDataURL(file);
+  });
+}
+function readImageSize(dataUrl) {
+  return new Promise(resolve => {
+    try {
+      const image = new Image();
+      image.onload = () => resolve({ width: image.naturalWidth || image.width || 0, height: image.naturalHeight || image.height || 0 });
+      image.onerror = () => resolve(null);
+      image.src = dataUrl;
+    } catch { resolve(null); }
+  });
+}
+// 字节数从 base64 长度反推，避免为了显示再解码一份 8 MB 数据；分享包里的 asset 没有本地字节。
+function contextFileByteLength(file) {
+  if (typeof file?.data !== 'string' || !file.data) return null;
+  const padding = file.data.endsWith('==') ? 2 : file.data.endsWith('=') ? 1 : 0;
+  return Math.max(0, Math.floor((file.data.length * 3) / 4) - padding);
+}
+function contextFileMetaText(file) {
+  const parts = [file.mediaType || '未知类型'];
+  if (file.width && file.height) parts.push(file.width + '×' + file.height);
+  const bytes = contextFileByteLength(file);
+  if (bytes != null) parts.push(formatFileSize(bytes));
+  else if (typeof file.asset === 'string') parts.push('字节随分享包提供');
+  else if (typeof file.attachmentId === 'string') parts.push('已入库引用');
+  return parts.join(' · ');
+}
+function renderContextFileField(prompt) {
+  const field = $('context-file-field'), preview = $('ctx-preview');
+  if (!field || !preview) return;
+  field.hidden = !prompt || isDshSystemPromptTemplate(prompt);
+  if (field.hidden) { preview.replaceChildren(); return; }
+  contextFileHint('');
+  preview.replaceChildren();
+  preview.hidden = false;
+  const file = prompt.contextFile;
+  if (!file) {
+    // 空态：拖拽区本身是入口，这里补一行明确的“未附加”状态。
+    const empty = document.createElement('p');
+    empty.id = 'ctx-empty';
+    empty.className = 'muted';
+    empty.textContent = '尚未附加上下文文件';
+    preview.append(empty);
+    return;
+  }
+  const card = document.createElement('div');
+  card.className = 'ctx-card';
+  const media = document.createElement('div');
+  media.className = 'ctx-card-media';
+  if (file.kind === 'image' && typeof file.data === 'string' && file.data) {
+    const thumb = document.createElement('img');
+    thumb.className = 'ctx-thumb';
+    thumb.alt = file.name ? '上下文图片 ' + file.name : '上下文图片';
+    thumb.src = 'data:' + file.mediaType + ';base64,' + file.data;
+    media.append(thumb);
+  } else {
+    const badge = document.createElement('span');
+    badge.className = 'ctx-file-badge';
+    badge.textContent = file.kind === 'image' ? 'IMAGE' : 'FILE';
+    media.append(badge);
+  }
+  const info = document.createElement('div');
+  info.className = 'ctx-card-info';
+  const name = document.createElement('strong');
+  name.textContent = file.name || (file.kind === 'image' ? '未命名图片' : '未命名文件');
+  const meta = document.createElement('span');
+  meta.className = 'muted';
+  meta.textContent = contextFileMetaText(file);
+  info.append(name, meta);
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.id = 'ctx-remove';
+  remove.className = 'danger';
+  remove.textContent = '移除';
+  remove.onclick = () => removeContextFile();
+  card.append(media, info, remove);
+  preview.append(card);
+}
+function removeContextFile() {
+  const prompt = current();
+  if (!prompt?.contextFile) return;
+  delete prompt.contextFile;
+  ++contextFileToken;
+  markDirty();
+  renderContextFileField(prompt);
+  contextFileHint('已移除上下文文件');
+}
+async function attachContextFile(file, ignoredCount = 0) {
+  const prompt = current();
+  if (!prompt) { contextFileHint('先选择一个提示词条目', 'error'); return; }
+  if (isDshSystemPromptTemplate(prompt)) { contextFileHint('内置 DSH 系统提示词模板不支持上下文文件', 'error'); return; }
+  if (!file) { contextFileHint('没有读取到文件，未写入', 'error'); return; }
+  const mediaType = contextFileMediaType(file);
+  if (!mediaType) {
+    contextFileHint('不支持的类型：' + (file.type || file.name || '未知') + '；图片支持 PNG、JPEG、WebP、GIF，文件支持 PDF、TXT、JSON', 'error');
+    return;
+  }
+  if (!(file.size > 0)) { contextFileHint('文件为空，未写入', 'error'); return; }
+  if (file.size > CONTEXT_FILE_MAX_BYTES) {
+    contextFileHint('文件 ' + formatFileSize(file.size) + ' 超过 ' + formatFileSize(CONTEXT_FILE_MAX_BYTES) + ' 上限，未写入', 'error');
+    return;
+  }
+  const identifier = prompt.identifier;
+  const token = ++contextFileToken;
+  contextFileHint('正在读取文件…');
+  const extra = ignoredCount > 0 ? '，已忽略另外 ' + ignoredCount + ' 个文件' : '';
+  try {
+    const base64 = contextFileBase64(await readFileAsDataUrl(file));
+    if (token !== contextFileToken || current()?.identifier !== identifier) return;
+    const entry = { kind: CONTEXT_IMAGE_MEDIA_TYPES.includes(mediaType) ? 'image' : 'file', mediaType, data: base64 };
+    const name = String(file.name ?? '').trim().slice(0, 200);
+    if (name) entry.name = name;
+    let sizeNote = '';
+    if (entry.kind === 'image') {
+      const size = await readImageSize('data:' + mediaType + ';base64,' + base64);
+      if (token !== contextFileToken || current()?.identifier !== identifier) return;
+      // 宿主校验要求正整数且不超过 100000：读不到或不合法就不写，宁缺勿错。
+      if (size && Number.isInteger(size.width) && Number.isInteger(size.height) &&
+        size.width > 0 && size.height > 0 && size.width <= 100000 && size.height <= 100000) {
+        entry.width = size.width;
+        entry.height = size.height;
+      } else sizeNote = '，但无法读取图片尺寸';
+    }
+    const live = current();
+    if (!live || live.identifier !== identifier || token !== contextFileToken) return;
+    live.contextFile = entry;
+    markDirty();
+    renderContextFileField(live);
+    contextFileHint('已附加' + (entry.kind === 'image' ? '图片' : '文件') + '：' + (entry.name || mediaType) + ' · ' +
+      contextFileMetaText(entry) + sizeNote + extra, 'ok');
+  } catch (error) {
+    if (token !== contextFileToken) return;
+    contextFileHint(error?.message ?? '读取文件失败，未写入', 'error');
+  }
+}
+function contextPasteFile(event) {
+  const clipboard = event.clipboardData ?? null;
+  if (!clipboard) return null;
+  const items = clipboard.items;
+  for (let index = 0; items && index < items.length; index++) {
+    const item = items[index];
+    if (item?.kind !== 'file') continue;
+    const file = item.getAsFile?.();
+    if (file) return file;
+  }
+  return clipboard.files?.[0] ?? null;
+}
+function onContextPaste(event) {
+  const file = contextPasteFile(event);
+  if (!file) {
+    // 纯文本粘贴保持原样（正文照常落进 textarea），只在拖拽区里补一句为什么没反应。
+    if (event.currentTarget === $('ctx-paste-zone')) contextFileHint('只支持图片或文件；提示词正文请粘贴到上方输入框', 'error');
+    return;
+  }
+  event.preventDefault();
+  void attachContextFile(file);
+}
+
+const contextDropZone = $('ctx-paste-zone');
+const contextFileInput = $('ctx-file-input');
+$('ctx-choose-file').onclick = () => contextFileInput.click();
+contextFileInput.onchange = () => {
+  const file = contextFileInput.files?.[0];
+  // 清空后同一个文件再次选择也能触发 change。
+  contextFileInput.value = '';
+  if (file) void attachContextFile(file);
+};
+contextDropZone.addEventListener('paste', onContextPaste);
+$('content').addEventListener('paste', onContextPaste);
+contextDropZone.addEventListener('click', event => {
+  if (event.target?.closest?.('button, input')) return;
+  contextFileInput.click();
+});
+contextDropZone.addEventListener('keydown', event => {
+  if (event.target !== contextDropZone || (event.key !== 'Enter' && event.key !== ' ')) return;
+  event.preventDefault();
+  contextFileInput.click();
+});
+contextDropZone.addEventListener('dragover', event => {
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+  contextDropZone.classList.add('dragging');
+});
+contextDropZone.addEventListener('dragleave', event => {
+  if (!contextDropZone.contains(event.relatedTarget)) contextDropZone.classList.remove('dragging');
+});
+contextDropZone.addEventListener('drop', event => {
+  event.preventDefault();
+  contextDropZone.classList.remove('dragging');
+  const files = event.dataTransfer?.files;
+  const file = files?.[0];
+  if (!file) { contextFileHint('没有识别到文件，可以试试直接粘贴图片', 'error'); return; }
+  void attachContextFile(file, Math.max(0, (files.length ?? 1) - 1));
+});
+// 拖偏到页面其他位置时浏览器会直接打开文件，丢掉整个未保存草稿：只拦文件拖放。
+const isFileDrag = event => Array.from(event.dataTransfer?.types ?? []).includes('Files');
+document.addEventListener('dragover', event => { if (isFileDrag(event)) event.preventDefault(); });
+document.addEventListener('drop', event => { if (isFileDrag(event)) event.preventDefault(); });
 
 for (const [id, key, numeric] of [
   ['prompt-name', 'name'], ['role', 'role'], ['position', 'injection_position', true],

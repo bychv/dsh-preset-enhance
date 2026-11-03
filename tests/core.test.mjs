@@ -7,6 +7,8 @@ import { Readable } from 'node:stream';
 import { createMacroContext, renderMacros } from '../lib/macros.mjs';
 import { validateHistoryPatches } from '../lib/history-patches.mjs';
 import { compilePreset, dshSystemPromptEnabled, DYNAMIC_PREFILL_ID, lastContentRole, validatePreset } from '../lib/preset.mjs';
+import { PRESET_CONTEXT_BLOCK } from '../lib/context-files.mjs';
+import { materializePresetContext } from '../lib/preset-context.mjs';
 import { PresetStore } from '../lib/store.mjs';
 import { installDeepSeekBetaBridge, rewriteDeepSeekPrefixFetch } from '../lib/deepseek-beta.mjs';
 import { AGENT_PRESET_ID, apply, buildPresetModeComposition, discoverModeToolCatalogs, ensurePresetAgentMode } from '../index.mjs';
@@ -867,6 +869,85 @@ test('the dynamic prefill marker supplies the trailing continuation instead of i
   // Detection agrees on every shape above.
   assert.equal(lastContentRole(preset, 100001), 'assistant');
   assert.equal(lastContentRole({ ...preset, prompts: [system, history, { ...dynamic, content: '' }, trailing] }, 100001), 'other');
+});
+
+test('preset context files validate their type, bytes and sources', () => {
+  const presetOf = contextFile => ({ prompts: [{ identifier: 'ctx', role: 'user', content: '', contextFile }] });
+  const png = Buffer.from('png-bytes').toString('base64');
+  assert.doesNotThrow(() => validatePreset(presetOf({ kind: 'image', mediaType: 'image/png', data: png })));
+  assert.doesNotThrow(() => validatePreset(presetOf({ kind: 'file', mediaType: 'application/pdf', asset: 'a'.repeat(64) })));
+  assert.throws(() => validatePreset(presetOf({ kind: 'image', mediaType: 'text/plain', data: png })), /不支持的类型/);
+  assert.throws(() => validatePreset(presetOf({ kind: 'image', mediaType: 'image/png' })), /需要 data、asset 或 attachmentId/);
+  assert.throws(() => validatePreset(presetOf({ kind: 'image', mediaType: 'image/png', data: 'not base64!!' })), /规范 base64/);
+  assert.throws(() => validatePreset(presetOf({ kind: 'file', mediaType: 'application/pdf', asset: 'zz' })), /sha256/);
+});
+
+test('a context file compiles into an identity block and is never a text prefix', () => {
+  const contextFile = { kind: 'image', mediaType: 'image/png', data: Buffer.from('png-bytes').toString('base64') };
+  const preset = {
+    prompts: [
+      { identifier: 'chatHistory', marker: true, role: 'user' },
+      { identifier: 'ctx', role: 'user', content: '看这张图', contextFile },
+    ],
+    prompt_order: [{ character_id: 100001, order: [
+      { identifier: 'chatHistory', enabled: true }, { identifier: 'ctx', enabled: true },
+    ] }],
+  };
+  const compiled = compilePreset(preset, [msg('u', 'user', 'hi')], { characterId: 100001 });
+  const ctxMessage = compiled.messages.find(message => message.id === 'preset:preview:ctx');
+  // The text stays first and the block carries identity only, so no bytes enter the compiled result.
+  assert.deepEqual(ctxMessage.content.map(block => block.type), ['text', PRESET_CONTEXT_BLOCK]);
+  assert.equal(ctxMessage.content[1].identifier, 'ctx');
+  assert.equal(ctxMessage.content[1].kind, 'image');
+  assert.equal(JSON.stringify(compiled.messages).includes(contextFile.data), false, 'bytes must not reach the compiled result');
+
+  // A context-only entry is content, so it must not be dropped.
+  const contextOnly = compilePreset({
+    ...preset,
+    prompts: [preset.prompts[0], { identifier: 'ctx', role: 'user', contextFile }],
+  }, [msg('u', 'user', 'hi')], { characterId: 100001 });
+  const only = contextOnly.messages.find(message => message.id === 'preset:preview:ctx');
+  assert.deepEqual(only.content.map(block => block.type), [PRESET_CONTEXT_BLOCK]);
+
+  // An assistant entry that carries a context file is not a continuable prefix.
+  const assistantContext = compilePreset({
+    ...preset,
+    prompts: [preset.prompts[0], { identifier: 'ctx', role: 'assistant', content: '好的', contextFile }],
+  }, [msg('u', 'user', 'hi')], { characterId: 100001 });
+  assert.equal(assistantContext.assistantPrefix.active, false);
+  assert.equal(lastContentRole({ ...preset, prompts: [preset.prompts[0], { identifier: 'ctx', role: 'assistant', content: '好的', contextFile }] }, 100001), 'other');
+});
+
+test('preset context files are admitted through the host attachment service', async () => {
+  const data = Buffer.from('png-bytes').toString('base64');
+  const preset = { prompts: [{ identifier: 'ctx', role: 'user', content: '', contextFile: { kind: 'image', mediaType: 'image/png', data } }] };
+  const messages = [{
+    id: 'm', role: 'user', content: [
+      { type: 'text', text: '看' },
+      { type: PRESET_CONTEXT_BLOCK, identifier: 'ctx', kind: 'image', mediaType: 'image/png' },
+      // An image already in the conversation is not this plugin's to police.
+      { type: 'image', attachment: { attachmentId: 'history-image' } },
+    ],
+  }];
+  const calls = [];
+  const admission = {
+    admitPromptContent: async parts => {
+      calls.push(parts);
+      return parts.map(part => (part.type === 'image' && part.data !== undefined ? { type: 'image', attachment: { attachmentId: 'admitted-1' } } : part));
+    },
+  };
+  const admitted = await materializePresetContext({ preset, messages, admission });
+  assert.equal(calls.length, 1);
+  assert.deepEqual(admitted.messages[0].content[1], { type: 'image', attachment: { attachmentId: 'admitted-1' } });
+  assert.deepEqual(admitted.messages[0].content[2], { type: 'image', attachment: { attachmentId: 'history-image' } });
+  assert.equal(admitted.imageCount, 1, 'only the injected image counts');
+  assert.deepEqual(admitted.warnings, []);
+
+  // Without admission the bytes cannot be sent: skip that block, keep the rest, and warn.
+  const skipped = await materializePresetContext({ preset, messages, admission: undefined });
+  assert.deepEqual(skipped.messages[0].content.map(block => block.type), ['text', 'image']);
+  assert.equal(skipped.imageCount, 0);
+  assert.match(skipped.warnings.join('\n'), /无法入库/);
 });
 
 test('the forced prefill switch persists on its own and rejects junk values', async () => {
