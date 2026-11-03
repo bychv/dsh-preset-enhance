@@ -1,4 +1,4 @@
-import { contextFileEncoded, contextFilesOf, isPresetContextBlock } from './context-files.mjs';
+import { contextFileEncoded, contextFileHash, contextFilesOf, decodeContextBase64, isPresetContextBlock } from './context-files.mjs';
 import type { ContentBlock, HostMessage, SillyTavernPreset } from './types.mjs';
 
 /** The slice of the host attachment service this module needs. */
@@ -18,6 +18,11 @@ export interface MaterializeContextOptions {
   /** Share-package assets keyed by sha256, for entries that reference them. */
   assets?: Readonly<Record<string, { data?: string }>>;
   admission?: ContextAdmission;
+  /**
+   * Whether bytes may travel inline on the block. Only this plugin's own chat adapter can turn
+   * them into an upload; the official adapter resolves images through a host reference only.
+   */
+  allowInline?: boolean;
 }
 
 export interface MaterializeContextOutcome {
@@ -34,7 +39,7 @@ export interface MaterializeContextOutcome {
  * Bytes never enter the compiled result, so a cached per-session compilation stays small.
  */
 export async function materializePresetContext(options: MaterializeContextOptions): Promise<MaterializeContextOutcome> {
-  const { preset, messages, assets, admission } = options;
+  const { preset, messages, assets, admission, allowInline } = options;
   const warnings: string[] = [];
   const prompts = new Map(preset.prompts.map(prompt => [prompt.identifier, prompt] as const));
   const out: HostMessage[] = [];
@@ -86,8 +91,16 @@ export async function materializePresetContext(options: MaterializeContextOption
     const cleaned: ContentBlock[] = [];
     for (const part of admitted) {
       if (part.type === 'image' && typeof part.data === 'string') {
-        // Admission was unavailable or refused. The serializer resolves images through a host
-        // attachment reference only, so bytes cannot be embedded inline yet: skip and say so.
+        // Admission was unavailable or refused. Our own adapter can still upload the bytes: hand it
+        // a synthetic content-addressed identity plus the payload, exactly like a user attachment.
+        if (allowInline === true) {
+          const bytes = decodeContextBase64(part.data);
+          const identity = 'preset:' + contextFileHash(bytes);
+          cleaned.push({ type: 'image', attachment: { attachmentId: identity },
+            mediaType: part.mediaType, presetData: part.data,
+            ...(part.name === undefined ? {} : { name: part.name }) } as ContentBlock);
+          continue;
+        }
         warnings.push('预设条目 ' + (part.__presetIdentifier ?? '(未知)') + ' 的图片无法入库，本次请求已跳过该图片');
         skippedImages += 1;
         continue;

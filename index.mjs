@@ -452,6 +452,8 @@ export async function apply(ctx, config = {}) {
                 messages: compiledMessages,
                 assets: presetShareAssets(initialRecord),
                 admission: presetContextAdmission(ctx),
+                // Only our own adapter can upload bytes the attachment service never admitted.
+                allowInline: options.provider === DEEPSEEK_CHAT_PROVIDER_ID,
             })
             : undefined;
         const messages = context === undefined ? compiledMessages : context.messages;
@@ -1482,6 +1484,38 @@ async function assertImageInput(ctx, options) {
  */
 async function buildRequestImages(ctx, connection, options, signal) {
     const prepared = new Map();
+    const refs = new Map();
+    const inline = new Map();
+    for (const message of options.messages ?? []) {
+        for (const block of (message.content ?? [])) {
+            if (block?.type !== 'image' || block.offloaded === true)
+                continue;
+            const ref = block.attachment;
+            if (typeof ref?.attachmentId !== 'string' || !ref.attachmentId)
+                continue;
+            // Inline preset bytes carry their payload on the block; the attachment service never saw them.
+            if (typeof block.presetData === 'string')
+                inline.set(ref.attachmentId, block);
+            else
+                refs.set(ref.attachmentId, ref);
+        }
+    }
+    for (const [attachmentId, block] of inline) {
+        const bytes = new Uint8Array(Buffer.from(block.presetData, 'base64'));
+        const identity = attachmentId.startsWith('preset:') ? attachmentId.slice('preset:'.length) : attachmentId;
+        const width = block.attachment?.width;
+        const height = block.attachment?.height;
+        prepared.set(attachmentId, {
+            mediaType: block.mediaType ?? 'image/png',
+            data: bytes,
+            bytes: bytes.byteLength,
+            ...(typeof width === 'number' ? { width } : {}),
+            ...(typeof height === 'number' ? { height } : {}),
+            attachment: { attachmentId, ...(block.name === undefined ? {} : { name: block.name }) },
+            // Stable across turns for the same bytes, so the Files upload is reused.
+            variantId: 'preset-' + identity,
+        });
+    }
     const attachments = ctx.get?.('attachments');
     if (typeof attachments?.readImageRequest !== 'function')
         return prepared;
@@ -1489,16 +1523,6 @@ async function buildRequestImages(ctx, connection, options, signal) {
     const route = routes.find(item => item.id === options.model) ?? routes[0];
     if (route === undefined)
         return prepared;
-    const refs = new Map();
-    for (const message of options.messages ?? []) {
-        for (const block of (message.content ?? [])) {
-            if (block?.type !== 'image' || block.offloaded === true)
-                continue;
-            const ref = block.attachment;
-            if (typeof ref?.attachmentId === 'string' && ref.attachmentId)
-                refs.set(ref.attachmentId, ref);
-        }
-    }
     for (const ref of refs.values()) {
         const target = resolveRequestImageTarget(route, ref);
         prepared.set(ref.attachmentId, await attachments.readImageRequest(ref, target, signal));

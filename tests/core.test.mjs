@@ -7,7 +7,7 @@ import { Readable } from 'node:stream';
 import { createMacroContext, renderMacros } from '../lib/macros.mjs';
 import { validateHistoryPatches } from '../lib/history-patches.mjs';
 import { compilePreset, dshSystemPromptEnabled, DYNAMIC_PREFILL_ID, lastContentRole, validatePreset } from '../lib/preset.mjs';
-import { PRESET_CONTEXT_BLOCK } from '../lib/context-files.mjs';
+import { PRESET_CONTEXT_BLOCK, contextFileHash } from '../lib/context-files.mjs';
 import { materializePresetContext } from '../lib/preset-context.mjs';
 import { PresetStore } from '../lib/store.mjs';
 import { installDeepSeekBetaBridge, rewriteDeepSeekPrefixFetch } from '../lib/deepseek-beta.mjs';
@@ -953,6 +953,16 @@ test('preset context files are admitted through the host attachment service', as
   assert.deepEqual(skipped.messages[0].content.map(block => block.type), ['text', 'image']);
   assert.equal(skipped.imageCount, 0);
   assert.match(skipped.warnings.join('\n'), /无法入库/);
+
+  // Our own adapter can still upload the bytes: same shape as a user attachment, plus the payload
+  // and a content-addressed identity so the Files upload is reused across turns.
+  const inline = await materializePresetContext({ preset, messages, admission: undefined, allowInline: true });
+  const inlineBlock = inline.messages[0].content[1];
+  assert.equal(inlineBlock.type, 'image');
+  assert.equal(inlineBlock.attachment.attachmentId, 'preset:' + contextFileHash(Buffer.from('png-bytes')));
+  assert.equal(inlineBlock.presetData, data);
+  assert.equal(inline.imageCount, 1);
+  assert.deepEqual(inline.warnings, []);
 });
 
 test('a prompt carries several context files and same-named ones get distinct request names', async () => {
