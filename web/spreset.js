@@ -192,6 +192,12 @@ function loadPreset(id) {
   // structuredClone keeps every unknown field of every prompt, so a save writes them back unchanged.
   preset = structuredClone(record.preset ?? { prompts: [], prompt_order: [] });
   if (!Array.isArray(preset.prompts)) preset.prompts = [];
+  // Same migration the workbench performs: the file keeps one shape from here on.
+  for (const prompt of preset.prompts) {
+    if (prompt.contextFiles !== undefined || prompt.contextFile === undefined) continue;
+    prompt.contextFiles = [prompt.contextFile];
+    delete prompt.contextFile;
+  }
   if (!Array.isArray(preset.prompt_order)) preset.prompt_order = [];
   const binding = state.binding ?? {};
   const preferred = binding.presetId === presetId && binding.characterId != null ? String(binding.characterId) : '';
@@ -542,6 +548,10 @@ function insertIntoChain(row) {
   if (Array.isArray(entry.injectionTrigger) && entry.injectionTrigger.length) prompt.injection_trigger = entry.injectionTrigger.slice();
   if (entry.hideFromList === true) prompt.hide_from_list = true;
   if (entry.forbidOverrides === true) prompt.forbid_overrides = true;
+  // A library entry carries its context files into the chain, otherwise storing and reusing a
+  // prompt would silently drop its images.
+  const carried = promptContextFiles(entry);
+  if (carried.length > 0) prompt.contextFiles = structuredClone(carried);
   preset.prompts.push(prompt);
   chainOrder().push({ identifier, enabled: true });
   selection = { kind: 'chain', id: identifier };
@@ -590,8 +600,17 @@ function inspectorTarget() {
   const prompt = promptOf(selection.id);
   return prompt ? { kind: 'chain', prompt, item } : null;
 }
+/** Context files of one prompt or library entry; the legacy single field counts as one item. */
+function promptContextFiles(source) {
+  const list = Array.isArray(source?.contextFiles) ? source.contextFiles : [];
+  if (list.length > 0) return list;
+  return source?.contextFile === undefined ? [] : [source.contextFile];
+}
+
 function promptToLibraryShape(prompt) {
+  const files = promptContextFiles(prompt);
   return {
+    ...(files.length === 0 ? {} : { contextFiles: structuredClone(files) }),
     title: prompt.name || prompt.identifier || '未命名条目',
     role: prompt.role === 'model' ? 'assistant' : prompt.role || 'system',
     content: prompt.content || '',
@@ -604,7 +623,9 @@ function promptToLibraryShape(prompt) {
   };
 }
 function libraryToEntryShape(entry) {
+  const files = promptContextFiles(entry);
   return {
+    ...(files.length === 0 ? {} : { contextFiles: structuredClone(files) }),
     title: entry.title, role: entry.role, content: entry.content,
     injectionPosition: entry.injectionPosition === 1 ? 1 : 0,
     injectionDepth: entry.injectionDepth, injectionOrder: entry.injectionOrder,

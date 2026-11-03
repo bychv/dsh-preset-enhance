@@ -57,6 +57,17 @@ test('saveLibraryEntry creates, updates, keeps ids and requires a title', () => 
   assert.equal(updated.entry.createdAt, 2000, 'createdAt is preserved');
   assert.equal(updated.entry.updatedAt, 3000);
   assert.throws(() => saveLibraryEntry(library, { title: '  ' }), /需要标题/);
+
+  // Context files travel with the entry, and a partial save must not drop them.
+  const png = Buffer.from('png-bytes').toString('base64');
+  const files = [{ kind: 'image', mediaType: 'image/png', data: png, name: 'ref.png' }];
+  const withFiles = saveLibraryEntry(library, { id: 'minted', title: '带图模板', contextFiles: files }, { now: 4000 });
+  assert.deepEqual(withFiles.entry.contextFiles, files);
+  const partial = saveLibraryEntry(withFiles.library, { id: 'minted', title: '只改标题' }, { now: 5000 });
+  assert.deepEqual(partial.entry.contextFiles, files, 'partial saves keep the stored files');
+  const cleared = saveLibraryEntry(withFiles.library, { id: 'minted', title: '清空', contextFiles: [] }, { now: 6000 });
+  assert.equal(cleared.entry.contextFiles, undefined, 'an empty list removes the field');
+  assert.throws(() => saveLibraryEntry(library, { title: 'bad', contextFiles: [{ kind: 'image', mediaType: 'text/plain', data: png }] }), /不支持的类型/);
   const removed = deleteLibraryEntry(updated.library, 'minted');
   assert.equal(removed.removed, true);
   assert.equal(removed.library.entries.length, 4);

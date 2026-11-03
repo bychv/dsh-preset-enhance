@@ -401,6 +401,8 @@ export interface SPresetLibraryEntry {
   injectionDepth?: number;
   injectionOrder?: number;
   injectionTrigger?: string[];
+  /** Context files carried along when the entry joins the chain. */
+  contextFiles?: PresetContextFile[];
   /** Reference-editor flags kept for round-tripping; this plugin does not read them. */
   hideFromList?: boolean;
   forbidOverrides?: boolean;

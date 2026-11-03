@@ -11,8 +11,9 @@
  */
 import { randomUUID } from 'node:crypto';
 import { planRegexScript, regexName } from './prompt-regex.mjs';
+import { validateContextFiles } from './context-files.mjs';
 import type {
-  RegexScript, SillyTavernPreset, SPresetEditorState, SPresetLibrary, SPresetLibraryEntry,
+  PresetContextFile, RegexScript, SillyTavernPreset, SPresetEditorState, SPresetLibrary, SPresetLibraryEntry,
 } from './types.mjs';
 
 /** Upper bounds so an imported or hand-edited state file cannot grow without limit. */
@@ -157,6 +158,18 @@ export interface LibrarySaveResult {
 }
 
 /** Upsert one library entry. Titles are required; ids are minted when absent or unknown. */
+/**
+ * Normalize the context files one library entry carries. An invalid list fails the save instead of
+ * being dropped, because it would otherwise vanish when the entry is inserted into a chain later.
+ */
+function libraryContextFiles(input: unknown, previous: unknown): PresetContextFile[] | undefined {
+  const source = input === undefined ? previous : input;
+  if (source === undefined) return undefined;
+  validateContextFiles(source, undefined, '资源库条目');
+  const list = source as PresetContextFile[];
+  return list.length === 0 ? undefined : list.map(file => ({ ...file }));
+}
+
 export function saveLibraryEntry(
   library: SPresetLibrary,
   input: unknown,
@@ -188,6 +201,8 @@ export function saveLibraryEntry(
     injectionTrigger: triggerList(input.injectionTrigger) ?? previous?.injectionTrigger,
     hideFromList: input.hideFromList === undefined ? previous?.hideFromList : input.hideFromList === true,
     forbidOverrides: input.forbidOverrides === undefined ? previous?.forbidOverrides : input.forbidOverrides === true,
+    // Context files travel with the entry; a partial save keeps whatever was stored before.
+    contextFiles: libraryContextFiles(input.contextFiles, previous?.contextFiles),
     createdAt: previous ? previous.createdAt : stamp(input.createdAt, now),
     updatedAt: now,
   };
