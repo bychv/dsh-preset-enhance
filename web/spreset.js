@@ -1020,7 +1020,7 @@ async function performSavePreset() {
   // mirrorSPreset makes the server project extensions.SPreset into the SPresetSettings prompt
   // (the reference editor's "已与酒馆同步"); extensions.SPreset stays the source of truth.
   const version = draftVersion, savedId = presetId, savedName = presetName, snapshot = structuredClone(preset);
-  const result = await api({ action: 'save', id: savedId, name: savedName, preset: snapshot, mirrorSPreset: true });
+  const result = await api({ action: 'save', revision: state.revision, id: savedId, name: savedName, preset: snapshot, mirrorSPreset: true });
   state.revision = Number.isInteger(result.revision) ? result.revision : state.revision + 1;
   if (result.id) {
     presetId = result.id;

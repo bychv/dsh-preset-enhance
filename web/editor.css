@@ -120,3 +120,29 @@
 .preview-raw summary:focus-visible, .preview-raw button:focus-visible { outline: 2px solid #44b5af; outline-offset: 2px; }
 
 html, body { overflow-anchor: none; }
+
+/* 上下文文件（预设条目携带的图片与文件） */
+#context-file-field{display:flex;flex-direction:column;gap:8px;margin:4px 0 12px;border-top:1px dashed #2a3942;padding-top:10px}
+#context-file-field[hidden],#ctx-preview[hidden],#ctx-paste-zone[hidden]{display:none}
+.ctx-file-head{display:flex;align-items:baseline;gap:10px;font-size:13px;color:#b9d9d2}
+#ctx-preview{display:flex;flex-direction:column;gap:8px}
+#ctx-empty{margin:0;color:#8da2ae;font-size:12px}
+.ctx-card{display:flex;align-items:center;gap:12px;border:1px solid #2a3942;border-radius:9px;background:#131d24;padding:10px 12px}
+.ctx-card-media{flex:0 0 auto;display:flex;align-items:center;justify-content:center;width:72px;height:72px;border:1px solid #293a43;border-radius:7px;background:#0d151b;overflow:hidden}
+.ctx-thumb{display:block;max-width:100%;max-height:100%;object-fit:contain}
+.ctx-file-badge{font-size:11px;letter-spacing:1px;color:#81b7b1}
+.ctx-card-info{display:flex;flex:1 1 auto;min-width:0;flex-direction:column;gap:2px;font-size:13px}
+.ctx-card-info strong{overflow-wrap:anywhere}
+.ctx-card-info .muted{font-size:12px}
+#ctx-remove{flex:0 0 auto}
+#ctx-paste-zone{border:1px dashed #3a4a54;border-radius:9px;background:#16212a;padding:14px;text-align:center;transition:border-color .15s,background .15s}
+#ctx-paste-zone:focus-visible{outline:2px solid #44b5af;outline-offset:2px}
+#ctx-paste-zone.dragging{border-color:#9edfc7;background:#1b2c30}
+#ctx-paste-zone p{margin:0 0 6px;font-size:13px;color:#b9d9d2}
+#ctx-paste-zone p.ctx-paste-sub{margin:0 0 10px;color:#8da2ae;font-size:12px}
+.ctx-actions{display:flex;justify-content:center;gap:8px}
+.ctx-hint{margin:0;min-height:1.2em;font-size:12px;color:#8da2ae}
+.ctx-hint.error{color:#ffae9d}
+.ctx-hint.ok{color:#9edfc7}
+.ctx-hint.warn{color:#edcf8d}
+.ctx-list{display:flex;flex-direction:column;gap:8px}

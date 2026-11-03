@@ -691,6 +691,11 @@ test('saved imports are global and the last library selection survives reopening
     }
 
 
+    // A save that started from an older revision must not clobber another window's commit.
+    const stale = await postRaw({ revision: 0, action: 'save', id: first.id, name: 'A', preset });
+    assert.equal(stale.statusCode, 400);
+    assert.match(stale.payload.error, /其他窗口更新/);
+
     const external = new PresetStore(file);
     await external.transaction(state => {
       state.bindings.bound = {

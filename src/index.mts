@@ -610,7 +610,9 @@ const chatConnection = () => {
       res.writeHead(200, {
         'content-type': `${mime}; charset=utf-8`,
         'cache-control': 'no-store',
-        'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self'; frame-ancestors 'self'; object-src 'none'; base-uri 'none'",
+        // `img-src data:` carries the preset context-file thumbnails: they are inline base64 by
+        // design, so a strict `default-src 'self'` would render them blank.
+        'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; frame-ancestors 'self'; object-src 'none'; base-uri 'none'",
       });
       res.end(await readFile(new URL(file, import.meta.url)));
     },
@@ -1058,6 +1060,9 @@ const chatConnection = () => {
               ...(sessionId ? { binding: ownGet(state.bindings, sessionId) } : {}) };
           };
           if (body.action === 'save' || body.action === 'import') {
+            // Two editors can hold the same preset; a caller that supplies the revision it started
+            // from must not silently overwrite changes another window already committed.
+            if (body.action === 'save' && body.revision !== undefined) assertRevision(state, body);
             const imported = body.action === 'import' ? decodePresetDocument(body.document, String(body.name || '未命名预设')) : null;
             if (imported?.preset.dsh_spreset_tools_enabled === true) imported.preset.dsh_spreset_tools_enabled = false;
             validatePreset(imported?.preset ?? body.preset);

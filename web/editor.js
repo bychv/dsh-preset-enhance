@@ -647,7 +647,7 @@ async function persistPresetDraft({ force = false } = {}) {
   const recordId = selectedId;
   const name = $('name').value;
   const document = structuredClone(preset);
-  const send = () => api({ action: 'save', id: recordId, name, preset: document });
+  const send = () => api({ action: 'save', revision: state.revision, id: recordId, name, preset: document });
   let result;
   try {
     result = await send();
