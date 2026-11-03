@@ -36,6 +36,7 @@ const BUILTIN_IDS = new Set(['main', 'jailbreak', 'nsfw', 'enhanceDefinitions', 
 
 let state = { revision: 0, presets: [] };
 let preset = null;
+let draftBaseVersion = null;
 let presetId = '';
 let presetName = '';
 let presetDirty = false;
@@ -191,6 +192,16 @@ function loadPreset(id) {
   presetName = record.name || record.id;
   // structuredClone keeps every unknown field of every prompt, so a save writes them back unchanged.
   preset = structuredClone(record.preset ?? { prompts: [], prompt_order: [] });
+  draftBaseVersion = record?.editVersion ?? null;
+  const assets = record?.sharePackage?.extensions?.assets;
+  if (assets) for (const entry of preset.prompts ?? []) {
+    for (const file of entry.contextFiles ?? (entry.contextFile ? [entry.contextFile] : [])) {
+      if (!file.data && file.asset && assets[file.asset]?.data) {
+        file.data = assets[file.asset].data;
+        delete file.asset;
+      }
+    }
+  }
   if (!Array.isArray(preset.prompts)) preset.prompts = [];
   // Same migration the workbench performs: the file keeps one shape from here on.
   for (const prompt of preset.prompts) {
@@ -856,7 +867,7 @@ function contextFileEditor(source, textarea) {
   zone.setAttribute('aria-label', '粘贴图片或拖拽文件到此处');
   zone.append(el('p', '', '粘贴图片或拖拽文件到此处'));
   zone.append(el('p', 'context-paste-hint',
-    '支持 PNG / JPEG / WebP / GIF 与 PDF / TXT / JSON，单个不超过 8 MB，最多 ' + CONTEXT_MAX_ITEMS + ' 项；可一次选择或拖入多个'));
+    '支持 PNG / JPEG / WebP / GIF 与 PDF / TXT / JSON，Chat 图片请放在用户条目，保存请求合计 32 MiB，单个不超过 8 MiB，最多 ' + CONTEXT_MAX_ITEMS + ' 项；可一次选择或拖入多个'));
   const actions = el('div', 'context-paste-actions');
   const input = el('input');
   input.type = 'file';
@@ -1273,7 +1284,8 @@ async function performSavePreset() {
   // mirrorSPreset makes the server project extensions.SPreset into the SPresetSettings prompt
   // (the reference editor's "已与酒馆同步"); extensions.SPreset stays the source of truth.
   const version = draftVersion, savedId = presetId, savedName = presetName, snapshot = structuredClone(preset);
-  const send = () => api({ action: 'save', revision: state.revision, id: savedId, name: savedName, preset: snapshot, mirrorSPreset: true });
+  const baseVersion = draftBaseVersion;
+  const send = () => api({ action: 'save', baseVersion, revision: state.revision, id: savedId, name: savedName, preset: snapshot, mirrorSPreset: true });
   let result;
   try {
     result = await send();
@@ -1286,9 +1298,9 @@ async function performSavePreset() {
   }
   state.revision = Number.isInteger(result.revision) ? result.revision : state.revision + 1;
   if (result.id) {
-    presetId = result.id;
+    if (presetId === savedId) { presetId = result.id; draftBaseVersion = result.editVersion ?? null; }
     const record = (state.presets ?? []).find(item => item.id === result.id);
-    if (record) { record.preset = snapshot; record.name = savedName; }
+    if (record) { record.editVersion = result.editVersion; record.preset = snapshot; record.name = savedName; }
     const unsaved = (state.presets ?? []).find(item => !item.id);
     if (unsaved) unsaved.preset = structuredClone(preset);
   }

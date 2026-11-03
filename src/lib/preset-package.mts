@@ -1,5 +1,5 @@
 import { OUTPUT_EXTRACTION_PROMPT_TEMPLATE } from './output-extractor.mjs';
-import { contextFileBytes, contextFileHash, contextFilesOf, decodeContextBase64 } from './context-files.mjs';
+import { MAX_CONTEXT_FILE_BYTES, contextFileBytes, contextFileHash, contextFilesOf, decodeContextBase64 } from './context-files.mjs';
 import { validatePreset } from './preset.mjs';
 import { validateToolsSection } from './tool-presets.mjs';
 import type {
@@ -41,12 +41,16 @@ function validatePackageAssets(extensions: unknown, preset: SillyTavernPreset): 
       const label = '预设包 extensions.assets[' + hash + ']';
       if (!isRecord(value)) throw new Error(label + ' 必须为对象');
       if (typeof value.mediaType !== 'string' || !value.mediaType) throw new Error(label + '.mediaType 必须为非空文本');
+      if (typeof value.data === 'string' && value.data.length > 4 * Math.ceil(MAX_CONTEXT_FILE_BYTES / 3)) throw new Error(label + ' 超过 8 MiB 上限');
       if (!isCanonicalBase64(value.data)) throw new Error(label + '.data 必须是规范 base64');
+      const bytes = decodeContextBase64(value.data);
+      if (bytes.length > MAX_CONTEXT_FILE_BYTES || contextFileHash(bytes) !== hash) throw new Error(label + ' 大小或 sha256 不匹配');
       if (value.name !== undefined && (typeof value.name !== 'string' || !value.name)) throw new Error(label + '.name 必须为非空文本');
     }
   }
   for (const prompt of preset.prompts) {
     for (const file of contextFilesOf(prompt)) {
+      if (!file.asset && !file.data) throw new Error('条目 ' + prompt.identifier + ' 缺少附件字节，请重新添加文件');
       if (typeof file.asset !== 'string') continue;
       if (assets === undefined || !Object.hasOwn(assets, file.asset)) {
         throw new Error('预设包缺少资产：' + file.asset + '（提示词 ' + prompt.identifier + ' 的上下文文件）');
@@ -78,12 +82,18 @@ function convergeContextAssets(document: PresetPackageDocument): void {
       file.asset = hash;
     }
   }
-  if (!Object.keys(collected).length) return;
+
   const extensions = document.extensions;
   // A malformed container is reported by validatePresetPackage right after this step.
   if (extensions !== undefined && !isRecord(extensions)) return;
   const existing = extensions !== undefined && isRecord(extensions.assets) ? extensions.assets : {};
-  document.extensions = { ...(extensions ?? {}), assets: { ...existing, ...collected } };
+  for (const prompt of preset.prompts) {
+    for (const { asset } of contextFilesOf(prompt)) {
+      if (asset && !Object.hasOwn(collected, asset) && Object.hasOwn(existing, asset)) collected[asset] = existing[asset] as PresetPackageAsset;
+    }
+  }
+  if (Object.keys(collected).length) document.extensions = { ...extensions, assets: collected };
+  else if (extensions) delete extensions.assets;
 }
 
 function validatePrefill(prefill: unknown): void {
@@ -149,6 +159,11 @@ export function validatePresetPackage(document: unknown): PresetPackageDocument 
 
 export function decodePresetDocument(document: unknown, fallbackName = '未命名预设'):
 { name: string; preset: SillyTavernPreset; sharePackage?: PresetPackageDocument } {
+  function requireInlineFiles(preset: SillyTavernPreset) {
+    for (const prompt of preset.prompts) for (const file of contextFilesOf(prompt)) {
+      if (!file.data) throw new Error('条目 ' + prompt.identifier + ' 缺少附件字节，请附带 data 或分享包资产');
+    }
+  }
   if (isRecord(document) && (document.format === PRESET_PACKAGE_FORMAT || !Array.isArray(document.prompts))) {
     validatePresetPackage(document);
     const container = isRecord(document.preset) ? document.preset : {};
@@ -159,7 +174,7 @@ export function decodePresetDocument(document: unknown, fallbackName = '未命�
       sharePackage: structuredClone(document) as PresetPackageDocument,
     };
   }
-  validatePreset(document);
+  requireInlineFiles(validatePreset(document));
   return { name: fallbackName, preset: structuredClone(document) as SillyTavernPreset };
 }
 

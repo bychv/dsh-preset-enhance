@@ -1072,11 +1072,14 @@ const chatConnection = () => {
             const source = imported?.preset ?? body.preset;
             const mirrored = body.mirrorSPreset === true ? syncSPresetMirror(source) : { preset: source, changed: false };
             const old = body.action === 'save' ? state.presets.find(p => p.id === body.id) : undefined;
+            if (body.action === 'save' && body.baseVersion !== undefined &&
+              ((body.id && !old) || body.baseVersion !== (old?.editVersion ?? null))) throw new Error('当前预设已有其他修改，请保留草稿并重新载入后合并');
             const record = {
               ...old,
               ...imported,
               id: old?.id ?? randomUUID(),
               name: String(imported?.name || body.name || '未命名预设').slice(0, 200),
+              editVersion: randomUUID(),
               preset: mirrored.preset,
             };
             const prefillApplied = !!imported?.sharePackage?.prefill;
@@ -1089,7 +1092,7 @@ const chatConnection = () => {
             for (const identifier of presetLocks(state.sPresetEditor, record.id)) {
               if (!promptIds.has(identifier)) state.sPresetEditor = setPresetLock(state.sPresetEditor, record.id, identifier, false);
             }
-            return { ...selectPreset(record), prefillApplied, extractionTemplateAdded };
+            return { ...selectPreset(record), editVersion: record.editVersion, prefillApplied, extractionTemplateAdded };
           }
           if (body.action === 'delete-preset') {
             const index = state.presets.findIndex(preset => preset.id === body.id);
@@ -1823,7 +1826,7 @@ async function readJson(req: HostRequest): Promise<Record<string, any>> {
   for await (const part of req) {
     const bytes = Buffer.from(part);
     size += bytes.length;
-    if (size > 8_000_000) throw new Error('预设文件不能超过 8 MB');
+    if (size > 32 * 1024 * 1024) throw new Error('请求总大小不能超过 32 MiB');
     parts.push(bytes);
   }
   return JSON.parse(Buffer.concat(parts).toString('utf8'));

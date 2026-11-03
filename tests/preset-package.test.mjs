@@ -423,7 +423,7 @@ const contextPreset = () => {
       { kind: 'image', mediaType: 'image/png', data: PNG, name: 'a.png', width: 2, height: 3 },
       { kind: 'file', mediaType: 'text/plain', data: TXT, name: 'note.txt' },
       { kind: 'image', mediaType: 'image/png', data: PNG, name: 'copy.png' },
-      { kind: 'file', mediaType: 'application/json', attachmentId: 'att-1', name: 'live.json' },
+      { kind: 'file', mediaType: 'application/json', attachmentId: 'att-1', data: TXT, name: 'live.json' },
     ],
   });
   return data;
@@ -450,7 +450,7 @@ test('export moves inline context bytes into package assets and leaves reference
   assert.deepEqual(files[0], { kind: 'image', mediaType: 'image/png', name: 'a.png', width: 2, height: 3, asset: PNG_HASH });
   assert.deepEqual(files[1], { kind: 'file', mediaType: 'text/plain', name: 'note.txt', asset: TXT_HASH });
   assert.equal(files[2].asset, PNG_HASH, 'same bytes share one asset id');
-  assert.deepEqual(files[3], { kind: 'file', mediaType: 'application/json', attachmentId: 'att-1', name: 'live.json' });
+  assert.deepEqual(files[3], { kind: 'file', mediaType: 'application/json', attachmentId: 'att-1', asset: TXT_HASH, name: 'live.json' });
   assert.deepEqual(document.extensions.assets, {
     [PNG_HASH]: { mediaType: 'image/png', name: 'a.png', data: PNG },
     [TXT_HASH]: { mediaType: 'text/plain', name: 'note.txt', data: TXT },
@@ -540,3 +540,23 @@ test('packages without context files export and import unchanged', () => {
   assert.deepEqual(decodePresetDocument(original).preset, prompt());
 });
 
+
+test('only referenced, verified and portable context bytes survive sharing', () => {
+  const doc = encodePresetPackage({ name: 'Portable', preset: contextPreset() }, {});
+  const record = decodePresetDocument(doc);
+  record.preset.prompts = [];
+  assert.equal(encodePresetPackage(record, {}).extensions.assets, undefined);
+  doc.extensions.assets[PNG_HASH].data = TXT;
+  assert.throws(() => decodePresetDocument(doc), /sha256/);
+  const preset = contextPreset();
+  delete contextFilesOfPrompt(preset)[3].data;
+  assert.throws(() => decodePresetDocument(preset), /缺少附件字节/);
+  assert.throws(() => encodePresetPackage({ name: 'Local', preset }, {}), /缺少附件字节/);
+});
+
+test('an 8 MiB inline attachment survives package export and import', () => {
+  const preset = contextPreset();
+  contextFilesOfPrompt(preset)[0].data = Buffer.alloc(8 * 1024 * 1024).toString('base64');
+  const doc = encodePresetPackage({ name: 'Boundary', preset }, {});
+  assert.doesNotThrow(() => decodePresetDocument(doc));
+});

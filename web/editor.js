@@ -15,6 +15,7 @@ const sessionId = new URLSearchParams(location.search).get('sessionId') ?? '';
 let inputModeId = new URLSearchParams(location.search).get('modeId') ?? '';
 let state = { presets: [], revision: 0 }, selectedId = '', selectedPrompt = '', dirty = false;
 let preset = blank();
+let draftBaseVersion = null;
 let displayAvailable = false;
 let pluginTemplatePanel = null;
 let requestPreview = null, previewController = null, previewGeneration = 0;
@@ -147,6 +148,16 @@ function loadDraft(id) {
   selectedId = id;
   const record = state.presets.find(item => item.id === id);
   preset = structuredClone(record?.preset ?? blank());
+  draftBaseVersion = record?.editVersion ?? null;
+  const assets = record?.sharePackage?.extensions?.assets;
+  if (assets) for (const entry of preset.prompts ?? []) {
+    for (const file of entry.contextFiles ?? (entry.contextFile ? [entry.contextFile] : [])) {
+      if (!file.data && file.asset && assets[file.asset]?.data) {
+        file.data = assets[file.asset].data;
+        delete file.asset;
+      }
+    }
+  }
   if (preset.dsh_system_prompt_enabled === undefined) preset.dsh_system_prompt_enabled = true;
   const packaged = record?.sharePackage;
   $('apply-package-prefill').hidden = !packaged?.prefill;
@@ -647,7 +658,8 @@ async function persistPresetDraft({ force = false } = {}) {
   const recordId = selectedId;
   const name = $('name').value;
   const document = structuredClone(preset);
-  const send = () => api({ action: 'save', revision: state.revision, id: recordId, name, preset: document });
+  const baseVersion = draftBaseVersion;
+  const send = () => api({ action: 'save', baseVersion, revision: state.revision, id: recordId, name, preset: document });
   let result;
   try {
     result = await send();
@@ -666,7 +678,8 @@ async function persistPresetDraft({ force = false } = {}) {
   const savedId = result.id;
   const existingIndex = state.presets.findIndex(item => item.id === savedId);
   const existing = existingIndex >= 0 ? state.presets[existingIndex] : undefined;
-  const savedRecord = { ...existing, id: savedId, name: String(name || '未命名预设').slice(0, 200), preset: document };
+  if (generation === presetDraftGeneration) draftBaseVersion = result.editVersion ?? null;
+  const savedRecord = { ...existing, editVersion: result.editVersion, id: savedId, name: String(name || '未命名预设').slice(0, 200), preset: document };
   if (existingIndex >= 0) state.presets[existingIndex] = savedRecord;
   else state.presets.push(savedRecord);
   if (result.binding) state.binding = structuredClone(result.binding);
@@ -2312,7 +2325,7 @@ $('import').onchange = guard(async () => {
   if (!file || !(await discardOkay())) return;
   hidePresetNotice();
   try {
-    if (file.size > 8_000_000) throw new Error('预设文件不能超过 8 MB');
+    if (file.size >= 32 * 1024 * 1024) throw new Error('导入请求总大小不能超过 32 MiB');
     const parsed = JSON.parse(await file.text());
     const name = file.name.replace(/(?:\.dsh-preset)?\.json$/i, '');
     cancelGlobalConfigAutoSave();

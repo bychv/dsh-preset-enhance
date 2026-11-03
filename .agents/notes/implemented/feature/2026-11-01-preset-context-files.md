@@ -61,9 +61,9 @@ DeepSeek 带图有两条路：内联 base64（每轮重传）与 Files API 的 `
 - **两个编辑器都可编辑**：工作台在提示词编辑区，SPreset 在 INSPECTOR 的「内容」标签页；都支持粘贴/拖拽/选择、一次多个、逐项移除、24 项与 8 MB 校验、同名重复粘贴。
 - **资源库不再丢图**：`promptToLibraryShape` / `libraryToEntryShape` 与条目插入路径都携带 `contextFiles`，宿主的 `saveLibraryEntry` 也建模该字段（部分保存保留原值，空数组删除字段，非法值拒绝保存）。
 - **SPreset 加载即迁移**旧单数字段，与工作台的 `loadDraft` 一致，文件形状从此收敛为数组。
-- **分享包资产收敛**：导出时把带 `data` 的上下文文件按 sha256 写入 `extensions.assets`（同字节去重）并只用 `asset` 引用；导入校验资产形状与引用完整性，但**不把字节展开回 `preset.data`**——字节只留在 `sharePackage.extensions.assets`，请求期由 `presetShareAssets` 读取。已知取舍：不做陈旧资产清理、保留 `attachmentId`。
+- **分享包资产收敛**：导出时把带 `data` 的上下文文件按 sha256 写入 `extensions.assets`（同字节去重）并只用 `asset` 引用；导入校验资产形状与引用完整性，但**不把字节展开回 `preset.data`**——字节只留在 `sharePackage.extensions.assets`，请求期由 `presetShareAssets` 读取。再次导出只保留当前引用并校验摘要。两种编辑器在载入草稿时还原字节，普通 JSON 和资源库复制可独立携带附件。仅有本机附件 ID 的外部文件导入时明确报错。
 - **内联字节兜底**：入库不可用时，自有适配器仍能发送预设图片——材料化会给出 `preset:<sha256>` 的内容寻址身份并把 base64 挂在块上，`buildRequestImages` 据此合成 `RequestImageAttachment`（`variantId = preset-<hash>`），后续上传与跨轮复用仍走 `DeepSeekFileStore` / `RequestFiles`。官方适配器没有这条路径，仍按降级阶梯告警跳过。
-- **预设保存加版本校验**：`save` 动作在调用方给出 `revision` 时拒绝过期写入，两个编辑器都带该字段；工作台遇冲突刷新后重试，SPreset 同样重试一次。此前两个编辑器可以互相静默覆盖。
+- **预设保存加版本校验**：`save` 动作在调用方给出 `revision` 时拒绝过期写入，两个编辑器都带该字段；两种编辑器重试时始终携带加载草稿时的预设版本，只有目标预设未被其他编辑器修改时才可提交。此前两个编辑器可以互相静默覆盖。
 - **预览曾被 CSP 拦掉**：页面 `content-security-policy` 只有 `default-src 'self'`，`<img src="data:…">` 不可见；已加 `img-src 'self' data:`，并把工作台的内联 `<style>` 移入 `editor.css`（`style-src 'self'` 同样会拦截内联样式）。
 
 ## 相关资料

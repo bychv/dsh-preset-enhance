@@ -64,7 +64,7 @@
 | `tools` | 可选的工具预设与分组容器；导入不自动应用，需在工作台显式导入，详见下文。 |
 | `extensions` | 可选的扩展对象，建议使用插件名作为键，避免重名。 |
 
-`format`、`version`、`preset` 必填。文件大小限制与原 JSON 导入相同，为 8 MB。自定义提示词的换行按 JSON 规则写为 `\n`；宏保留源文本，在实际请求时展开。
+`format`、`version`、`preset` 必填。保存和导入请求的 JSON 总上限为 32 MiB（含 base64 和请求外层字段）。自定义提示词的换行按 JSON 规则写为 `\n`；宏保留源文本，在实际请求时展开。
 
 `preset.data.dsh_system_prompt_enabled` 是可选布尔值，省略时按 `true` 处理。它对应工作台置顶的“DSH 系统提示词”模板：在其他 DSH 模式中启用该预设时，`true` 保留模式原有系统提示与运行时注入，`false` 将其移除。专用“预设模式”始终移除这些内容。
 
@@ -103,7 +103,7 @@
 
 - `kind`：`image` 或 `file`
 - `mediaType`：图片限 `image/png`、`image/jpeg`、`image/webp`、`image/gif`；文件限 `application/pdf`、`text/plain`、`application/json`
-- 字节来源三选一：`data`（编辑器粘贴产生的规范 base64）、`asset`（sha256，字节随分享包 `extensions.assets` 提供）、`attachmentId`（宿主附件引用缓存）
+- 普通 JSON 使用 `data`（规范 base64），分享包可使用 `asset` 引用随包字节。导入时核对 SHA-256，单独的本机 `attachmentId` 不能跨机导入。导出仅包含当前条目引用的资产。
 - 单文件上限 8 MB；图片可带 `width` / `height`，文件可带 `name`
 - **同名文件可以重复添加**：附件身份由内容寻址决定（与 DSH 自身附件语义一致），`name` 只是展示信息，重名不会冲突也不会被拒绝
 

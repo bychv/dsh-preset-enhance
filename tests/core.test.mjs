@@ -695,6 +695,12 @@ test('saved imports are global and the last library selection survives reopening
     const stale = await postRaw({ revision: 0, action: 'save', id: first.id, name: 'A', preset });
     assert.equal(stale.statusCode, 400);
     assert.match(stale.payload.error, /其他窗口更新/);
+    const retried = await postRaw({ revision: reopened.revision, baseVersion: null,
+      action: 'save', id: first.id, name: 'stale draft', preset });
+    assert.equal(retried.statusCode, 400);
+    assert.match(retried.payload.error, /保留草稿/);
+    assert.equal((await new PresetStore(file).read()).presets.find(p => p.id === first.id).name, 'A');
+
 
     const external = new PresetStore(file);
     await external.transaction(state => {

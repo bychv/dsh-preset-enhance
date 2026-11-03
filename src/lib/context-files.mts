@@ -18,7 +18,6 @@ export const MAX_CONTEXT_FILES = 24;
  */
 export const PRESET_CONTEXT_BLOCK = 'preset-context';
 
-const CANONICAL_BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u;
 const SHA256_HEX = /^[0-9a-f]{64}$/u;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -69,8 +68,10 @@ export function validateContextFile(value: unknown, label: string): void {
     throw new Error(label + '的 contextFile 需要 data、asset 或 attachmentId 之一');
   }
   if (data !== undefined) {
-    if (typeof data !== 'string' || !CANONICAL_BASE64.test(data)) throw new Error(label + '的 contextFile.data 必须是规范 base64');
+    if (typeof data !== 'string') throw new Error(label + '的 contextFile.data 必须是规范 base64');
+    if (data.length > 4 * Math.ceil(MAX_CONTEXT_FILE_BYTES / 3)) throw new Error(label + ' 超过 8 MiB 上限');
     const bytes = Buffer.from(data, 'base64');
+    if (bytes.toString('base64') !== data) throw new Error(label + ' 必须是规范 base64');
     if (bytes.length === 0) throw new Error(label + '的 contextFile.data 不能为空');
     if (bytes.length > MAX_CONTEXT_FILE_BYTES) throw new Error(label + '的 contextFile 超过 ' + (MAX_CONTEXT_FILE_BYTES / 1024 / 1024) + ' MB 上限');
   }
