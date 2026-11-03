@@ -179,7 +179,9 @@ export interface PresetPrompt {
   name?: string;
   content?: string;
   role?: PresetRole;
-  /** Optional image/file injected with this prompt, ahead of its text. */
+  /** Optional images/files injected with this prompt, ahead of its text. */
+  contextFiles?: PresetContextFile[];
+  /** Legacy single-file field; still honoured and treated as a one-element list. */
   contextFile?: PresetContextFile;
   injection_position?: number;
   injection_depth?: number;

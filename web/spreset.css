@@ -125,3 +125,17 @@ p.honesty{margin:0 0 8px;border:1px solid #665535;border-radius:7px;background:#
 @media(max-width:700px){.regex-layout{display:block}.regex-sidebar,.regex-detail{max-height:none}.regex-detail{display:none}.regex-detail-open .regex-sidebar{display:none}.regex-detail-open .regex-detail{display:block}.regex-back{display:block;margin-bottom:12px}.regex-pair,.regex-bounds{grid-template-columns:1fr}.regex-toolbar{gap:8px}.regex-toolbar>button{margin-left:0}}
 
 .regex-view .regex-toggle{flex-direction:row;align-items:center;justify-content:space-between;gap:12px}.regex-view .regex-toggle>input{appearance:none;flex:none;width:34px;height:20px;padding:0;border:0;border-radius:20px;background:#7c898d;position:relative;cursor:pointer}.regex-view .regex-toggle>input:before{content:"";position:absolute;left:3px;top:3px;width:14px;height:14px;border-radius:50%;background:#fff;transition:transform .12s}.regex-view .regex-toggle>input:checked{background:#29776a}.regex-view .regex-toggle>input:checked:before{transform:translateX(14px)}.regex-view .regex-toggle>input:focus-visible{outline:2px solid #81b7b1;outline-offset:3px}
+
+/* 上下文文件（只读预览）：添加/移除以工作台为准，本页只展示 */
+.context-file-list{display:flex;flex-direction:column;gap:6px}
+.context-file{display:flex;align-items:center;gap:10px;border:1px solid #293a43;border-radius:8px;background:#131d24;padding:8px 10px;min-width:0}
+.context-file-preview{flex:none;display:flex;align-items:center;justify-content:center;max-width:160px;max-height:120px;overflow:hidden;border:1px solid #24333c;border-radius:6px;background:#0d1318}
+.context-file-thumb{display:block;max-width:160px;max-height:120px;width:auto;height:auto;object-fit:contain}
+.context-file-info{display:flex;flex-direction:column;gap:2px;min-width:0}
+.context-file-name{font-size:12px;overflow-wrap:anywhere}
+.badge.context-file-badge{color:#c9a86a;border-color:#665535;flex:none}
+@media(prefers-color-scheme:light){
+  .context-file{background:#fff;border-color:#d6dfe3}
+  .context-file-preview{background:#f3f6f7;border-color:#d6dfe3}
+  .badge.context-file-badge{color:#926723;border-color:#cbb78f}
+}

@@ -335,6 +335,9 @@ function renderChainRow(item, index) {
   if (prompt.marker === true) top.append(el('span', 'badge marker', '占位符'));
   if (BUILTIN_IDS.has(item.identifier)) top.append(el('span', 'badge builtin', '内置'));
   if (prompt.injection_position === 1) top.append(el('span', 'badge', '注入'));
+  // 带上下文文件的条目在链路上也标一下，不打开 INSPECTOR 也能看出来。
+  const contextFiles = contextFileItems(prompt);
+  if (contextFiles.length) top.append(el('span', 'badge context-file-badge', contextFileBadgeLabel(contextFiles)));
   main.append(top, el('p', 'preview', short(prompt.content, 90) || '（空内容）'));
   const actions = el('span', 'row-actions');
   const roles = el('span', 'role-switch');
@@ -610,6 +613,79 @@ function libraryToEntryShape(entry) {
     forbidOverrides: entry.forbidOverrides === true,
   };
 }
+/* ------------------------------------------------------ 上下文文件（只读预览） */
+
+// 预设条目可以携带多个上下文文件（图片/文件）。本页只展示，不提供粘贴、校验或编辑：
+// 添加与移除以工作台为准，避免两个页面同时写同一份预设。
+// 字节数从 base64 长度反推，避免为了显示再解码一遍大图。
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return '';
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / 1024 / 1024).toFixed(2) + ' MB';
+}
+function contextFileBytes(file) {
+  if (typeof file?.data !== 'string' || !file.data) return null;
+  const padding = file.data.endsWith('==') ? 2 : file.data.endsWith('=') ? 1 : 0;
+  return Math.max(0, Math.floor((file.data.length * 3) / 4) - padding);
+}
+function contextFileMeta(file) {
+  const parts = [file?.mediaType || '未知类型'];
+  if (file?.width && file?.height) parts.push(file.width + '×' + file.height);
+  const bytes = contextFileBytes(file);
+  if (bytes !== null) parts.push(formatBytes(bytes));
+  else if (typeof file?.asset === 'string') parts.push('字节随分享包提供');
+  else if (typeof file?.attachmentId === 'string') parts.push('宿主附件引用');
+  return parts.join(' · ');
+}
+/** 一项或多项上下文文件；旧预设的单数 contextFile 按一项处理。 */
+function contextFileItems(source) {
+  if (!source) return [];
+  if (Array.isArray(source.contextFiles) && source.contextFiles.length) return source.contextFiles;
+  return source.contextFile ? [source.contextFile] : [];
+}
+/** 链路徽标：单一项标「图/文件」，多项补数量；图片与文件混排时用「上下文」。 */
+function contextFileBadgeLabel(files) {
+  if (files.length === 1) return files[0]?.kind === 'image' ? '图' : '文件';
+  const images = files.filter(file => file?.kind === 'image').length;
+  const kind = images === files.length ? '图' : images === 0 ? '文件' : '上下文';
+  return kind + ' ×' + files.length;
+}
+/** 只读的「上下文文件」字段；模板条目或没有文件时返回 null。 */
+function contextFileField(source, isTemplate) {
+  const files = isTemplate ? [] : contextFileItems(source);
+  if (!files.length) return null;
+  const wrap = el('div', 'field');
+  wrap.append(el('span', '', '上下文文件'));
+  const list = el('div', 'context-file-list');
+  files.forEach(file => list.append(contextFileItem(file)));
+  wrap.append(list);
+  wrap.append(el('span', 'muted', '只读预览；添加或移除请在工作台完成'));
+  return wrap;
+}
+function contextFileItem(file) {
+  const box = el('div', 'context-file');
+  if (file?.kind === 'image' && typeof file.data === 'string' && file.data) {
+    const frame = el('div', 'context-file-preview');
+    const image = el('img', 'context-file-thumb');
+    image.src = 'data:' + (file.mediaType || 'image/png') + ';base64,' + file.data;
+    image.alt = file.name ? '上下文图片 ' + file.name : '上下文图片';
+    frame.append(image);
+    box.append(frame);
+  } else {
+    // 图片也可能只有 asset（字节随分享包提供），此时不伪造缩略图。
+    const note = typeof file?.asset === 'string' ? '字节随分享包提供'
+      : typeof file?.attachmentId === 'string' ? '宿主附件引用' : '无本地字节';
+    box.append(el('span', 'badge context-file-badge', file?.kind === 'image' ? note : 'FILE'));
+  }
+  const info = el('div', 'context-file-info');
+  info.append(el('strong', 'context-file-name', file?.name || (file?.kind === 'image' ? '未命名图片' : '未命名文件')));
+  info.append(el('span', 'muted', contextFileMeta(file ?? {})));
+  box.append(info);
+  return box;
+}
+
 function renderInspector() {
   const body = $('inspector-body');
   body.replaceChildren();
@@ -781,7 +857,12 @@ function renderInspector() {
     tabRow.append(node);
   }
   body.append(tabRow);
-  if (inspectorTab === '内容') body.append(contentField, counter);
+  if (inspectorTab === '内容') {
+    body.append(contentField, counter);
+    // 上下文文件是正文的一部分，只读展示（编辑统一在工作台）。
+    const contextFile = contextFileField(source, isTemplate);
+    if (contextFile) body.append(contextFile);
+  }
   else if (inspectorTab === '注入') body.append(isTemplate ? templateInjectionTab(target.entry) : injectionTab(source));
   else if (inspectorTab === '工具') body.append(readOnlyBlock('工具与消息注入（extensions.SPreset.ToolBindings / MessageInjections）',
     { ToolBindings: preset?.extensions?.SPreset?.ToolBindings ?? null, MessageInjections: preset?.extensions?.SPreset?.MessageInjections ?? null }, '工具可在工作台开启实验支持；消息注入仅保留配置。'));

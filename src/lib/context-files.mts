@@ -8,6 +8,9 @@ export const CONTEXT_FILE_TYPES: readonly string[] = ['application/pdf', 'text/p
 /** One context file may not exceed this many decoded bytes. */
 export const MAX_CONTEXT_FILE_BYTES = 8 * 1024 * 1024;
 
+/** One prompt may carry at most this many context files. */
+export const MAX_CONTEXT_FILES = 24;
+
 /**
  * Compiled content block that still has to be materialized before the request leaves
  * the plugin. It carries only identity, so the compiled result stays small enough to
@@ -82,8 +85,29 @@ export function validateContextFile(value: unknown, label: string): void {
   }
 }
 
+/**
+ * Every context file of one prompt, in order. The legacy single `contextFile` field is read as a
+ * one-element list so presets written before the array existed keep working.
+ */
+export function contextFilesOf(prompt: { contextFiles?: PresetContextFile[]; contextFile?: PresetContextFile } | undefined): PresetContextFile[] {
+  const list = prompt?.contextFiles;
+  if (Array.isArray(list) && list.length > 0) return list;
+  return prompt?.contextFile === undefined ? [] : [prompt.contextFile];
+}
+
+/** Validate the whole list of context files on one prompt. */
+export function validateContextFiles(value: unknown, legacy: unknown, label: string): void {
+  if (value !== undefined) {
+    if (!Array.isArray(value)) throw new Error(label + '的 contextFiles 必须是数组');
+    if (value.length > MAX_CONTEXT_FILES) throw new Error(label + '的 contextFiles 最多 ' + MAX_CONTEXT_FILES + ' 项');
+    for (const item of value) validateContextFile(item, label);
+  }
+  if (legacy !== undefined) validateContextFile(legacy, label);
+}
+
 /** True when the block only exists to carry a preset context file. */
-export function isPresetContextBlock(block: unknown): block is { type: string; identifier: string; kind: 'image' | 'file'; mediaType: string; name?: string } {
+export function isPresetContextBlock(block: unknown): block is { type: string; identifier: string; index: number; kind: 'image' | 'file'; mediaType: string; name?: string } {
   if (!isRecord(block) || block.type !== PRESET_CONTEXT_BLOCK) return false;
-  return typeof block.identifier === 'string' && (block.kind === 'image' || block.kind === 'file') && typeof block.mediaType === 'string';
+  return typeof block.identifier === 'string' && Number.isInteger(block.index)
+    && (block.kind === 'image' || block.kind === 'file') && typeof block.mediaType === 'string';
 }

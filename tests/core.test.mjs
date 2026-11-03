@@ -924,7 +924,7 @@ test('preset context files are admitted through the host attachment service', as
   const messages = [{
     id: 'm', role: 'user', content: [
       { type: 'text', text: '看' },
-      { type: PRESET_CONTEXT_BLOCK, identifier: 'ctx', kind: 'image', mediaType: 'image/png' },
+      { type: PRESET_CONTEXT_BLOCK, identifier: 'ctx', index: 0, kind: 'image', mediaType: 'image/png' },
       // An image already in the conversation is not this plugin's to police.
       { type: 'image', attachment: { attachmentId: 'history-image' } },
     ],
@@ -948,6 +948,49 @@ test('preset context files are admitted through the host attachment service', as
   assert.deepEqual(skipped.messages[0].content.map(block => block.type), ['text', 'image']);
   assert.equal(skipped.imageCount, 0);
   assert.match(skipped.warnings.join('\n'), /无法入库/);
+});
+
+test('a prompt carries several context files and same-named ones get distinct request names', async () => {
+  const png = Buffer.from('png-bytes').toString('base64');
+  // Two entries intentionally share one clipboard-style name.
+  const preset = { prompts: [{ identifier: 'ctx', role: 'user', content: '', contextFiles: [
+    { kind: 'image', mediaType: 'image/png', data: png, name: 'image.png' },
+    { kind: 'image', mediaType: 'image/png', data: png, name: 'image.png' },
+    { kind: 'file', mediaType: 'application/pdf', data: png, name: 'image.png' },
+  ] }] };
+  validatePreset(preset);
+
+  // The legacy single field still validates and compiles.
+  validatePreset({ prompts: [{ identifier: 'one', contextFile: { kind: 'image', mediaType: 'image/png', data: png } }] });
+  assert.throws(() => validatePreset({ prompts: [{ identifier: 'bad', contextFiles: [1] }] }), /contextFile/);
+  assert.throws(() => validatePreset({ prompts: [{ identifier: 'many', contextFiles: Array.from({ length: 25 }, () => ({ kind: 'image', mediaType: 'image/png', data: png })) }] }), /最多 24 项/);
+
+  const compiled = compilePreset({
+    prompts: [{ identifier: 'chatHistory', marker: true, role: 'user' }, ...preset.prompts],
+    prompt_order: [{ character_id: 100001, order: [
+      { identifier: 'chatHistory', enabled: true }, { identifier: 'ctx', enabled: true },
+    ] }],
+  }, [msg('u', 'user', 'hi')], { characterId: 100001 });
+  const injected = compiled.messages.find(message => message.id === 'preset:preview:ctx');
+  assert.deepEqual(injected.content.map(block => block.type), [PRESET_CONTEXT_BLOCK, PRESET_CONTEXT_BLOCK, PRESET_CONTEXT_BLOCK]);
+  assert.deepEqual(injected.content.map(block => block.index), [0, 1, 2]);
+
+  const messages = [{ id: 'm', role: 'user', content: injected.content }];
+  const seenFiles = [];
+  const admission = {
+    admitPromptContent: async parts => parts.map(part => (part.type === 'image'
+      ? { type: 'image', attachment: { attachmentId: 'img-' + seenFiles.length } } : part)),
+    admitEncodedFile: async input => { seenFiles.push(input.name); return { attachmentId: 'file-1' }; },
+  };
+  const out = await materializePresetContext({ preset: preset, messages, admission });
+  assert.equal(out.imageCount, 2);
+  assert.equal(out.fileCount, 1);
+  // Duplicate display names are harmless: the attachment service keys on content, so the name is
+  // passed through exactly as the clipboard supplied it (DSH's own semantics).
+  assert.deepEqual(seenFiles, ['image.png']);
+  // Admitted parts carry references; the display names stayed in the preset and never leak out.
+  assert.deepEqual(out.messages[0].content.map(block => block.type), ['image', 'image', 'file']);
+  assert.equal(out.messages[0].content.some(block => block.name !== undefined), false);
 });
 
 test('the forced prefill switch persists on its own and rejects junk values', async () => {

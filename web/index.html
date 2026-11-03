@@ -22,6 +22,8 @@
 .ctx-hint{margin:0;min-height:1.2em;font-size:12px;color:#8da2ae}
 .ctx-hint.error{color:#ffae9d}
 .ctx-hint.ok{color:#9edfc7}
+.ctx-hint.warn{color:#edcf8d}
+.ctx-list{display:flex;flex-direction:column;gap:8px}
 </style></head>
 <body>
 <header><div><small>DSH · PRESET ENHANCE</small><h1>预设工作台</h1></div><span id="status" role="status">正在加载</span></header>
@@ -76,12 +78,12 @@
 <div class="row"><label>位置<select id="position"><option value="0">按顺序表（相对 chatHistory）</option><option value="1">按聊天深度</option></select></label><label>深度<input id="depth" type="number" min="0" value="4"></label><label>同深度顺序<input id="priority" type="number" min="0" value="100"></label></div>
 <p id="marker-note" class="muted"></p><div id="dsh-template-controls" hidden><button id="dsh-template-reset" type="button">当前模式全部恢复默认</button><div id="dsh-template-sections"></div><details data-preset-disclosure="system-macros"><summary>动态宏与段落</summary><div id="dsh-template-macros" class="dsh-template-macros"></div></details></div><label id="content-field">提示词正文<textarea id="content" rows="19" spellcheck="false"></textarea></label>
 <section id="context-file-field" aria-labelledby="ctx-file-title">
-<div class="ctx-file-head"><strong id="ctx-file-title">上下文文件</strong><span class="muted">随本条提示词一起发送的图片或文件（可选）</span></div>
+<div class="ctx-file-head"><strong id="ctx-file-title">上下文文件</strong><span class="muted">随本条提示词一起发送的图片或文件（可选）</span><span id="ctx-file-count" class="muted"></span></div>
 <div id="ctx-preview" hidden></div>
 <div id="ctx-paste-zone" tabindex="0" aria-label="粘贴图片或拖拽文件到此处" aria-describedby="ctx-file-hint">
 <p>粘贴图片或拖拽文件到此处</p>
-<p class="ctx-paste-sub">支持 PNG / JPEG / WebP / GIF 与 PDF / TXT / JSON，单个不超过 8 MB</p>
-<div class="ctx-actions"><button type="button" id="ctx-choose-file">选择文件</button><input id="ctx-file-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif,application/pdf,text/plain,application/json" hidden></div>
+<p class="ctx-paste-sub">支持 PNG / JPEG / WebP / GIF 与 PDF / TXT / JSON，单个不超过 8 MB；可一次选择或拖入多个，最多 24 项</p>
+<div class="ctx-actions"><button type="button" id="ctx-choose-file">选择文件</button><input id="ctx-file-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif,application/pdf,text/plain,application/json" multiple hidden></div>
 </div>
 <p id="ctx-file-hint" class="ctx-hint" role="status" aria-live="polite"></p>
 </section>

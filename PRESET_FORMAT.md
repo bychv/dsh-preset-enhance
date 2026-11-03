@@ -93,16 +93,19 @@
 
 ```json
 { "identifier": "ref", "role": "user", "content": "看这张图",
-  "contextFile": { "kind": "image", "mediaType": "image/png", "data": "<base64>" } }
-
-{ "identifier": "ref", "role": "user", "content": "",
-  "contextFile": { "kind": "file", "mediaType": "application/pdf", "name": "spec.pdf", "asset": "<sha256>" } }
+  "contextFiles": [
+    { "kind": "image", "mediaType": "image/png", "data": "<base64>", "name": "ref.png" },
+    { "kind": "file", "mediaType": "application/pdf", "name": "spec.pdf", "asset": "<sha256>" }
+  ] }
 ```
+
+一条提示词可携带**多个**上下文文件（上限 24 项），按数组顺序注入。旧的单数 `contextFile` 字段仍然兼容，读取时视为只有一项。
 
 - `kind`：`image` 或 `file`
 - `mediaType`：图片限 `image/png`、`image/jpeg`、`image/webp`、`image/gif`；文件限 `application/pdf`、`text/plain`、`application/json`
 - 字节来源三选一：`data`（编辑器粘贴产生的规范 base64）、`asset`（sha256，字节随分享包 `extensions.assets` 提供）、`attachmentId`（宿主附件引用缓存）
 - 单文件上限 8 MB；图片可带 `width` / `height`，文件可带 `name`
+- **同名文件可以重复添加**：附件身份由内容寻址决定（与 DSH 自身附件语义一致），`name` 只是展示信息，重名不会冲突也不会被拒绝
 
 编译器只把该条目编译成一个**身份块**，字节在请求期才解析：插件把它们交给宿主附件服务入库，再以标准附件引用注入请求，因此官方适配器与本插件的对话补全适配器都支持，且 Files 复用沿用宿主实现。条目只有上下文文件、正文为空时也算有内容，不会被丢弃；但**带上下文文件的 assistant 条目不能作为续写前缀**，不会被识别为预填充。
 

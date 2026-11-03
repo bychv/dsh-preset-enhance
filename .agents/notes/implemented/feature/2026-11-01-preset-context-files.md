@@ -25,8 +25,8 @@ DeepSeek 带图有两条路：内联 base64（每轮重传）与 Files API 的 `
 
 ### 分层实现
 
-1. **格式**：条目新增可选 `contextFile`（`kind`/`mediaType`/`data`/`asset`/`attachmentId`/`name`/`width`/`height`），校验在 [context-files.mts](../../../../src/lib/context-files.mts)，白名单 + 8 MB 上限 + 规范 base64。
-2. **编译**：条目编译成**身份块**（`type: 'preset-context'` + `identifier`/`kind`/`mediaType`），**字节不进编译结果**，因此按会话缓存的编译不会复制二进制。只有上下文文件、正文为空的条目算有内容，不会被丢弃。
+1. **格式**：条目新增可选 `contextFiles` 数组（每项 `kind`/`mediaType`/`data`/`asset`/`attachmentId`/`name`/`width`/`height`，上限 24 项），旧的单数 `contextFile` 兼容为一元素列表。校验在 [context-files.mts](../../../../src/lib/context-files.mts)，白名单 + 8 MB 上限 + 规范 base64。**同名文件允许重复添加**：身份由宿主附件服务的内容寻址决定，`name` 只是展示信息，因此不按名去重、也不自行改名（与 DSH 自身附件语义一致）。
+2. **编译**：每个文件编译成一个**身份块**（`type: 'preset-context'` + `identifier`/`index`/`kind`/`mediaType`），**字节不进编译结果**，因此按会话缓存的编译不会复制二进制。只有上下文文件、正文为空的条目算有内容，不会被丢弃。
 3. **请求期**：`materializePresetContext` 把身份块换成标准附件引用；入库不可用时**告警并跳过该块**，不整轮失败。
 4. **预填充识别**：带上下文文件的 assistant 条目不算续写前缀（`assistantPrefix.active === false`），`lastContentRole` 返回 `other`；前缀必须是纯文本消息。
 5. **模态校验**：注入**预设图片**前解析当前路由的 `inputModalities`（统一走 `llm.resolveModelInfo`，官方 / pi-ai / 自有适配器同一条通路）。已声明且不含 `image` 时抛官方同形制错误 `MODEL_DOES_NOT_SUPPORT_IMAGES`，文案 `Model "<model>" does not support image input.`。**会话历史里已有的图片不在此列**，仍由宿主原有逻辑处理（`projectImagesForTextModel`）。

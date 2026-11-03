@@ -1,4 +1,4 @@
-import { contextFileEncoded, isPresetContextBlock } from './context-files.mjs';
+import { contextFileEncoded, contextFilesOf, isPresetContextBlock } from './context-files.mjs';
 import type { ContentBlock, HostMessage, SillyTavernPreset } from './types.mjs';
 
 /** The slice of the host attachment service this module needs. */
@@ -52,8 +52,12 @@ export async function materializePresetContext(options: MaterializeContextOption
     let skippedImages = 0;
     for (const block of blocks) {
       if (!isPresetContextBlock(block)) { parts.push(block); continue; }
-      const file = prompts.get(block.identifier)?.contextFile;
-      if (file === undefined) { warnings.push('预设条目 ' + block.identifier + ' 的上下文文件已不存在，已跳过'); continue; }
+      const files = contextFilesOf(prompts.get(block.identifier));
+      const file = files[block.index];
+      if (file === undefined) {
+        warnings.push('预设条目 ' + block.identifier + ' 的第 ' + (block.index + 1) + ' 个上下文文件已不存在，已跳过');
+        continue;
+      }
       if (file.kind !== block.kind || file.mediaType !== block.mediaType) {
         warnings.push('预设条目 ' + block.identifier + ' 的上下文文件类型已变化，已跳过');
         continue;
@@ -62,6 +66,8 @@ export async function materializePresetContext(options: MaterializeContextOption
       if (encoded === null) { warnings.push('预设条目 ' + block.identifier + ' 的上下文文件缺少字节，已跳过'); continue; }
       // Only these counters decide the model-modality check: images that were already in the
       // conversation keep the host's own handling.
+      // Identity is content-addressed by the attachment service, so a duplicate display name is
+      // harmless and is passed through untouched, exactly like a user attachment.
       if (file.kind === 'file') {
         fileCount += 1;
         const ref = await admitFile(encoded, file.name, admission, warnings, block.identifier);
