@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -404,3 +405,138 @@ test('prefill target belongs to the preset, defaults to reasoning and survives s
   assert.equal(decodePresetDocument(packet()).preset.dsh_prefill_target,undefined,'legacy presets need no rewrite');
   assert.throws(()=>decodePresetDocument({...prompt(),dsh_prefill_target:'other'}),/dsh_prefill_target/);
 });
+
+/* ------------------------------------------- context files as package assets */
+
+const PNG = Buffer.from('png-bytes-for-package').toString('base64');
+const TXT = Buffer.from('plain text').toString('base64');
+const PDF = Buffer.from('pdf-bytes').toString('base64');
+const hashOf = data => createHash('sha256').update(Buffer.from(data, 'base64')).digest('hex');
+const PNG_HASH = hashOf(PNG), TXT_HASH = hashOf(TXT), PDF_HASH = hashOf(PDF);
+
+/** A preset whose 'ref' prompt carries inline images/files plus an attachment-only entry. */
+const contextPreset = () => {
+  const data = prompt();
+  data.prompts.push({
+    identifier: 'ref', name: '参考图与文件', role: 'user', content: '看图',
+    contextFiles: [
+      { kind: 'image', mediaType: 'image/png', data: PNG, name: 'a.png', width: 2, height: 3 },
+      { kind: 'file', mediaType: 'text/plain', data: TXT, name: 'note.txt' },
+      { kind: 'image', mediaType: 'image/png', data: PNG, name: 'copy.png' },
+      { kind: 'file', mediaType: 'application/json', attachmentId: 'att-1', name: 'live.json' },
+    ],
+  });
+  return data;
+};
+const contextFilesOfPrompt = (presetData, identifier = 'ref') =>
+  presetData.prompts.find(item => item.identifier === identifier).contextFiles;
+/** A package that already ships the pdf bytes, for entries that only reference them. */
+const packageWithPdfAsset = data => ({
+  format: 'dsh-preset-enhance',
+  version: 1,
+  metadata: {},
+  preset: { format: 'sillytavern', data },
+  extensions: {
+    'external-plugin': { opaque: true },
+    assets: { [PDF_HASH]: { mediaType: 'application/pdf', name: 'doc.pdf', data: PDF, future: { kept: true } } },
+  },
+});
+
+test('export moves inline context bytes into package assets and leaves references', () => {
+  const data = contextPreset();
+  const document = encodePresetPackage({ name: 'With files', preset: data }, {});
+  const files = contextFilesOfPrompt(document.preset.data);
+  assert.equal(Object.hasOwn(files[0], 'data'), false, 'inline bytes leave the preset snapshot');
+  assert.deepEqual(files[0], { kind: 'image', mediaType: 'image/png', name: 'a.png', width: 2, height: 3, asset: PNG_HASH });
+  assert.deepEqual(files[1], { kind: 'file', mediaType: 'text/plain', name: 'note.txt', asset: TXT_HASH });
+  assert.equal(files[2].asset, PNG_HASH, 'same bytes share one asset id');
+  assert.deepEqual(files[3], { kind: 'file', mediaType: 'application/json', attachmentId: 'att-1', name: 'live.json' });
+  assert.deepEqual(document.extensions.assets, {
+    [PNG_HASH]: { mediaType: 'image/png', name: 'a.png', data: PNG },
+    [TXT_HASH]: { mediaType: 'text/plain', name: 'note.txt', data: TXT },
+  }, 'each distinct byte sequence is written once');
+  assert.equal(validatePresetPackage(document), document);
+  // Exporting works on a copy: the record keeps its inline bytes for the editor and request path.
+  assert.equal(contextFilesOfPrompt(data)[0].data, PNG);
+  assert.equal(contextFilesOfPrompt(data)[0].asset, undefined);
+  for (const file of contextFilesOfPrompt(document.preset.data)) assert.equal(Object.hasOwn(file, 'data'), false);
+});
+
+test('a legacy single contextFile is converged the same way', () => {
+  const data = prompt();
+  data.prompts.push({ identifier: 'single', role: 'user', contextFile: { kind: 'image', mediaType: 'image/png', data: PNG, name: 'old.png' } });
+  const document = encodePresetPackage({ name: 'Legacy single', preset: data }, {});
+  const single = document.preset.data.prompts[1].contextFile;
+  assert.equal(single.asset, PNG_HASH);
+  assert.equal(Object.hasOwn(single, 'data'), false);
+  assert.deepEqual(document.extensions.assets[PNG_HASH], { mediaType: 'image/png', name: 'old.png', data: PNG });
+});
+
+test('exporting the same package twice is idempotent, including after a round trip', () => {
+  const record = { name: 'Idempotent', preset: contextPreset() };
+  const first = encodePresetPackage(record, {});
+  assert.deepEqual(encodePresetPackage(record, {}), first, 'same record exports identically');
+  const decoded = decodePresetDocument(JSON.parse(JSON.stringify(first)));
+  assert.deepEqual(encodePresetPackage(decoded, {}), first, 'import then export reproduces the package');
+});
+
+test('entries without bytes keep their asset references and shipped assets survive', () => {
+  const data = contextPreset();
+  contextFilesOfPrompt(data).push({ kind: 'file', mediaType: 'application/pdf', asset: PDF_HASH, name: 'doc.pdf' });
+  const document = encodePresetPackage({ name: 'Mixed', preset: data, sharePackage: packageWithPdfAsset(structuredClone(data)) }, {});
+  assert.deepEqual(contextFilesOfPrompt(document.preset.data)[4], { kind: 'file', mediaType: 'application/pdf', asset: PDF_HASH, name: 'doc.pdf' });
+  assert.deepEqual(document.extensions.assets[PDF_HASH], {
+    mediaType: 'application/pdf', name: 'doc.pdf', data: PDF, future: { kept: true },
+  }, 'existing entries are kept as-is');
+  assert.deepEqual(document.extensions['external-plugin'], { opaque: true });
+  assert.equal(Object.keys(document.extensions.assets).length, 3);
+});
+
+test('import keeps asset references and never expands bytes back into the preset', () => {
+  const document = encodePresetPackage({ name: 'Import', preset: contextPreset() }, {});
+  const decoded = decodePresetDocument(JSON.parse(JSON.stringify(document)));
+  const files = contextFilesOfPrompt(decoded.preset);
+  assert.equal(files[0].asset, PNG_HASH);
+  assert.equal(Object.hasOwn(files[0], 'data'), false);
+  assert.equal(files[0].width, 2);
+  assert.equal(decoded.sharePackage.extensions.assets[PNG_HASH].data, PNG, 'the bytes stay in the package');
+  assert.equal(decoded.sharePackage.extensions.assets[TXT_HASH].data, TXT);
+});
+
+test('malformed extensions.assets are refused with a clear error', () => {
+  const base = encodePresetPackage({ name: 'Bad assets', preset: contextPreset() }, {});
+  const withAssets = assets => ({ ...base, extensions: { assets } });
+  assert.throws(() => validatePresetPackage(withAssets([])), /extensions\.assets/);
+  assert.throws(() => validatePresetPackage({ ...base, extensions: { assets: 'x' } }), /extensions\.assets/);
+  assert.throws(() => validatePresetPackage(withAssets({ [PNG_HASH]: 'x' })), /extensions\.assets\[/);
+  assert.throws(() => validatePresetPackage(withAssets({ [PNG_HASH]: { data: PNG } })), /mediaType/);
+  assert.throws(() => validatePresetPackage(withAssets({ [PNG_HASH]: { mediaType: 'image/png', data: 'not base64!' } })), /规范 base64/);
+  assert.throws(() => validatePresetPackage(withAssets({ [PNG_HASH]: { mediaType: 'image/png' } })), /规范 base64/);
+  assert.throws(() => validatePresetPackage(withAssets({ [PNG_HASH]: { mediaType: 'image/png', data: PNG, name: '' } })), /name/);
+});
+
+test('a context file that references missing asset bytes is refused on import', () => {
+  const base = encodePresetPackage({ name: 'Dangling', preset: contextPreset() }, {});
+  const { [TXT_HASH]: dropped, ...remaining } = base.extensions.assets;
+  assert.ok(dropped);
+  assert.throws(() => validatePresetPackage({ ...base, extensions: { ...base.extensions, assets: remaining } }), /缺少资产/);
+  assert.throws(() => validatePresetPackage({ ...base, extensions: {} }), /缺少资产/);
+  assert.throws(() => decodePresetDocument({ ...base, extensions: {} }), /缺少资产/);
+  const dangling = packageWithPdfAsset(prompt());
+  delete dangling.extensions.assets[PDF_HASH];
+  dangling.preset.data.prompts.push({ identifier: 'p', role: 'user', contextFile: { kind: 'file', mediaType: 'application/pdf', asset: PDF_HASH } });
+  assert.throws(() => decodePresetDocument(JSON.parse(JSON.stringify(dangling))), /缺少资产/);
+});
+
+test('packages without context files export and import unchanged', () => {
+  const source = packet();
+  const original = structuredClone(source);
+  const record = decodePresetDocument(structuredClone(source));
+  const saved = encodePresetPackage(record, {});
+  assert.deepEqual(saved, original);
+  assert.deepEqual(saved.extensions, {});
+  assert.equal(Object.hasOwn(saved.extensions, 'assets'), false, 'no empty assets container is created');
+  assert.equal(validatePresetPackage(original), original);
+  assert.deepEqual(decodePresetDocument(original).preset, prompt());
+});
+

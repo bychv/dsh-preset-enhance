@@ -1,4 +1,5 @@
 import { OUTPUT_EXTRACTION_PROMPT_TEMPLATE } from './output-extractor.mjs';
+import { contextFileBytes, contextFileHash, contextFilesOf, decodeContextBase64 } from './context-files.mjs';
 import { validatePreset } from './preset.mjs';
 import { validateToolsSection } from './tool-presets.mjs';
 import type {
@@ -10,6 +11,80 @@ export const PRESET_PACKAGE_VERSION = 1;
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
 const emptyToolsSection = (): ToolsSection => ({ version: 1, activePresetId: null, presets: [], groups: [] });
+
+/** One share-package asset: the encoded bytes of a context file, keyed by sha256. */
+interface PresetPackageAsset {
+  mediaType: string;
+  name?: string;
+  data: string;
+}
+
+/** Canonical base64 check: decodeContextBase64 is lenient, so re-encoding proves the form. */
+function isCanonicalBase64(value: unknown): value is string {
+  if (typeof value !== 'string' || !value) return false;
+  return contextFileBytes(decodeContextBase64(value)) === value;
+}
+
+/**
+ * Validate the extensions.assets container and the references that point at it.
+ *
+ * Bytes stay in the package instead of being expanded back into the preset, so the package
+ * must be self-contained: a reference without bytes would only fail later in the request
+ * path, after the user already imported the preset.
+ */
+function validatePackageAssets(extensions: unknown, preset: SillyTavernPreset): void {
+  let assets: Record<string, unknown> | undefined;
+  if (isRecord(extensions) && extensions.assets !== undefined) {
+    if (!isRecord(extensions.assets)) throw new Error('预设包 extensions.assets 必须为对象');
+    assets = extensions.assets;
+    for (const [hash, value] of Object.entries(assets)) {
+      const label = '预设包 extensions.assets[' + hash + ']';
+      if (!isRecord(value)) throw new Error(label + ' 必须为对象');
+      if (typeof value.mediaType !== 'string' || !value.mediaType) throw new Error(label + '.mediaType 必须为非空文本');
+      if (!isCanonicalBase64(value.data)) throw new Error(label + '.data 必须是规范 base64');
+      if (value.name !== undefined && (typeof value.name !== 'string' || !value.name)) throw new Error(label + '.name 必须为非空文本');
+    }
+  }
+  for (const prompt of preset.prompts) {
+    for (const file of contextFilesOf(prompt)) {
+      if (typeof file.asset !== 'string') continue;
+      if (assets === undefined || !Object.hasOwn(assets, file.asset)) {
+        throw new Error('预设包缺少资产：' + file.asset + '（提示词 ' + prompt.identifier + ' 的上下文文件）');
+      }
+    }
+  }
+}
+
+/**
+ * Replace inline contextFiles[].data with share-package assets.
+ *
+ * The preset snapshot keeps only the asset reference; the encoded bytes move to
+ * extensions.assets[sha256], written once per distinct byte sequence. Entries that carry no
+ * bytes (asset-only / attachmentId-only) are left untouched, which keeps re-export idempotent.
+ */
+function convergeContextAssets(document: PresetPackageDocument): void {
+  const preset = document.preset?.data;
+  if (!preset) return;
+  const collected: Record<string, PresetPackageAsset> = {};
+  for (const prompt of preset.prompts) {
+    for (const file of contextFilesOf(prompt)) {
+      if (typeof file.data !== 'string' || !file.data) continue;
+      const hash = contextFileHash(decodeContextBase64(file.data));
+      if (!Object.hasOwn(collected, hash)) {
+        collected[hash] = { mediaType: file.mediaType, ...(file.name ? { name: file.name } : {}), data: file.data };
+      }
+      delete file.data;
+      // New bytes win when this entry pointed at another asset before.
+      file.asset = hash;
+    }
+  }
+  if (!Object.keys(collected).length) return;
+  const extensions = document.extensions;
+  // A malformed container is reported by validatePresetPackage right after this step.
+  if (extensions !== undefined && !isRecord(extensions)) return;
+  const existing = extensions !== undefined && isRecord(extensions.assets) ? extensions.assets : {};
+  document.extensions = { ...(extensions ?? {}), assets: { ...existing, ...collected } };
+}
 
 function validatePrefill(prefill: unknown): void {
   if (prefill === null || prefill === undefined) return;
@@ -62,12 +137,13 @@ export function validatePresetPackage(document: unknown): PresetPackageDocument 
   if (!isRecord(document.preset) || document.preset.format !== 'sillytavern') {
     throw new Error('预设包 preset.format 必须为 sillytavern');
   }
-  validatePreset(document.preset.data);
+  const preset = validatePreset(document.preset.data);
   if (document.metadata !== undefined && !isRecord(document.metadata)) throw new Error('预设包 metadata 必须为对象');
   if (document.metadata?.name !== undefined && typeof document.metadata.name !== 'string') throw new Error('预设包名称必须为文本');
   validatePrefill(document.prefill);
   if (document.tools !== undefined) validateToolsPackage(document.tools);
   if (document.extensions !== undefined && !isRecord(document.extensions)) throw new Error('预设包 extensions 必须为对象');
+  validatePackageAssets(document.extensions, preset);
   return document as PresetPackageDocument;
 }
 
@@ -125,6 +201,8 @@ export function encodePresetPackage(record: PresetRecord, state: PresetState, to
     validateToolsPackage(tools);
     document.tools = structuredClone(tools) as ToolsSection;
   }
+  // Inline context-file bytes become package assets, so the exported preset carries references.
+  convergeContextAssets(document);
   return validatePresetPackage(document);
 }
 

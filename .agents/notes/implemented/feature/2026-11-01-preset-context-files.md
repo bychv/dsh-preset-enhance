@@ -51,7 +51,7 @@ DeepSeek 带图有两条路：内联 base64（每轮重传）与 Files API 的 `
 未执行 / 未覆盖（明确缺口）：
 
 - **未在真实 GUI 手工点验**粘贴与预览观感。
-- **未做分享包资产收敛**：`extensions.assets` 的导出（`data` → `asset` 去重）与导入迁移尚未实现；`asset` 来源目前只有宿主侧解析路径，编辑器不产出。
+
 
 - **无双适配器真实请求验证**：`inputModalities` 判定与引用注入均只经单元测试与源码核对，未在沙盒对官方/自有适配器各发一次带图请求。
 - 编辑器在纯文本模型下的**非致命预检提示**（提案验收第 16 条）未做。
@@ -61,6 +61,7 @@ DeepSeek 带图有两条路：内联 base64（每轮重传）与 Files API 的 `
 - **两个编辑器都可编辑**：工作台在提示词编辑区，SPreset 在 INSPECTOR 的「内容」标签页；都支持粘贴/拖拽/选择、一次多个、逐项移除、24 项与 8 MB 校验、同名重复粘贴。
 - **资源库不再丢图**：`promptToLibraryShape` / `libraryToEntryShape` 与条目插入路径都携带 `contextFiles`，宿主的 `saveLibraryEntry` 也建模该字段（部分保存保留原值，空数组删除字段，非法值拒绝保存）。
 - **SPreset 加载即迁移**旧单数字段，与工作台的 `loadDraft` 一致，文件形状从此收敛为数组。
+- **分享包资产收敛**：导出时把带 `data` 的上下文文件按 sha256 写入 `extensions.assets`（同字节去重）并只用 `asset` 引用；导入校验资产形状与引用完整性，但**不把字节展开回 `preset.data`**——字节只留在 `sharePackage.extensions.assets`，请求期由 `presetShareAssets` 读取。已知取舍：不做陈旧资产清理、保留 `attachmentId`。
 - **内联字节兜底**：入库不可用时，自有适配器仍能发送预设图片——材料化会给出 `preset:<sha256>` 的内容寻址身份并把 base64 挂在块上，`buildRequestImages` 据此合成 `RequestImageAttachment`（`variantId = preset-<hash>`），后续上传与跨轮复用仍走 `DeepSeekFileStore` / `RequestFiles`。官方适配器没有这条路径，仍按降级阶梯告警跳过。
 - **预设保存加版本校验**：`save` 动作在调用方给出 `revision` 时拒绝过期写入，两个编辑器都带该字段；工作台遇冲突刷新后重试，SPreset 同样重试一次。此前两个编辑器可以互相静默覆盖。
 - **预览曾被 CSP 拦掉**：页面 `content-security-policy` 只有 `default-src 'self'`，`<img src="data:…">` 不可见；已加 `img-src 'self' data:`，并把工作台的内联 `<style>` 移入 `editor.css`（`style-src 'self'` 同样会拦截内联样式）。
