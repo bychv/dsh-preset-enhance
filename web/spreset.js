@@ -613,11 +613,24 @@ function libraryToEntryShape(entry) {
     forbidOverrides: entry.forbidOverrides === true,
   };
 }
-/* ------------------------------------------------------ 上下文文件（只读预览） */
+/* ------------------------------------------------------ 上下文文件（编辑） */
 
-// 预设条目可以携带多个上下文文件（图片/文件）。本页只展示，不提供粘贴、校验或编辑：
-// 添加与移除以工作台为准，避免两个页面同时写同一份预设。
-// 字节数从 base64 长度反推，避免为了显示再解码一遍大图。
+// 预设条目可以携带多个上下文文件（图片/文件），行为与工作台一致：
+// 粘贴/拖拽/选择文件一次可带入多个，逐项校验、逐项移除，上限 24 项、单项 ≤ 8 MB。
+// 数据形状由宿主校验，这里只做编辑期拦截；字节数从 base64 长度反推，避免为了显示再解码一遍大图。
+
+const CONTEXT_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+const CONTEXT_FILE_TYPES = ['application/pdf', 'text/plain', 'application/json'];
+const CONTEXT_MAX_BYTES = 8 * 1024 * 1024;
+const CONTEXT_MAX_ITEMS = 24;
+const CONTEXT_TYPE_BY_EXTENSION = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif',
+  pdf: 'application/pdf', txt: 'text/plain', json: 'application/json',
+};
+// 读取是异步的：切换条目或又开一批后，晚到的结果不能写进当前草稿。
+let contextFileToken = 0;
+// 最近一次渲染的区块：写入后就地刷新列表与提示，不整块重建 INSPECTOR。
+let contextFileBlock = null;
 
 function formatBytes(bytes) {
   if (!Number.isFinite(bytes) || bytes < 0) return '';
@@ -645,6 +658,12 @@ function contextFileItems(source) {
   if (Array.isArray(source.contextFiles) && source.contextFiles.length) return source.contextFiles;
   return source.contextFile ? [source.contextFile] : [];
 }
+/** 写路径：旧的单数 contextFile 先迁移成数组，保证只留一份数据。 */
+function contextFileEditableList(source) {
+  if (!Array.isArray(source.contextFiles)) source.contextFiles = contextFileItems(source);
+  delete source.contextFile;
+  return source.contextFiles;
+}
 /** 链路徽标：单一项标「图/文件」，多项补数量；图片与文件混排时用「上下文」。 */
 function contextFileBadgeLabel(files) {
   if (files.length === 1) return files[0]?.kind === 'image' ? '图' : '文件';
@@ -652,19 +671,50 @@ function contextFileBadgeLabel(files) {
   const kind = images === files.length ? '图' : images === 0 ? '文件' : '上下文';
   return kind + ' ×' + files.length;
 }
-/** 只读的「上下文文件」字段；模板条目或没有文件时返回 null。 */
-function contextFileField(source, isTemplate) {
-  const files = isTemplate ? [] : contextFileItems(source);
-  if (!files.length) return null;
-  const wrap = el('div', 'field');
-  wrap.append(el('span', '', '上下文文件'));
-  const list = el('div', 'context-file-list');
-  files.forEach(file => list.append(contextFileItem(file)));
-  wrap.append(list);
-  wrap.append(el('span', 'muted', '只读预览；添加或移除请在工作台完成'));
-  return wrap;
+function contextFileMediaType(file) {
+  const declared = String(file?.type ?? '').trim().toLowerCase();
+  const normalized = declared === 'image/jpg' ? 'image/jpeg' : declared;
+  if (CONTEXT_IMAGE_TYPES.includes(normalized) || CONTEXT_FILE_TYPES.includes(normalized)) return normalized;
+  // 部分系统从磁盘选文件时 MIME 为空，按扩展名兜底；浏览器明确给出不支持的类型时直接拒绝。
+  if (declared) return '';
+  const extension = String(file?.name ?? '').split('.').pop()?.toLowerCase() ?? '';
+  return CONTEXT_TYPE_BY_EXTENSION[extension] ?? '';
 }
-function contextFileItem(file) {
+function contextFileBase64(dataUrl) {
+  const comma = dataUrl.indexOf(',');
+  const base64 = comma < 0 ? '' : dataUrl.slice(comma + 1);
+  if (!base64 || base64.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(base64)) throw new Error('读取文件失败：编码无效，未写入');
+  return base64;
+}
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ''));
+    reader.onerror = () => reject(new Error('读取文件失败，未写入'));
+    reader.readAsDataURL(file);
+  });
+}
+function readImageSize(dataUrl) {
+  return new Promise(resolve => {
+    try {
+      const image = new Image();
+      image.onload = () => resolve({ width: image.naturalWidth || image.width || 0, height: image.naturalHeight || image.height || 0 });
+      image.onerror = () => resolve(null);
+      image.src = dataUrl;
+    } catch { resolve(null); }
+  });
+}
+function contextFileHint(node, text = '', kind = '') {
+  if (!node) return;
+  node.textContent = text;
+  node.className = 'context-file-hint' + (kind ? ' ' + kind : '');
+}
+/** 当前的提示词条目；切换条目后用于丢弃晚到的批量读取结果。 */
+function inspectorPrompt() {
+  const target = inspectorTarget();
+  return target && target.kind === 'chain' ? target.prompt : null;
+}
+function contextFileCardNode(file, index, onRemove) {
   const box = el('div', 'context-file');
   if (file?.kind === 'image' && typeof file.data === 'string' && file.data) {
     const frame = el('div', 'context-file-preview');
@@ -683,12 +733,194 @@ function contextFileItem(file) {
   info.append(el('strong', 'context-file-name', file?.name || (file?.kind === 'image' ? '未命名图片' : '未命名文件')));
   info.append(el('span', 'muted', contextFileMeta(file ?? {})));
   box.append(info);
+  const remove = el('button', 'context-file-remove', '移除');
+  remove.type = 'button';
+  remove.title = '移除这一项上下文文件';
+  remove.setAttribute('aria-label', '移除上下文文件 ' + (file?.name || index + 1));
+  remove.onclick = event => { event?.stopPropagation?.(); onRemove(); };
+  box.append(remove);
   return box;
+}
+function contextPasteFiles(event) {
+  const clipboard = event.clipboardData ?? null;
+  if (!clipboard) return [];
+  const files = [];
+  const items = clipboard.items;
+  for (let index = 0; items && index < items.length; index++) {
+    const item = items[index];
+    if (item?.kind !== 'file') continue;
+    const file = item.getAsFile?.();
+    if (file) files.push(file);
+  }
+  if (files.length) return files;
+  // 有些拖放/粘贴只填 files，不填 items。
+  return Array.from(clipboard.files ?? []);
+}
+async function addContextFiles(source, files, hint) {
+  const incoming = Array.from(files ?? []).filter(Boolean);
+  if (!source || !incoming.length) { contextFileHint(hint, '没有读取到文件，未写入', 'error'); return; }
+  const identifier = source.identifier;
+  const token = ++contextFileToken;
+  const existing = contextFileItems(source).length;
+  const accepted = [], skipped = [];
+  for (const file of incoming) {
+    const label = String(file.name ?? '').trim() || '未命名文件';
+    const mediaType = contextFileMediaType(file);
+    if (!mediaType) { skipped.push(label + '：不支持的类型'); continue; }
+    if (!(file.size > 0)) { skipped.push(label + '：文件为空'); continue; }
+    if (file.size > CONTEXT_MAX_BYTES) {
+      skipped.push(label + '：超过 ' + formatBytes(CONTEXT_MAX_BYTES) + ' 上限');
+      continue;
+    }
+    if (existing + accepted.length >= CONTEXT_MAX_ITEMS) {
+      skipped.push(label + '：超过 ' + CONTEXT_MAX_ITEMS + ' 项上限');
+      continue;
+    }
+    accepted.push({ file, mediaType });
+  }
+  if (!accepted.length) { contextFileHint(hint, '没有可附加的文件：' + skipped.join('；'), 'error'); return; }
+  contextFileHint(hint, accepted.length > 1 ? '正在读取 ' + accepted.length + ' 个文件…' : '正在读取文件…');
+  // 批量内逐个读取：一个失败只跳过它自己，其余照常落地。
+  const results = await Promise.all(accepted.map(async ({ file, mediaType }) => {
+    const label = String(file.name ?? '').trim() || '未命名文件';
+    try {
+      const base64 = contextFileBase64(await readFileAsDataUrl(file));
+      const entry = { kind: CONTEXT_IMAGE_TYPES.includes(mediaType) ? 'image' : 'file', mediaType, data: base64 };
+      const name = String(file.name ?? '').trim().slice(0, 200);
+      if (name) entry.name = name;
+      if (entry.kind === 'image') {
+        const size = await readImageSize('data:' + mediaType + ';base64,' + base64);
+        // 宿主校验要求正整数且不超过 100000：读不到或不合法就不写，宁缺勿错。
+        if (size && Number.isInteger(size.width) && Number.isInteger(size.height) &&
+          size.width > 0 && size.height > 0 && size.width <= 100000 && size.height <= 100000) {
+          entry.width = size.width;
+          entry.height = size.height;
+        }
+      }
+      return { entry };
+    } catch (error) {
+      return { skipped: label + '：' + (error?.message ?? '读取失败') };
+    }
+  }));
+  // 期间切换了条目或开了新的一批：整批丢弃，绝不写进别的条目。
+  const live = inspectorPrompt();
+  if (token !== contextFileToken || !live || live !== source || live.identifier !== identifier) return;
+  const written = results.filter(result => result.entry).map(result => result.entry);
+  const failed = results.filter(result => result.skipped).map(result => result.skipped);
+  if (!written.length) { contextFileHint(hint, '读取失败，未写入：' + failed.join('；'), 'error'); return; }
+  contextFileEditableList(source).push(...written);
+  markPreset();
+  if (contextFileBlock?.source === source) contextFileBlock.refresh();
+  else renderInspector();
+  const trouble = skipped.concat(failed);
+  const hintNode = contextFileBlock?.source === source ? contextFileBlock.hint : hint;
+  contextFileHint(hintNode, '已附加 ' + written.length + ' 项' + (trouble.length ? ' · 跳过 ' + trouble.length + ' 项：' + trouble.join('；') : ''),
+    trouble.length ? 'warn' : 'ok');
+}
+/** 可编辑的「上下文文件」区块：列表 + 粘贴/拖拽/选择文件入口。 */
+function contextFileEditor(source, textarea) {
+  const wrap = el('div', 'field context-file-field');
+  const head = el('div', 'context-file-head');
+  head.append(el('span', '', '上下文文件'));
+  const count = el('span', 'context-file-count');
+  head.append(count);
+  wrap.append(head);
+  const list = el('div', 'context-file-list');
+  wrap.append(list);
+  const hint = el('p', 'context-file-hint');
+  hint.setAttribute('role', 'status');
+  hint.setAttribute('aria-live', 'polite');
+  const zone = el('div', 'context-paste');
+  zone.tabIndex = 0;
+  zone.setAttribute('aria-label', '粘贴图片或拖拽文件到此处');
+  zone.append(el('p', '', '粘贴图片或拖拽文件到此处'));
+  zone.append(el('p', 'context-paste-hint',
+    '支持 PNG / JPEG / WebP / GIF 与 PDF / TXT / JSON，单个不超过 8 MB，最多 ' + CONTEXT_MAX_ITEMS + ' 项；可一次选择或拖入多个'));
+  const actions = el('div', 'context-paste-actions');
+  const input = el('input');
+  input.type = 'file';
+  input.accept = 'image/png,image/jpeg,image/webp,image/gif,application/pdf,text/plain,application/json';
+  input.multiple = true;
+  input.hidden = true;
+  actions.append(button('选择文件', '选择图片或文件（可多选）', () => input.click?.()), input);
+  zone.append(actions);
+  wrap.append(zone);
+  wrap.append(hint);
+
+  const refresh = () => {
+    const files = contextFileItems(source);
+    count.textContent = files.length ? files.length + ' / ' + CONTEXT_MAX_ITEMS + ' 项' : '';
+    list.replaceChildren();
+    if (!files.length) {
+      list.append(el('p', 'context-file-empty', '尚未附加上下文文件'));
+      return;
+    }
+    files.forEach((file, index) => list.append(contextFileCardNode(file, index, () => removeAt(index))));
+  };
+  const removeAt = index => {
+    const files = contextFileEditableList(source);
+    if (index < 0 || index >= files.length) return;
+    files.splice(index, 1);
+    // 清空时连数组一起删掉，避免预设里留下空字段。
+    if (!files.length) delete source.contextFiles;
+    markPreset();
+    refresh();
+    contextFileHint(hint, '已移除该项上下文文件');
+  };
+  const addFiles = files => addContextFiles(source, files, hint);
+  const paste = event => {
+    const files = contextPasteFiles(event);
+    if (!files.length) {
+      // 纯文本粘贴保持原样（正文照常落进 textarea），只在拖拽区里补一句为什么没反应。
+      if (event.currentTarget === zone) contextFileHint(hint, '只支持图片或文件；正文请粘贴到上方输入框', 'error');
+      return;
+    }
+    event.preventDefault();
+    void addFiles(files);
+  };
+  zone.addEventListener('paste', paste);
+  textarea?.addEventListener?.('paste', paste);
+  input.onchange = () => {
+    const files = Array.from(input.files ?? []);
+    // 清空后同一个文件再次选择也能触发 change。
+    input.value = '';
+    if (files.length) void addFiles(files);
+  };
+  zone.addEventListener('click', event => {
+    if (event.target?.closest?.('button, input')) return;
+    input.click?.();
+  });
+  zone.addEventListener('keydown', event => {
+    if (event.target !== zone || (event.key !== 'Enter' && event.key !== ' ')) return;
+    event.preventDefault();
+    input.click?.();
+  });
+  zone.addEventListener('dragover', event => {
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+    zone.classList.add('dragging');
+  });
+  zone.addEventListener('dragleave', event => {
+    if (!zone.contains(event.relatedTarget)) zone.classList.remove('dragging');
+  });
+  zone.addEventListener('drop', event => {
+    event.preventDefault();
+    zone.classList.remove('dragging');
+    const files = Array.from(event.dataTransfer?.files ?? []);
+    if (!files.length) { contextFileHint(hint, '没有识别到文件，可以试试直接粘贴图片', 'error'); return; }
+    void addFiles(files);
+  });
+
+  refresh();
+  contextFileBlock = { source, refresh, hint };
+  return wrap;
 }
 
 function renderInspector() {
   const body = $('inspector-body');
   body.replaceChildren();
+  // 每个区块重新渲染后旧引用失效：晚到的批量读取结果只写数据，不再更新已卸载的节点。
+  contextFileBlock = null;
   const target = inspectorTarget();
   if (!target) {
     $('inspector-title').textContent = 'INSPECTOR';
@@ -859,8 +1091,8 @@ function renderInspector() {
   body.append(tabRow);
   if (inspectorTab === '内容') {
     body.append(contentField, counter);
-    // 上下文文件是正文的一部分，只读展示（编辑统一在工作台）。
-    const contextFile = contextFileField(source, isTemplate);
+    // 上下文文件与工作台同一套编辑语义：粘贴/拖拽/选择文件，逐项校验与移除。
+    const contextFile = isTemplate ? null : contextFileEditor(source, textarea);
     if (contextFile) body.append(contextFile);
   }
   else if (inspectorTab === '注入') body.append(isTemplate ? templateInjectionTab(target.entry) : injectionTab(source));
@@ -1020,7 +1252,17 @@ async function performSavePreset() {
   // mirrorSPreset makes the server project extensions.SPreset into the SPresetSettings prompt
   // (the reference editor's "已与酒馆同步"); extensions.SPreset stays the source of truth.
   const version = draftVersion, savedId = presetId, savedName = presetName, snapshot = structuredClone(preset);
-  const result = await api({ action: 'save', revision: state.revision, id: savedId, name: savedName, preset: snapshot, mirrorSPreset: true });
+  const send = () => api({ action: 'save', revision: state.revision, id: savedId, name: savedName, preset: snapshot, mirrorSPreset: true });
+  let result;
+  try {
+    result = await send();
+  } catch (error) {
+    // Another window committed first. Refresh the revision and keep this editor's explicit save,
+    // the same bargain the workbench offers.
+    if (!/预设已被其他窗口更新/u.test(String(error?.message ?? ''))) throw error;
+    state.revision = (await api()).revision;
+    result = await send();
+  }
   state.revision = Number.isInteger(result.revision) ? result.revision : state.revision + 1;
   if (result.id) {
     presetId = result.id;
@@ -1119,6 +1361,11 @@ $('tab-extras').onclick = guard(async () => {
 window.addEventListener('beforeunload', event => {
   if (presetDirty || templateDirty) { event.preventDefault(); event.returnValue = ''; }
 });
+
+// 拖偏到页面其他位置时浏览器会直接打开文件，丢掉整份未保存草稿：只拦文件拖放。
+const isFileDrag = event => Array.from(event.dataTransfer?.types ?? []).includes('Files');
+document.addEventListener('dragover', event => { if (isFileDrag(event)) event.preventDefault(); });
+document.addEventListener('drop', event => { if (isFileDrag(event)) event.preventDefault(); });
 
 async function boot() {
   try {
