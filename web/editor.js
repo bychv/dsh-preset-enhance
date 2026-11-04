@@ -1924,6 +1924,7 @@ function contextFileCard(file, index) {
   remove.setAttribute('aria-label', '移除上下文文件 ' + (file?.name || index + 1));
   remove.onclick = () => removeContextFileAt(index);
   card.append(media, info, remove);
+  globalThis.enhanceContextAttachment?.(card);
   return card;
 }
 function removeContextFileAt(index) {

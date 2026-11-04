@@ -84,6 +84,7 @@ try {
   for (const file of ['workbench-activity.js', 'request-events.js', 'display-availability.js', 'regex-editor.js', 'request-preview.js', 'disclosures.js', 'scroll-state.js', 'spreset-tools.js', 'dsh-template-editor.js']) {
     await emit(join(browser, 'src', 'client', file), join(root, 'web', file));
   }
+  await writeFile(join(root, 'web', 'context-attachments.js'), (await readFile(join(browser, 'src', 'client', 'context-attachments.js'), 'utf8')).replace(/^export \{\};?\s*$/gm, ''));
   const dshEditor = join(root, 'web', 'dsh-template-editor.js');
   await writeFile(dshEditor, (await readFile(dshEditor, 'utf8')).replaceAll("'../lib/", "'./regex/"));
   await writeFile(join(root, 'client.js'), (await readFile(join(browser, 'src', 'client', 'entry.js'), 'utf8')).replace(/^export \{\};?\s*$/gm, ''));

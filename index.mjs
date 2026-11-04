@@ -536,6 +536,8 @@ export async function apply(ctx, config = {}) {
         [`${BASE}/scroll-state.js`, ['web/scroll-state.js', 'text/javascript']],
         [`${BASE}/editor.js`, ['web/editor.js', 'text/javascript']],
         [`${BASE}/tool-labels.js`, ['web/tool-labels.js', 'text/javascript']],
+        [`${BASE}/context-attachments.js`, ['web/context-attachments.js', 'text/javascript']],
+        [`${BASE}/context-attachments.css`, ['web/context-attachments.css', 'text/css']],
         [`${BASE}/editor.css`, ['web/editor.css', 'text/css']],
         // SPreset editor: its own page, script and stylesheet. The page URL stays /editor
         // because the workbench's own script already owns /editor.js.
