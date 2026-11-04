@@ -160,7 +160,8 @@ test('workbench drops a late attachment batch after switching presets (race guar
 
 test('workbench enforces the total byte budget and recovers after removal', async () => {
   const ui = workbench();
-  const big = 'A'.repeat(16 * 1024 * 1024); // 16 MiB base64 -> 12 MiB decoded
+  // 预算按 base64 编码后的字符数计：16 MiB 的 data 就是 16 MiB 预算（解码后只有 12 MiB）。
+  const big = 'A'.repeat(16 * 1024 * 1024);
   ui.open([{ id: 'A', name: 'A', preset: { prompts: [
     { identifier: 'chatHistory', marker: true, role: 'user', content: '' },
     { identifier: 'main', role: 'user', content: 'x', contextFiles: [
@@ -168,26 +169,26 @@ test('workbench enforces the total byte budget and recovers after removal', asyn
     ] },
   ] } }], 'A');
   ui.select('main');
-  assert.match(ui.count(), /1 \/ 24 项 · 12\.00 MiB \/ 24\.00 MiB/);
+  assert.match(ui.count(), /1 \/ 24 项 · 16\.00 MiB \/ 24\.00 MiB/);
 
-  // 12 MiB 已用 + 7 MiB：可用，剩余 5 MiB。
-  const first = ui.attach([file('seven.txt', 'text/plain', undefined, 7 * 1024 * 1024)]);
+  // 16 MiB 已用 + 5 MiB 原始字节（编码后约 6.67 MiB）：仍在上限内。
+  const first = ui.attach([file('five.txt', 'text/plain', undefined, 5 * 1024 * 1024)]);
   await settle();
   await first;
   assert.equal(ui.prompt().contextFiles.length, 2);
-  assert.match(ui.hint(), /已附加 1 项 · 合计 19\.00 MiB \/ 24\.00 MiB|已附加 1 项/);
+  assert.match(ui.hint(), /已附加 1 项 · 合计 2[23]\.\d\d MiB \/ 24\.00 MiB/);
 
-  // 再 7 MiB 超过 24 MiB：跳过并说明剩余额度。
-  const rejected = ui.attach([file('another.txt', 'text/plain', undefined, 7 * 1024 * 1024)]);
+  // 再 5 MiB 超过 24 MiB：跳过并说明剩余额度。
+  const rejected = ui.attach([file('another.txt', 'text/plain', undefined, 5 * 1024 * 1024)]);
   await tick();
   await rejected;
   assert.equal(ui.prompt().contextFiles.length, 2, 'over-budget file is not stored');
-  assert.match(ui.hint(), /超过合计 24\.00 MiB 预算（剩余 5\.00 MiB）/);
+  assert.match(ui.hint(), /超过合计 24\.00 MiB 预算（剩余 [\d.]+ MiB）/);
 
   // 移除一项后预算回升，可以继续添加。
   ui.remove(1);
   assert.equal(ui.prompt().contextFiles.length, 1);
-  const accepted = ui.attach([file('another.txt', 'text/plain', undefined, 7 * 1024 * 1024)]);
+  const accepted = ui.attach([file('another.txt', 'text/plain', undefined, 5 * 1024 * 1024)]);
   await settle();
   await accepted;
   assert.equal(ui.prompt().contextFiles.length, 2, 'removal frees budget for a new attachment');
@@ -195,7 +196,7 @@ test('workbench enforces the total byte budget and recovers after removal', asyn
 
 test('workbench budget counts every prompt of the preset, matching the host limit', async () => {
   const ui = workbench();
-  const big = 'A'.repeat(16 * 1024 * 1024); // 每个条目 12 MiB，合计 24 MiB
+  const big = 'A'.repeat(16 * 1024 * 1024); // 每个条目 16 MiB 编码字节，合计 32 MiB 已超预算
   ui.open([{ id: 'A', name: 'A', preset: { prompts: [
     { identifier: 'chatHistory', marker: true, role: 'user', content: '', contextFiles: [
       { kind: 'file', mediaType: 'text/plain', data: big, name: 'a.txt' }] },
@@ -203,7 +204,7 @@ test('workbench budget counts every prompt of the preset, matching the host limi
       { kind: 'file', mediaType: 'text/plain', data: big, name: 'b.txt' }] },
   ] } }], 'A');
   ui.select('main');
-  assert.match(ui.count(), /1 \/ 24 项 · 24\.00 MiB \/ 24\.00 MiB/, 'header shows the preset-wide total');
+  assert.match(ui.count(), /1 \/ 24 项 · 32\.00 MiB \/ 24\.00 MiB/, 'header shows the preset-wide total');
   const rejected = ui.attach([file('small.txt', 'text/plain', undefined, 1024)]);
   await tick();
   await rejected;
@@ -295,20 +296,20 @@ test('spreset enforces the same total budget as the workbench', async () => {
   const prompt = ui.prompt('main');
   prompt.contextFiles = [{ kind: 'file', mediaType: 'text/plain', data: 'A'.repeat(16 * 1024 * 1024), name: 'existing.txt' }];
 
-  // 12 MiB + 7 MiB 可用（剩余 5 MiB）。
-  const first = ui.add('main', [file('seven.txt', 'text/plain', undefined, 7 * 1024 * 1024)]);
+  // 16 MiB 已用（按 base64 编码计）+ 5 MiB 原始字节：仍在上限内。
+  const first = ui.add('main', [file('five.txt', 'text/plain', undefined, 5 * 1024 * 1024)]);
   await settle();
   await first;
   assert.equal(ui.prompt('main').contextFiles.length, 2);
 
-  // 再 7 MiB 超过合计预算：跳过并说明剩余额度。
-  const capture = await ui.add('main', [file('another.txt', 'text/plain', undefined, 7 * 1024 * 1024)]);
+  // 再加 5 MiB 超过合计预算：跳过并说明剩余额度。
+  const capture = await ui.add('main', [file('another.txt', 'text/plain', undefined, 5 * 1024 * 1024)]);
   assert.equal(ui.prompt('main').contextFiles.length, 2, 'over-budget file is not stored');
-  assert.match(capture.textContent, /超过合计 24\.00 MiB 预算（剩余 5\.00 MiB）/);
+  assert.match(capture.textContent, /超过合计 24\.00 MiB 预算（剩余 [\d.]+ MiB）/);
 
   // 移除一项后可以再次添加，成功提示带合计占用。
   ui.prompt('main').contextFiles.splice(1, 1);
-  const again = ui.add('main', [file('another.txt', 'text/plain', undefined, 7 * 1024 * 1024)]);
+  const again = ui.add('main', [file('another.txt', 'text/plain', undefined, 5 * 1024 * 1024)]);
   await settle();
   await again;
   assert.equal(ui.prompt('main').contextFiles.length, 2);

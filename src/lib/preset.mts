@@ -2,7 +2,7 @@ import { isCompactionCheckpoint, isUserAuthored } from './compaction.mjs';
 import { DSH_TEMPLATE_ID, validateDshTemplates, validateDshSections } from './dsh-system-template.mjs';
 import { dshTemplateParts } from './dsh-template-source.mjs';
 import { validateRequestSettings } from './request-settings.mjs';
-import { MAX_PRESET_CONTEXT_BYTES, PRESET_CONTEXT_BLOCK, contextFilesOf, presetContextBytes, validateContextFiles } from './context-files.mjs';
+import { MAX_PRESET_CONTEXT_BYTES, PRESET_CONTEXT_BLOCK, contextFilesOf, presetContextEncodedBytes, validateContextFiles } from './context-files.mjs';
 import { applyHistoryPatches, historyInsertionIndex, validateHistoryPatches } from './history-patches.mjs';
 import { createMacroContext, renderMacros } from './macros.mjs';
 import { resolveTemplateBindings, templateBindings } from './template-bindings.mjs';
@@ -55,11 +55,11 @@ export function validatePreset(preset: unknown): SillyTavernPreset {
     if (contextFilesOf(p as never).length > 0 && p.role !== 'user') {
       throw new Error('提示词 ' + String(p.identifier) + ' 带上下文文件，角色必须是 user：宿主只接受 user 消息中的图片');
     }
-    presetBytes += presetContextBytes(p as never);
+    presetBytes += presetContextEncodedBytes(p as never);
   }
   if (presetBytes > MAX_PRESET_CONTEXT_BYTES) {
-    throw new Error('上下文文件合计 ' + Math.ceil(presetBytes / 1048576) + ' MiB，超过 ' +
-      (MAX_PRESET_CONTEXT_BYTES / 1048576) + ' MiB 上限（保存请求本身受 32 MiB 限制）');
+    throw new Error('上下文文件合计（base64 编码后）' + (presetBytes / 1048576).toFixed(1) + ' MiB，超过 ' +
+      (MAX_PRESET_CONTEXT_BYTES / 1048576) + ' MiB 上限：保存请求总大小受 32 MiB 限制');
   }
   if (preset.prompt_order != null && !Array.isArray(preset.prompt_order)) throw new Error('prompt_order 必须是数组');
   for (const group of (preset.prompt_order ?? []) as unknown[]) {

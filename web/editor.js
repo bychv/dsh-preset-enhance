@@ -1783,7 +1783,8 @@ let contextFileToken = 0;
 
 // 与宿主 MAX_CONTEXT_FILES 一致；编辑器提前拦，导入与请求侧仍是硬保证。
 const CONTEXT_FILE_MAX_ITEMS = 24;
-// 宿主所有 API 请求体上限 32 MiB（src/index.mts readJson）；给 JSON 结构与其它字段留 8 MiB 余量。
+// 宿主所有 API 请求体上限 32 MiB（src/index.mts readJson）。预算按 base64 编码后的字符数计：
+// 24 MiB 编码后的附件给 JSON 结构与其它字段留出 >=8 MiB 余量。
 const CONTEXT_TOTAL_BYTES_LIMIT = 24 * 1024 * 1024;
 // 单张图片的像素上限：解码后的位图远大于文件字节，防止压缩炸弹拖垮标签页。
 const CONTEXT_IMAGE_MAX_PIXELS = 40000000;
@@ -1869,9 +1870,10 @@ function contextFileMetaText(file) {
   else if (typeof file.attachmentId === 'string') parts.push('已入库引用');
   return parts.join(' · ');
 }
-/** 单个条目已内联字节合计：预算只统计真正会进入保存请求的 data。 */
+/** 单个条目已内联字节合计：预算只统计真正会进入保存请求的 data（base64 编码后的字符数）。 */
 function contextFileBytesOf(prompt) {
-  return contextFileList(prompt).reduce((sum, file) => sum + (contextFileByteLength(file) ?? 0), 0);
+  return contextFileList(prompt).reduce((sum, file) =>
+    sum + (typeof file?.data === 'string' ? file.data.length : 0), 0);
 }
 /** 整份预设的上下文文件合计：宿主按 preset 总量校验，编辑器必须用同一口径。 */
 function contextFileTotalBytes() {

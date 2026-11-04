@@ -7,7 +7,7 @@ import { Readable } from 'node:stream';
 import { createMacroContext, renderMacros } from '../lib/macros.mjs';
 import { validateHistoryPatches } from '../lib/history-patches.mjs';
 import { compilePreset, dshSystemPromptEnabled, DYNAMIC_PREFILL_ID, lastContentRole, validatePreset } from '../lib/preset.mjs';
-import { ADMIT_IMAGE_BATCH, PRESET_CONTEXT_BLOCK, contextFileHash, presetContextBytes } from '../lib/context-files.mjs';
+import { ADMIT_IMAGE_BATCH, MAX_PRESET_CONTEXT_BYTES, PRESET_CONTEXT_BLOCK, contextFileHash, presetContextEncodedBytes } from '../lib/context-files.mjs';
 import { materializePresetContext } from '../lib/preset-context.mjs';
 import { PresetStore } from '../lib/store.mjs';
 import { installDeepSeekBetaBridge, rewriteDeepSeekPrefixFetch } from '../lib/deepseek-beta.mjs';
@@ -1043,12 +1043,20 @@ test('images above the host per-message batch are admitted in batches instead of
   assert.equal(result.imageCount, ADMIT_IMAGE_BATCH + 3);
 });
 
-test('a preset over the aggregate context budget is refused', () => {
-  // Four 8 MiB files: each is inside the per-file limit, the total is over MAX_PRESET_CONTEXT_BYTES.
-  const chunk = Buffer.alloc(8 * 1024 * 1024).toString('base64');
-  const file = { kind: 'image', mediaType: 'image/png', data: chunk };
-  assert.equal(presetContextBytes({ contextFiles: [file] }), 8 * 1024 * 1024);
-  assert.throws(() => validatePreset({ prompts: [{ identifier: 'big', role: 'user', contextFiles: [file, file, file, file] }] }), /MiB 上限/);
+test('the aggregate context budget counts base64, and a preset just under it still saves', () => {
+  // The budget is measured on the stored base64 text, because that is what the 32 MiB request cap
+  // counts: a decoded-byte budget would let a 24 MiB preset expand to 32 MiB and fail on the wire.
+  const file = { kind: 'image', mediaType: 'image/png', data: Buffer.alloc(8 * 1024 * 1024).toString('base64') };
+  const encoded = presetContextEncodedBytes({ contextFiles: [file] });
+  assert.equal(encoded, 4 * Math.ceil((8 * 1024 * 1024) / 3));
+  assert.ok(encoded > 8 * 1024 * 1024, 'base64 is larger than the decoded size');
+
+  // Three files are ~32 MiB of base64, already over the 24 MiB budget.
+  assert.throws(() => validatePreset({ prompts: [{ identifier: 'big', role: 'user', contextFiles: [file, file, file] }] }), /base64 编码后.*MiB 上限/);
+  // A preset that fits the budget encodes to less than the request cap, so headroom remains.
+  const small = { kind: 'image', mediaType: 'image/png', data: Buffer.alloc(5 * 1024 * 1024).toString('base64') };
+  validatePreset({ prompts: [{ identifier: 'ok', role: 'user', contextFiles: [small, small, small] }] });
+  assert.ok(3 * presetContextEncodedBytes({ contextFiles: [small] }) < MAX_PRESET_CONTEXT_BYTES);
 });
 
 test('a prompt carries several context files and same-named ones get distinct request names', async () => {

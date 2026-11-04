@@ -659,6 +659,7 @@ const CONTEXT_FILE_TYPES = ['application/pdf', 'text/plain', 'application/json']
 const CONTEXT_MAX_BYTES = 8 * 1024 * 1024;
 const CONTEXT_MAX_ITEMS = 24;
 // 宿主所有 API 请求体上限 32 MiB（src/index.mts readJson）；给 JSON 结构与其它字段留 8 MiB 余量。
+// 预算按 base64 编码后的字符数计：宿主请求体上限 32 MiB，24 MiB 编码后仍留 >=8 MiB 余量。
 const CONTEXT_TOTAL_BYTES_LIMIT = 24 * 1024 * 1024;
 // 单张图片的像素上限：解码后的位图远大于文件字节，防止压缩炸弹拖垮标签页。
 const CONTEXT_IMAGE_MAX_PIXELS = 40000000;
@@ -710,9 +711,10 @@ function contextFileBadgeLabel(files) {
   const kind = images === files.length ? '图' : images === 0 ? '文件' : '上下文';
   return kind + ' ×' + files.length;
 }
-/** 单个条目/模板已内联字节合计：预算只统计真正会进入保存请求的 data。 */
+/** 单个条目/模板已内联字节合计：预算只统计真正会进入保存请求的 data（base64 编码后的字符数）。 */
 function contextFileBytesOf(source) {
-  return contextFileItems(source).reduce((sum, file) => sum + (contextFileBytes(file) ?? 0), 0);
+  return contextFileItems(source).reduce((sum, file) =>
+    sum + (typeof file?.data === 'string' ? file.data.length : 0), 0);
 }
 /** 整份预设的上下文文件合计：宿主按 preset 总量校验，编辑器必须用同一口径。 */
 function contextFileTotalBytes() {
@@ -927,7 +929,7 @@ function contextFileEditor(source, textarea) {
   zone.setAttribute('aria-label', '粘贴图片或拖拽文件到此处');
   zone.append(el('p', '', '粘贴图片或拖拽文件到此处'));
   zone.append(el('p', 'context-paste-hint',
-    '支持 PNG / JPEG / WebP / GIF 与 PDF / TXT / JSON；单个不超过 8 MiB、合计不超过 24 MiB、最多 ' + CONTEXT_MAX_ITEMS + ' 项。保存请求总上限 32 MiB；Chat 图片请放在用户条目。'));
+    '支持 PNG / JPEG / WebP / GIF 与 PDF / TXT / JSON；单个不超过 8 MiB，合计不超过 24 MiB（按 base64 编码后计）、最多 ' + CONTEXT_MAX_ITEMS + ' 项。保存请求总上限 32 MiB；Chat 图片请放在用户条目。'));
   const actions = el('div', 'context-paste-actions');
   const input = el('input');
   input.type = 'file';
