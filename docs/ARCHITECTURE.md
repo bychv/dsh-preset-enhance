@@ -1,6 +1,6 @@
 # 插件逻辑架构
 
-本文对应 0.3.7 开发版（目标 rc.1），支持 DSH 0.2.1 和 0.2.2。安装入口是 `dsh-preset-enhance`，主包精确依赖 `dsh-preset-display-regex`，由根目录 `cordis.patch.yml` 在同一插件页注册两个可分别启停的运行条目。`packages/bundle` 仅保留兼容入口，不是正常安装所需的第三个包。
+本文对应 0.3.7-rc.1，支持 DSH 0.2.1 和 0.2.2。安装入口是 `dsh-preset-enhance`，主包精确依赖 `dsh-preset-display-regex`，由根目录 `cordis.patch.yml` 在同一插件页注册两个可分别启停的运行条目。`packages/bundle` 仅保留兼容入口，不是正常安装所需的第三个包。
 
 ## 包边界与数据流
 
