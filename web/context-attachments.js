@@ -26,6 +26,8 @@ function enhanceContextAttachment(card) {
         dialog.className = 'preset-attachment-lightbox';
         dialog.setAttribute('aria-label', '图片预览');
         const original = document.createElement('img');
+        // 原图可能是 8 MiB 级别的 data URL：异步解码，避免打开灯箱时阻塞主线程。
+        original.decoding = 'async';
         original.src = image.src;
         original.alt = image.alt;
         const close = document.createElement('button');

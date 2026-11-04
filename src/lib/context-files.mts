@@ -11,6 +11,27 @@ export const MAX_CONTEXT_FILE_BYTES = 8 * 1024 * 1024;
 /** One prompt may carry at most this many context files. */
 export const MAX_CONTEXT_FILES = 24;
 
+/** Host default for images admitted per message; bigger batches are split instead of failing. */
+export const ADMIT_IMAGE_BATCH = 20;
+
+/**
+ * Total decoded context bytes one preset may carry. The save API already refuses request bodies
+ * over 32 MiB, so this keeps a whole preset inside it and bounds how far state.json can grow.
+ */
+export const MAX_PRESET_CONTEXT_BYTES = 24 * 1024 * 1024;
+
+/** Exact decoded length of canonical base64, without decoding it again. */
+function encodedByteLength(data: string): number {
+  const padding = data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0;
+  return (data.length / 4) * 3 - padding;
+}
+
+/** Decoded byte total of every context file on one prompt. */
+export function presetContextBytes(prompt: { contextFiles?: PresetContextFile[]; contextFile?: PresetContextFile } | undefined): number {
+  return contextFilesOf(prompt).reduce((total, file) =>
+    (typeof file.data === 'string' ? total + encodedByteLength(file.data) : total), 0);
+}
+
 /**
  * Compiled content block that still has to be materialized before the request leaves
  * the plugin. It carries only identity, so the compiled result stays small enough to

@@ -1,4 +1,4 @@
-import { contextFileEncoded, contextFileHash, contextFilesOf, decodeContextBase64, isPresetContextBlock } from './context-files.mjs';
+import { ADMIT_IMAGE_BATCH, contextFileEncoded, contextFileHash, contextFilesOf, decodeContextBase64, isPresetContextBlock } from './context-files.mjs';
 import type { ContentBlock, HostMessage, SillyTavernPreset } from './types.mjs';
 
 /** The slice of the host attachment service this module needs. */
@@ -52,6 +52,15 @@ export async function materializePresetContext(options: MaterializeContextOption
       out.push(message);
       continue;
     }
+    // The host only accepts images in user/tool messages: its Messages serializer throws
+    // UNSUPPORTED_CONTENT and the chat serializer degrades the image to a text placeholder. A
+    // preset that predates the rule (or a hand-edited state file) must not break the request.
+    if (message.role !== 'user') {
+      warnings.push('注入消息 ' + (message.id ?? '(未知)') + ' 的角色是 ' + String(message.role) +
+        '，上下文文件已跳过：宿主只接受 user 消息中的图片');
+      out.push({ ...message, content: blocks.filter(block => !isPresetContextBlock(block)) });
+      continue;
+    }
     const parts: ContentBlock[] = [];
     let presetImages = 0;
     let skippedImages = 0;
@@ -95,7 +104,8 @@ export async function materializePresetContext(options: MaterializeContextOption
         // a synthetic content-addressed identity plus the payload, exactly like a user attachment.
         if (allowInline === true) {
           const bytes = decodeContextBase64(part.data);
-          const identity = 'preset:' + contextFileHash(bytes);
+          // Same shape the host uses for its own attachments, so the Files upload index accepts it.
+          const identity = 'sha256:' + contextFileHash(bytes);
           cleaned.push({ type: 'image', attachment: { attachmentId: identity },
             mediaType: part.mediaType, presetData: part.data,
             ...(part.name === undefined ? {} : { name: part.name }) } as ContentBlock);
@@ -130,10 +140,20 @@ async function admitImages(parts: ContentBlock[], admission: ContextAdmission, w
     // Admission accepts prompt input, not reasoning or tool blocks. Preserve all other
     // blocks verbatim while batching images together for the host's per-message limits.
     const images = parts.filter((part: any) => part.type === 'image');
-    const admitted = await admission.admitPromptContent!(images.map((part: any) => {
-      const { __presetIdentifier: _ignored, ...rest } = part;
-      return rest;
-    }));
+    if (images.length > ADMIT_IMAGE_BATCH) {
+      warnings.push('一条消息的上下文图片 ' + images.length + ' 张超过入库批量 ' + ADMIT_IMAGE_BATCH + ' 张，将分批入库');
+    }
+    // The host validates images per message: admitting 21+ at once is rejected as a batch, which
+    // would drop every image of that message. Split the call instead.
+    const admitted: any[] = [];
+    for (let start = 0; start < images.length; start += ADMIT_IMAGE_BATCH) {
+      const batch = images.slice(start, start + ADMIT_IMAGE_BATCH);
+      const result = await admission.admitPromptContent!(batch.map((part: any) => {
+        const { __presetIdentifier: _ignored, ...rest } = part;
+        return rest;
+      }));
+      admitted.push(...result);
+    }
     if (admitted.length !== images.length || admitted.some(part => part.type !== 'image' || !part.attachment)) {
       throw new Error('附件服务返回的图片数量或类型不匹配');
     }

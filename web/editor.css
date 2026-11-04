@@ -124,7 +124,8 @@ html, body { overflow-anchor: none; }
 /* 上下文文件（预设条目携带的图片与文件） */
 #context-file-field{display:flex;flex-direction:column;gap:8px;margin:4px 0 12px;border-top:1px dashed #2a3942;padding-top:10px}
 #context-file-field[hidden],#ctx-preview[hidden],#ctx-paste-zone[hidden]{display:none}
-.ctx-file-head{display:flex;align-items:baseline;gap:10px;font-size:13px;color:#b9d9d2}
+.ctx-file-head{display:flex;align-items:baseline;gap:10px;font-size:13px;color:#b9d9d2;flex-wrap:wrap}
+#ctx-file-count{font-variant-numeric:tabular-nums}
 #ctx-preview{display:flex;flex-direction:column;gap:8px}
 #ctx-empty{margin:0;color:#8da2ae;font-size:12px}
 .ctx-card{display:flex;align-items:center;gap:12px;border:1px solid #2a3942;border-radius:9px;background:#131d24;padding:10px 12px}

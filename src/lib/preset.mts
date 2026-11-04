@@ -2,7 +2,7 @@ import { isCompactionCheckpoint, isUserAuthored } from './compaction.mjs';
 import { DSH_TEMPLATE_ID, validateDshTemplates, validateDshSections } from './dsh-system-template.mjs';
 import { dshTemplateParts } from './dsh-template-source.mjs';
 import { validateRequestSettings } from './request-settings.mjs';
-import { PRESET_CONTEXT_BLOCK, contextFilesOf, validateContextFiles } from './context-files.mjs';
+import { MAX_PRESET_CONTEXT_BYTES, PRESET_CONTEXT_BLOCK, contextFilesOf, presetContextBytes, validateContextFiles } from './context-files.mjs';
 import { applyHistoryPatches, historyInsertionIndex, validateHistoryPatches } from './history-patches.mjs';
 import { createMacroContext, renderMacros } from './macros.mjs';
 import { resolveTemplateBindings, templateBindings } from './template-bindings.mjs';
@@ -37,6 +37,7 @@ export function validatePreset(preset: unknown): SillyTavernPreset {
     throw new Error('dsh_prefill_target 必须为 reasoning 或 content');
   }
   const ids = new Set<string>();
+  let presetBytes = 0;
   templateBindings(preset as unknown as SillyTavernPreset);
   for (const p of preset.prompts as unknown[]) {
     if (!isRecord(p) || typeof p.identifier !== 'string' || !p.identifier || ids.has(p.identifier)) throw new Error('提示词 identifier 缺失或重复');
@@ -48,6 +49,17 @@ export function validatePreset(preset: unknown): SillyTavernPreset {
     if (p.injection_order != null && !Number.isInteger(p.injection_order)) throw new Error('injection_order 必须是整数');
     if (p.injection_trigger != null && !Array.isArray(p.injection_trigger)) throw new Error('injection_trigger 必须是数组');
     validateContextFiles(p.contextFiles, p.contextFile, '提示词 ' + String(p.identifier));
+    // The host refuses images outside user messages: its Messages serializer throws
+    // UNSUPPORTED_CONTENT and the chat serializer silently degrades the image to a placeholder.
+    // An entry carrying context files therefore has to be a user entry.
+    if (contextFilesOf(p as never).length > 0 && p.role !== 'user') {
+      throw new Error('提示词 ' + String(p.identifier) + ' 带上下文文件，角色必须是 user：宿主只接受 user 消息中的图片');
+    }
+    presetBytes += presetContextBytes(p as never);
+  }
+  if (presetBytes > MAX_PRESET_CONTEXT_BYTES) {
+    throw new Error('上下文文件合计 ' + Math.ceil(presetBytes / 1048576) + ' MiB，超过 ' +
+      (MAX_PRESET_CONTEXT_BYTES / 1048576) + ' MiB 上限（保存请求本身受 32 MiB 限制）');
   }
   if (preset.prompt_order != null && !Array.isArray(preset.prompt_order)) throw new Error('prompt_order 必须是数组');
   for (const group of (preset.prompt_order ?? []) as unknown[]) {

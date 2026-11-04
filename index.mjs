@@ -19,6 +19,7 @@ import { RequestSnapshots, traceRequest, previewMessages, messageOrigins } from 
 import { PRESET_TEMPLATES_SERVICE } from './templates.mjs';
 import { compilePreset, validatePreset, getOrder, dshSystemPromptEnabled, lastContentRole } from './lib/preset.mjs';
 import { materializePresetContext } from './lib/preset-context.mjs';
+import { PRESET_CONTEXT_BLOCK } from './lib/context-files.mjs';
 import { decodePresetDocument, encodePresetPackage, attachPrefillSettings, applyPackagePrefill, ensurePackageExtractionTemplate } from './lib/preset-package.mjs';
 import { deleteLibraryEntry, presetLocks, restoreDefaultTemplates, saveLibraryEntry, setPresetLock, summarizeSPreset, syncSPresetMirror, } from './lib/s-preset-library.mjs';
 import { installDeepSeekBetaBridge, rewriteDeepSeekPrefixFetch } from './lib/deepseek-beta.mjs';
@@ -446,6 +447,11 @@ export async function apply(ctx, config = {}) {
         const compiledMessages = compiled?.messages ?? history;
         // Preset context files are materialized per request. The compiled result carries their
         // identity only, so a cached per-session compilation never duplicates the bytes.
+        // Check modality before admission so a text-only model never uploads or normalizes images it
+        // cannot receive.
+        const compiledImageCount = (compiledMessages ?? []).reduce((total, message) => total + (message.content ?? []).filter((block) => block?.type === PRESET_CONTEXT_BLOCK && block.kind === 'image').length, 0);
+        if (compiledImageCount > 0)
+            await assertImageInput(ctx, options);
         const context = compiled !== null && initialRecord !== undefined
             ? await materializePresetContext({
                 preset: initialRecord.preset,
@@ -1538,7 +1544,15 @@ async function buildRequestImages(ctx, connection, options, signal) {
 /** Read-only handle text for one image reference, so the wire shows a real path when the host has one. */
 function imageAccessOf(ctx, ref) {
     const attachments = ctx.get?.('attachments');
-    const hostPath = attachments?.imageHostPath?.(ref);
+    let hostPath;
+    try {
+        // Inline preset bytes carry an identity the attachment service never admitted; asking the
+        // host for its path throws INVALID_ATTACHMENT_REF, which would fail the whole request.
+        hostPath = attachments?.imageHostPath?.(ref);
+    }
+    catch {
+        return undefined;
+    }
     if (hostPath === undefined)
         return undefined;
     const world = ctx.get?.('fs')

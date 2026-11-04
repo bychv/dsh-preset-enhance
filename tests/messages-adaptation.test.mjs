@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { compilePreset } from '../lib/preset.mjs';
 import { adaptPresetForMessages } from '../lib/messages.mjs';
+import { PRESET_CONTEXT_BLOCK } from '../lib/context-files.mjs';
 
 const plugin = { kind: 'plugin', plugin: 'dsh-preset-enhance' };
 const sys = (id, text) => ({ id, role: 'system', content: [{ type: 'text', text }], source: { ...plugin } });
@@ -211,6 +212,54 @@ test('real compiler output is adapted end to end', () => {
   assert.equal(result.messages[1], compiled.messages[2], 'history is passed through by identity');
   assert.equal(result.messages.at(-1).content[0].text, 'PREFILL-BODY', 'prefix content is not dropped');
   assert.deepEqual(compiled.messages.map(message => message.role), ['system', 'system', 'user', 'assistant', 'system', 'user', 'assistant'], 'compiled input is not mutated');
+});
+
+test('preset context blocks survive Messages adaptation', () => {
+  const png = Buffer.from('abc').toString('base64');
+  const preset = {
+    prompts: [
+      { identifier: 'sys', role: 'system', content: 'SYS-ONE' },
+      // A context file may only live on a user entry: the host rejects images in other roles.
+      { identifier: 'ctx', role: 'user', content: 'LOOK',
+        contextFiles: [{ kind: 'image', mediaType: 'image/png', data: png, name: 'a.png' }] },
+    ],
+    prompt_order: [{ character_id: 100001, order: [
+      { identifier: 'sys', enabled: true }, { identifier: 'ctx', enabled: true },
+    ] }],
+  };
+  const history = [{ id: 'h', role: 'user', content: [{ type: 'text', text: 'history' }] }];
+  const compiled = compilePreset(preset, history, { characterId: 100001 });
+  const emitted = compiled.messages
+    .flatMap(message => message.content)
+    .filter(item => item.type === PRESET_CONTEXT_BLOCK);
+  assert.equal(emitted.length, 1, 'the compiler emits one identity block per context file');
+  const identity = emitted[0];
+  assert.equal(identity.kind, 'image');
+  assert.equal(identity.mediaType, 'image/png');
+  // The compiled result must not carry the bytes into the cached/no-wire shape.
+  assert.equal(JSON.stringify(compiled.messages).includes(png), false, 'bytes stay out of the compiled result');
+  const adapted = adaptPresetForMessages(compiled.messages);
+  // The identity block travels with its message unchanged, so materialization still finds it.
+  const carrier = adapted.messages.find(message => message.content.some(item => item.type === PRESET_CONTEXT_BLOCK));
+  assert.equal(carrier.role, 'user');
+  assert.deepEqual(carrier.content.filter(item => item.type === PRESET_CONTEXT_BLOCK), [identity]);
+  assert.equal(JSON.stringify(adapted.messages).includes(png), false, 'bytes still never reach the wire shape');
+});
+
+test('merging leading system prompts keeps non-text blocks', () => {
+  // The host cannot express non-text system content either, so the merge must not drop it; a
+  // system message carrying an image block is the case that would otherwise vanish silently.
+  const image = { type: 'image', attachment: { attachmentId: 'sha256:' + 'a'.repeat(64) } };
+  const messages = [
+    { id: 'a', role: 'system', content: [{ type: 'text', text: 'SYS-ONE' }] },
+    { id: 'b', role: 'system', content: [{ type: 'text', text: 'SYS-TWO' }, image] },
+    { id: 'c', role: 'user', content: [{ type: 'text', text: 'hi' }] },
+  ];
+  const adapted = adaptPresetForMessages(messages);
+  assert.equal(adapted.leadingSystemMerged, 2);
+  assert.equal(adapted.messages[0].content[0].text, 'SYS-ONE\n\nSYS-TWO');
+  assert.deepEqual(adapted.messages[0].content.slice(1), [image], 'the non-text block is preserved');
+  assert.equal(adapted.messages[1], messages[2], 'history is passed through by identity');
 });
 
 test('non-array input is rejected defensively', () => {

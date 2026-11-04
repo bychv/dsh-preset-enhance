@@ -584,6 +584,9 @@ async function savePromptToLibrary(prompt) {
   if (Array.isArray(prompt.injection_trigger)) entry.injectionTrigger = prompt.injection_trigger.slice();
   if (prompt.hide_from_list !== undefined) entry.hideFromList = prompt.hide_from_list === true;
   if (prompt.forbid_overrides !== undefined) entry.forbidOverrides = prompt.forbid_overrides === true;
+  // 资源库模板同样携带上下文文件，否则存为模板会静默丢图（插入链时再带回预设）。
+  const files = promptContextFiles(prompt);
+  if (files.length > 0) entry.contextFiles = structuredClone(files);
   await saveLibrary(entry, '已存入资源库');
 }
 
@@ -648,13 +651,17 @@ function libraryToEntryShape(entry) {
 /* ------------------------------------------------------ 上下文文件（编辑） */
 
 // 预设条目可以携带多个上下文文件（图片/文件），行为与工作台一致：
-// 粘贴/拖拽/选择文件一次可带入多个，逐项校验、逐项移除，上限 24 项、单项 ≤ 8 MB。
+// 粘贴/拖拽/选择文件一次可带入多个，逐项校验、逐项移除，上限 24 项、单项 ≤ 8 MiB、合计 ≤ 24 MiB。
 // 数据形状由宿主校验，这里只做编辑期拦截；字节数从 base64 长度反推，避免为了显示再解码一遍大图。
 
 const CONTEXT_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
 const CONTEXT_FILE_TYPES = ['application/pdf', 'text/plain', 'application/json'];
 const CONTEXT_MAX_BYTES = 8 * 1024 * 1024;
 const CONTEXT_MAX_ITEMS = 24;
+// 宿主所有 API 请求体上限 32 MiB（src/index.mts readJson）；给 JSON 结构与其它字段留 8 MiB 余量。
+const CONTEXT_TOTAL_BYTES_LIMIT = 24 * 1024 * 1024;
+// 单张图片的像素上限：解码后的位图远大于文件字节，防止压缩炸弹拖垮标签页。
+const CONTEXT_IMAGE_MAX_PIXELS = 40000000;
 const CONTEXT_TYPE_BY_EXTENSION = {
   png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif',
   pdf: 'application/pdf', txt: 'text/plain', json: 'application/json',
@@ -667,8 +674,8 @@ let contextFileBlock = null;
 function formatBytes(bytes) {
   if (!Number.isFinite(bytes) || bytes < 0) return '';
   if (bytes < 1024) return bytes + ' B';
-  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-  return (bytes / 1024 / 1024).toFixed(2) + ' MB';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KiB';
+  return (bytes / 1024 / 1024).toFixed(2) + ' MiB';
 }
 function contextFileBytes(file) {
   if (typeof file?.data !== 'string' || !file.data) return null;
@@ -702,6 +709,21 @@ function contextFileBadgeLabel(files) {
   const images = files.filter(file => file?.kind === 'image').length;
   const kind = images === files.length ? '图' : images === 0 ? '文件' : '上下文';
   return kind + ' ×' + files.length;
+}
+/** 单个条目/模板已内联字节合计：预算只统计真正会进入保存请求的 data。 */
+function contextFileBytesOf(source) {
+  return contextFileItems(source).reduce((sum, file) => sum + (contextFileBytes(file) ?? 0), 0);
+}
+/** 整份预设的上下文文件合计：宿主按 preset 总量校验，编辑器必须用同一口径。 */
+function contextFileTotalBytes() {
+  return (preset?.prompts ?? []).reduce((sum, prompt) => sum + contextFileBytesOf(prompt), 0);
+}
+function contextFileBudgetText(total) {
+  return formatBytes(total) + ' / ' + formatBytes(CONTEXT_TOTAL_BYTES_LIMIT);
+}
+/** 像素超限的图片不渲染缩略图：位图体积按宽高平方增长，与文件字节无关。 */
+function contextFileOversized(file) {
+  return !!(file?.width && file?.height && file.width * file.height > CONTEXT_IMAGE_MAX_PIXELS);
 }
 function contextFileMediaType(file) {
   const declared = String(file?.type ?? '').trim().toLowerCase();
@@ -748,29 +770,35 @@ function inspectorPrompt() {
 }
 function contextFileCardNode(file, index, onRemove) {
   const box = el('div', 'context-file');
-  if (file?.kind === 'image' && typeof file.data === 'string' && file.data) {
+  // 像素超限的图片同样不渲染缩略图：避免为一张图解码 GB 级位图。
+  if (file?.kind === 'image' && typeof file.data === 'string' && file.data && !contextFileOversized(file)) {
     const frame = el('div', 'context-file-preview');
     const image = el('img', 'context-file-thumb');
+    image.decoding = 'async';
     image.src = 'data:' + (file.mediaType || 'image/png') + ';base64,' + file.data;
     image.alt = file.name ? '上下文图片 ' + file.name : '上下文图片';
     frame.append(image);
     box.append(frame);
   } else {
-    // 图片也可能只有 asset（字节随分享包提供），此时不伪造缩略图。
+    // 图片也可能只有 asset（字节随分享包提供）或像素超限，此时不伪造缩略图。
     const note = typeof file?.asset === 'string' ? '字节随分享包提供'
       : typeof file?.attachmentId === 'string' ? '宿主附件引用' : '无本地字节';
-    box.append(el('span', 'badge context-file-badge', file?.kind === 'image' ? note : 'FILE'));
+    const label = file?.kind === 'image' ? (contextFileOversized(file) ? '图片过大' : note) : 'FILE';
+    box.append(el('span', 'badge context-file-badge', label));
   }
   const info = el('div', 'context-file-info');
   info.append(el('strong', 'context-file-name', file?.name || (file?.kind === 'image' ? '未命名图片' : '未命名文件')));
   info.append(el('span', 'muted', contextFileMeta(file ?? {})));
   box.append(info);
-  const remove = el('button', 'context-file-remove', '移除');
-  remove.type = 'button';
-  remove.title = '移除这一项上下文文件';
-  remove.setAttribute('aria-label', '移除上下文文件 ' + (file?.name || index + 1));
-  remove.onclick = event => { event?.stopPropagation?.(); onRemove(); };
-  box.append(remove);
+  // 只读视图（模板 INSPECTOR）传入 null：没有移除按钮。
+  if (onRemove) {
+    const remove = el('button', 'context-file-remove', '移除');
+    remove.type = 'button';
+    remove.title = '移除这一项上下文文件';
+    remove.setAttribute('aria-label', '移除上下文文件 ' + (file?.name || index + 1));
+    remove.onclick = event => { event?.stopPropagation?.(); onRemove(); };
+    box.append(remove);
+  }
   globalThis.enhanceContextAttachment?.(box);
   return box;
 }
@@ -792,9 +820,15 @@ function contextPasteFiles(event) {
 async function addContextFiles(source, files, hint) {
   const incoming = Array.from(files ?? []).filter(Boolean);
   if (!source || !incoming.length) { contextFileHint(hint, '没有读取到文件，未写入', 'error'); return; }
+  // 宿主只接受 user 消息里的图片：其它角色保存时会被拒绝，先在这里挡住并说明。
+  if (source.role !== 'user') {
+    contextFileHint(hint, '上下文文件只能加在 user 角色条目上（当前 ' + (source.role ?? 'system') + '），请先把角色改为 user', 'error');
+    return;
+  }
   const identifier = source.identifier;
   const token = ++contextFileToken;
   const existing = contextFileItems(source).length;
+  let remaining = Math.max(0, CONTEXT_TOTAL_BYTES_LIMIT - contextFileTotalBytes());
   const accepted = [], skipped = [];
   for (const file of incoming) {
     const label = String(file.name ?? '').trim() || '未命名文件';
@@ -809,6 +843,11 @@ async function addContextFiles(source, files, hint) {
       skipped.push(label + '：超过 ' + CONTEXT_MAX_ITEMS + ' 项上限');
       continue;
     }
+    if (file.size > remaining) {
+      skipped.push(label + '：超过合计 ' + formatBytes(CONTEXT_TOTAL_BYTES_LIMIT) + ' 预算（剩余 ' + formatBytes(remaining) + '）');
+      continue;
+    }
+    remaining -= file.size;
     accepted.push({ file, mediaType });
   }
   if (!accepted.length) { contextFileHint(hint, '没有可附加的文件：' + skipped.join('；'), 'error'); return; }
@@ -826,6 +865,9 @@ async function addContextFiles(source, files, hint) {
         // 宿主校验要求正整数且不超过 100000：读不到或不合法就不写，宁缺勿错。
         if (size && Number.isInteger(size.width) && Number.isInteger(size.height) &&
           size.width > 0 && size.height > 0 && size.width <= 100000 && size.height <= 100000) {
+          if (size.width * size.height > CONTEXT_IMAGE_MAX_PIXELS) {
+            return { skipped: label + '：' + size.width + '×' + size.height + ' 超过 ' + (CONTEXT_IMAGE_MAX_PIXELS / 1000000) + ' 万像素上限' };
+          }
           entry.width = size.width;
           entry.height = size.height;
         }
@@ -847,8 +889,23 @@ async function addContextFiles(source, files, hint) {
   else renderInspector();
   const trouble = skipped.concat(failed);
   const hintNode = contextFileBlock?.source === source ? contextFileBlock.hint : hint;
-  contextFileHint(hintNode, '已附加 ' + written.length + ' 项' + (trouble.length ? ' · 跳过 ' + trouble.length + ' 项：' + trouble.join('；') : ''),
+  contextFileHint(hintNode, '已附加 ' + written.length + ' 项 · 合计 ' + contextFileBudgetText(contextFileTotalBytes())
+    + (trouble.length ? ' · 跳过 ' + trouble.length + ' 项：' + trouble.join('；') : ''),
     trouble.length ? 'warn' : 'ok');
+}
+/** 只读的「上下文文件」列表：模板条目使用（无粘贴区、无移除按钮）。 */
+function contextFileReadOnly(source) {
+  const files = contextFileItems(source);
+  if (!files.length) return null;
+  const wrap = el('div', 'field context-file-field');
+  const head = el('div', 'context-file-head');
+  head.append(el('span', '', '上下文文件'), el('span', 'context-file-count', files.length + ' 项 · ' + formatBytes(contextFileBytesOf(source))));
+  wrap.append(head);
+  const list = el('div', 'context-file-list');
+  files.forEach((file, index) => list.append(contextFileCardNode(file, index, null)));
+  wrap.append(list);
+  wrap.append(el('span', 'muted', '只读预览；模板的附件随模板保存，编辑请到提示词条目里进行。'));
+  return wrap;
 }
 /** 可编辑的「上下文文件」区块：列表 + 粘贴/拖拽/选择文件入口。 */
 function contextFileEditor(source, textarea) {
@@ -868,7 +925,7 @@ function contextFileEditor(source, textarea) {
   zone.setAttribute('aria-label', '粘贴图片或拖拽文件到此处');
   zone.append(el('p', '', '粘贴图片或拖拽文件到此处'));
   zone.append(el('p', 'context-paste-hint',
-    '支持 PNG / JPEG / WebP / GIF 与 PDF / TXT / JSON，Chat 图片请放在用户条目，保存请求合计 32 MiB，单个不超过 8 MiB，最多 ' + CONTEXT_MAX_ITEMS + ' 项；可一次选择或拖入多个'));
+    '支持 PNG / JPEG / WebP / GIF 与 PDF / TXT / JSON；单个不超过 8 MiB、合计不超过 24 MiB、最多 ' + CONTEXT_MAX_ITEMS + ' 项。保存请求总上限 32 MiB；Chat 图片请放在用户条目。'));
   const actions = el('div', 'context-paste-actions');
   const input = el('input');
   input.type = 'file';
@@ -882,7 +939,9 @@ function contextFileEditor(source, textarea) {
 
   const refresh = () => {
     const files = contextFileItems(source);
-    count.textContent = files.length ? files.length + ' / ' + CONTEXT_MAX_ITEMS + ' 项' : '';
+    count.textContent = files.length
+      ? files.length + ' / ' + CONTEXT_MAX_ITEMS + ' 项 · ' + contextFileBudgetText(contextFileTotalBytes())
+      : '';
     list.replaceChildren();
     if (!files.length) {
       list.append(el('p', 'context-file-empty', '尚未附加上下文文件'));
@@ -1124,8 +1183,8 @@ function renderInspector() {
   body.append(tabRow);
   if (inspectorTab === '内容') {
     body.append(contentField, counter);
-    // 上下文文件与工作台同一套编辑语义：粘贴/拖拽/选择文件，逐项校验与移除。
-    const contextFile = isTemplate ? null : contextFileEditor(source, textarea);
+    // 条目：与工作台同一套编辑语义；模板：只读列表（附件随模板保存，插入链时带回）。
+    const contextFile = isTemplate ? contextFileReadOnly(source) : contextFileEditor(source, textarea);
     if (contextFile) body.append(contextFile);
   }
   else if (inspectorTab === '注入') body.append(isTemplate ? templateInjectionTab(target.entry) : injectionTab(source));
@@ -1203,8 +1262,21 @@ function readOnlyBlock(title, value, note = NOT_IMPLEMENTED) {
 function structuredTab(target, isTemplate, source) {
   const wrap = el('div', 'field');
   wrap.append(el('p', 'muted', '原始字段：保存时原样写回，未在本插件中实现的字段（例如 hide_from_list）不会被改写。锁定正文是编辑器侧的防误编辑开关，不影响发送内容。'));
-  wrap.append(el('pre', 'json', JSON.stringify(isTemplate ? source : promptToLibraryShape(source), null, 2)));
+  wrap.append(el('pre', 'json', JSON.stringify(redactContextData(structuredClone(isTemplate ? source : promptToLibraryShape(source))), null, 2)));
   return wrap;
+}
+/** 展示用：把 contextFiles 里的 base64 换成摘要，避免巨型文本节点拖垮 INSPECTOR。 */
+function redactContextData(node) {
+  if (Array.isArray(node)) {
+    node.forEach(redactContextData);
+    return node;
+  }
+  if (!node || typeof node !== 'object') return node;
+  if (typeof node.data === 'string' && typeof node.mediaType === 'string') {
+    node.data = '<base64 ' + formatBytes(contextFileBytes(node) ?? 0) + '>';
+  }
+  for (const key of Object.keys(node)) redactContextData(node[key]);
+  return node;
 }
 
 /* ----------------------------------------------------------------- extras */

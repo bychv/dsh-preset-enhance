@@ -7,7 +7,7 @@ import { Readable } from 'node:stream';
 import { createMacroContext, renderMacros } from '../lib/macros.mjs';
 import { validateHistoryPatches } from '../lib/history-patches.mjs';
 import { compilePreset, dshSystemPromptEnabled, DYNAMIC_PREFILL_ID, lastContentRole, validatePreset } from '../lib/preset.mjs';
-import { PRESET_CONTEXT_BLOCK, contextFileHash } from '../lib/context-files.mjs';
+import { ADMIT_IMAGE_BATCH, PRESET_CONTEXT_BLOCK, contextFileHash, presetContextBytes } from '../lib/context-files.mjs';
 import { materializePresetContext } from '../lib/preset-context.mjs';
 import { PresetStore } from '../lib/store.mjs';
 import { installDeepSeekBetaBridge, rewriteDeepSeekPrefixFetch } from '../lib/deepseek-beta.mjs';
@@ -920,16 +920,15 @@ test('a context file compiles into an identity block and is never a text prefix'
   const only = contextOnly.messages.find(message => message.id === 'preset:preview:ctx');
   assert.deepEqual(only.content.map(block => block.type), [PRESET_CONTEXT_BLOCK]);
 
-  // An assistant entry that carries a context file is not a continuable prefix.
-  const assistantContext = compilePreset({
+  // Context files may only live on user entries: the host refuses images in any other role.
+  assert.throws(() => compilePreset({
     ...preset,
     prompts: [preset.prompts[0], { identifier: 'ctx', role: 'assistant', content: '好的', contextFile }],
-  }, [msg('u', 'user', 'hi')], { characterId: 100001 });
-  assert.equal(assistantContext.assistantPrefix.active, false);
+  }, [msg('u', 'user', 'hi')], { characterId: 100001 }), /角色必须是 user/);
   const forcedWithAttachment = compilePreset({
     prompts: [
       { identifier: 'prefix', role: 'assistant', content: 'Continue' },
-      { identifier: 'ctx', role: 'assistant', content: 'Image context', contextFile },
+      { identifier: 'ctx', role: 'user', content: 'Image context', contextFile },
       { identifier: 'last', role: 'system', content: 'Final instruction' },
     ],
     prompt_order: [{ character_id: 100001, order: ['prefix', 'ctx', 'last'].map(identifier => ({ identifier, enabled: true })) }],
@@ -937,7 +936,7 @@ test('a context file compiles into an identity block and is never a text prefix'
   assert.equal(forcedWithAttachment.messages.at(-1).content[0].text, 'Continue');
   assert.equal(forcedWithAttachment.assistantPrefix.active, true);
 
-  assert.equal(lastContentRole({ ...preset, prompts: [preset.prompts[0], { identifier: 'ctx', role: 'assistant', content: '好的', contextFile }] }, 100001), 'other');
+
 });
 
 test('preset context files are admitted through the host attachment service', async () => {
@@ -976,7 +975,7 @@ test('preset context files are admitted through the host attachment service', as
   const inline = await materializePresetContext({ preset, messages, admission: undefined, allowInline: true });
   const inlineBlock = inline.messages[0].content[1];
   assert.equal(inlineBlock.type, 'image');
-  assert.equal(inlineBlock.attachment.attachmentId, 'preset:' + contextFileHash(Buffer.from('png-bytes')));
+  assert.equal(inlineBlock.attachment.attachmentId, 'sha256:' + contextFileHash(Buffer.from('png-bytes')));
   assert.equal(inlineBlock.presetData, data);
   assert.equal(inline.imageCount, 1);
   assert.deepEqual(inline.warnings, []);
@@ -984,12 +983,12 @@ test('preset context files are admitted through the host attachment service', as
 
 test('image admission preserves reasoning and tool blocks and counts only admitted files', async () => {
   const data = Buffer.from('fictional').toString('base64');
-  const preset = { prompts: [{ identifier: 'ctx', contextFiles: [
+  const preset = { prompts: [{ identifier: 'ctx', role: 'user', contextFiles: [
     { kind: 'image', mediaType: 'image/png', data },
     { kind: 'file', mediaType: 'text/plain', data },
   ] }] };
   const retained = [{ type: 'reasoning', text: 'fictional' }, { type: 'tool-call', id: 'call', name: 'example', arguments: {} }];
-  const messages = [{ role: 'assistant', content: [retained[0],
+  const messages = [{ role: 'user', content: [retained[0],
     { type: PRESET_CONTEXT_BLOCK, identifier: 'ctx', index: 0, kind: 'image', mediaType: 'image/png' },
     retained[1], { type: PRESET_CONTEXT_BLOCK, identifier: 'ctx', index: 1, kind: 'file', mediaType: 'text/plain' }] }];
   const result = await materializePresetContext({ preset, messages, admission: {
@@ -1004,6 +1003,54 @@ test('image admission preserves reasoning and tool blocks and counts only admitt
   assert.equal(result.fileCount, 0);
 });
 
+test('context files are refused on non-user entries and non-user messages skip them', async () => {
+  const data = Buffer.from('fictional').toString('base64');
+  const file = { kind: 'image', mediaType: 'image/png', data };
+  // The host refuses images outside user messages, so validation must not let the state exist.
+  assert.throws(() => validatePreset({ prompts: [{ identifier: 'sys', role: 'system', contextFiles: [file] }] }), /角色必须是 user/);
+  assert.throws(() => validatePreset({ prompts: [{ identifier: 'as', role: 'assistant', contextFile: file }] }), /角色必须是 user/);
+  validatePreset({ prompts: [{ identifier: 'ok', role: 'user', contextFiles: [file] }] });
+  validatePreset({ prompts: [{ identifier: 'plain', role: 'system', content: 'no files' }] });
+
+  // Defense in depth: a hand-edited state file or an older package must not break the request.
+  const preset = { prompts: [{ identifier: 'ctx', role: 'system', contextFiles: [file] }] };
+  const messages = [{ id: 'm', role: 'system', content: [
+    { type: 'text', text: 'keep me' },
+    { type: PRESET_CONTEXT_BLOCK, identifier: 'ctx', index: 0, kind: 'image', mediaType: 'image/png' },
+  ] }];
+  let admitted = 0;
+  const result = await materializePresetContext({ preset, messages, admission: {
+    admitPromptContent: async () => { admitted += 1; return []; },
+    admitEncodedFile: async () => null,
+  } });
+  assert.equal(admitted, 0, 'nothing is admitted for a non-user message');
+  assert.deepEqual(result.messages[0].content, [{ type: 'text', text: 'keep me' }]);
+  assert.equal(result.imageCount, 0);
+  assert.match(result.warnings.join('\n'), /只接受 user 消息中的图片/);
+});
+
+test('images above the host per-message batch are admitted in batches instead of failing', async () => {
+  const data = Buffer.from('fictional').toString('base64');
+  const files = Array.from({ length: ADMIT_IMAGE_BATCH + 3 }, () => ({ kind: 'image', mediaType: 'image/png', data }));
+  const preset = { prompts: [{ identifier: 'ctx', role: 'user', contextFiles: files }] };
+  const blocks = files.map((_, index) => ({ type: PRESET_CONTEXT_BLOCK, identifier: 'ctx', index, kind: 'image', mediaType: 'image/png' }));
+  const batches = [];
+  const result = await materializePresetContext({ preset, messages: [{ id: 'm', role: 'user', content: blocks }], admission: {
+    admitPromptContent: async parts => { batches.push(parts.length); return parts.map((_, index) => ({ type: 'image', attachment: { attachmentId: 'ref-' + (batches.length * 100 + index) } })); },
+    admitEncodedFile: async () => null,
+  } });
+  assert.deepEqual(batches, [ADMIT_IMAGE_BATCH, 3], 'the batch is split at the host limit');
+  assert.equal(result.imageCount, ADMIT_IMAGE_BATCH + 3);
+});
+
+test('a preset over the aggregate context budget is refused', () => {
+  // Four 8 MiB files: each is inside the per-file limit, the total is over MAX_PRESET_CONTEXT_BYTES.
+  const chunk = Buffer.alloc(8 * 1024 * 1024).toString('base64');
+  const file = { kind: 'image', mediaType: 'image/png', data: chunk };
+  assert.equal(presetContextBytes({ contextFiles: [file] }), 8 * 1024 * 1024);
+  assert.throws(() => validatePreset({ prompts: [{ identifier: 'big', role: 'user', contextFiles: [file, file, file, file] }] }), /MiB 上限/);
+});
+
 test('a prompt carries several context files and same-named ones get distinct request names', async () => {
   const png = Buffer.from('png-bytes').toString('base64');
   // Two entries intentionally share one clipboard-style name.
@@ -1015,8 +1062,8 @@ test('a prompt carries several context files and same-named ones get distinct re
   validatePreset(preset);
 
   // The legacy single field still validates and compiles.
-  validatePreset({ prompts: [{ identifier: 'one', contextFile: { kind: 'image', mediaType: 'image/png', data: png } }] });
-  assert.throws(() => validatePreset({ prompts: [{ identifier: 'bad', contextFiles: [1] }] }), /contextFile/);
+  validatePreset({ prompts: [{ identifier: 'one', role: 'user', contextFile: { kind: 'image', mediaType: 'image/png', data: png } }] });
+  assert.throws(() => validatePreset({ prompts: [{ identifier: 'bad', role: 'user', contextFiles: [1] }] }), /contextFile/);
   assert.throws(() => validatePreset({ prompts: [{ identifier: 'many', contextFiles: Array.from({ length: 25 }, () => ({ kind: 'image', mediaType: 'image/png', data: png })) }] }), /最多 24 项/);
 
   const compiled = compilePreset({
