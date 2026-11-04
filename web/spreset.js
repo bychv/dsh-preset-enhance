@@ -862,12 +862,14 @@ async function addContextFiles(source, files, hint) {
       if (name) entry.name = name;
       if (entry.kind === 'image') {
         const size = await readImageSize('data:' + mediaType + ';base64,' + base64);
-        // 宿主校验要求正整数且不超过 100000：读不到或不合法就不写，宁缺勿错。
-        if (size && Number.isInteger(size.width) && Number.isInteger(size.height) &&
+        // 预览要能显示、宿主也要能归一化：解码失败说明字节并不是有效图片。
+        if (!size) return { skipped: label + '：无法解码为有效图片' };
+        if (size.width * size.height > CONTEXT_IMAGE_MAX_PIXELS) {
+          return { skipped: label + '：' + size.width + '×' + size.height + ' 超过 ' + (CONTEXT_IMAGE_MAX_PIXELS / 1000000) + ' 万像素上限' };
+        }
+        // 宿主校验要求正整数且不超过 100000：不合法就不写，宁缺勿错。
+        if (Number.isInteger(size.width) && Number.isInteger(size.height) &&
           size.width > 0 && size.height > 0 && size.width <= 100000 && size.height <= 100000) {
-          if (size.width * size.height > CONTEXT_IMAGE_MAX_PIXELS) {
-            return { skipped: label + '：' + size.width + '×' + size.height + ' 超过 ' + (CONTEXT_IMAGE_MAX_PIXELS / 1000000) + ' 万像素上限' };
-          }
           entry.width = size.width;
           entry.height = size.height;
         }
