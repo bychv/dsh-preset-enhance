@@ -10,7 +10,7 @@
 - **预填充与工具**：Assistant 前缀续写、DSML 转换、实验性正文提取、逐工具开关与分组。
 - **插件接入**：动态模板、酒馆 marker 关联、历史消息处理与预设只读 API。
 
-> **0.3.7-alpha.1** 支持 DSH **0.2.1 和 0.2.2**；alpha 为实验通道，验证范围见[兼容记录](docs/compatibility/DSH_0.2.2_COMPATIBILITY.md)。
+> 当前源码面向 **0.3.7-rc.1**；已发布预览版为 **0.3.7-alpha.1**。此系列支持 DSH **0.2.1 和 0.2.2**；alpha 为实验通道，验证范围见[兼容记录](docs/compatibility/DSH_0.2.2_COMPATIBILITY.md)。
 
 ## 安装与升级
 

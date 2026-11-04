@@ -74,9 +74,9 @@ export async function materializePresetContext(options: MaterializeContextOption
       // Identity is content-addressed by the attachment service, so a duplicate display name is
       // harmless and is passed through untouched, exactly like a user attachment.
       if (file.kind === 'file') {
-        fileCount += 1;
         const ref = await admitFile(encoded, file.name, admission, warnings, block.identifier);
         if (ref === null) continue;
+        fileCount += 1;
         parts.push({ type: 'file', attachment: ref } as ContentBlock);
         continue;
       }
@@ -127,10 +127,18 @@ async function admitImages(parts: ContentBlock[], admission: ContextAdmission, w
   const hasEncoded = parts.some((part: any) => part.type === 'image' && typeof part.data === 'string');
   if (!hasEncoded) return parts as unknown as readonly ContextPart[];
   try {
-    return await admission.admitPromptContent!(parts.map((part: any) => {
+    // Admission accepts prompt input, not reasoning or tool blocks. Preserve all other
+    // blocks verbatim while batching images together for the host's per-message limits.
+    const images = parts.filter((part: any) => part.type === 'image');
+    const admitted = await admission.admitPromptContent!(images.map((part: any) => {
       const { __presetIdentifier: _ignored, ...rest } = part;
       return rest;
     }));
+    if (admitted.length !== images.length || admitted.some(part => part.type !== 'image' || !part.attachment)) {
+      throw new Error('附件服务返回的图片数量或类型不匹配');
+    }
+    let index = 0;
+    return parts.map(part => part.type === 'image' ? admitted[index++] : part as ContextPart);
   } catch (error) {
     warnings.push('预设上下文图片入库失败：' + (error instanceof Error ? error.message : String(error)));
     return parts as unknown as readonly ContextPart[];

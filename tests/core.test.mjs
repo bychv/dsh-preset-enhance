@@ -926,6 +926,17 @@ test('a context file compiles into an identity block and is never a text prefix'
     prompts: [preset.prompts[0], { identifier: 'ctx', role: 'assistant', content: '好的', contextFile }],
   }, [msg('u', 'user', 'hi')], { characterId: 100001 });
   assert.equal(assistantContext.assistantPrefix.active, false);
+  const forcedWithAttachment = compilePreset({
+    prompts: [
+      { identifier: 'prefix', role: 'assistant', content: 'Continue' },
+      { identifier: 'ctx', role: 'assistant', content: 'Image context', contextFile },
+      { identifier: 'last', role: 'system', content: 'Final instruction' },
+    ],
+    prompt_order: [{ character_id: 100001, order: ['prefix', 'ctx', 'last'].map(identifier => ({ identifier, enabled: true })) }],
+  }, [], { characterId: 100001, forcePrefill: true });
+  assert.equal(forcedWithAttachment.messages.at(-1).content[0].text, 'Continue');
+  assert.equal(forcedWithAttachment.assistantPrefix.active, true);
+
   assert.equal(lastContentRole({ ...preset, prompts: [preset.prompts[0], { identifier: 'ctx', role: 'assistant', content: '好的', contextFile }] }, 100001), 'other');
 });
 
@@ -969,6 +980,28 @@ test('preset context files are admitted through the host attachment service', as
   assert.equal(inlineBlock.presetData, data);
   assert.equal(inline.imageCount, 1);
   assert.deepEqual(inline.warnings, []);
+});
+
+test('image admission preserves reasoning and tool blocks and counts only admitted files', async () => {
+  const data = Buffer.from('fictional').toString('base64');
+  const preset = { prompts: [{ identifier: 'ctx', contextFiles: [
+    { kind: 'image', mediaType: 'image/png', data },
+    { kind: 'file', mediaType: 'text/plain', data },
+  ] }] };
+  const retained = [{ type: 'reasoning', text: 'fictional' }, { type: 'tool-call', id: 'call', name: 'example', arguments: {} }];
+  const messages = [{ role: 'assistant', content: [retained[0],
+    { type: PRESET_CONTEXT_BLOCK, identifier: 'ctx', index: 0, kind: 'image', mediaType: 'image/png' },
+    retained[1], { type: PRESET_CONTEXT_BLOCK, identifier: 'ctx', index: 1, kind: 'file', mediaType: 'text/plain' }] }];
+  const result = await materializePresetContext({ preset, messages, admission: {
+    admitPromptContent: async parts => {
+      assert.deepEqual(parts.map(part => part.type), ['image']);
+      return [{ type: 'image', attachment: { attachmentId: 'fixture' } }];
+    },
+    admitEncodedFile: async () => { throw Error('refused'); },
+  } });
+  assert.deepEqual(result.messages[0].content, [retained[0], { type: 'image', attachment: { attachmentId: 'fixture' } }, retained[1]]);
+  assert.equal(result.imageCount, 1);
+  assert.equal(result.fileCount, 0);
 });
 
 test('a prompt carries several context files and same-named ones get distinct request names', async () => {

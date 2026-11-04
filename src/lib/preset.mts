@@ -246,7 +246,7 @@ export function compilePreset(preset: SillyTavernPreset, history: HostMessage[] 
       if (message.role !== 'assistant') continue;
       if (message.source?.kind !== 'plugin' || message.source.plugin !== 'dsh-preset-enhance') continue;
       if (message.id !== undefined && markerMessageIds.has(message.id)) continue;
-      if (textOf(message).trim().length === 0) continue;
+      if (textOf(message).trim().length === 0 || !isTextOnlyMessage(message)) continue;
       chosen = index;
       break;
     }

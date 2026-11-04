@@ -1,6 +1,6 @@
 # 插件逻辑架构
 
-本文对应 0.3.7-alpha.1，支持 DSH 0.2.1 和 0.2.2。安装入口是 `dsh-preset-enhance`，主包精确依赖 `dsh-preset-display-regex`，由根目录 `cordis.patch.yml` 在同一插件页注册两个可分别启停的运行条目。`packages/bundle` 仅保留兼容入口，不是正常安装所需的第三个包。
+本文对应 0.3.7 开发版（目标 rc.1），支持 DSH 0.2.1 和 0.2.2。安装入口是 `dsh-preset-enhance`，主包精确依赖 `dsh-preset-display-regex`，由根目录 `cordis.patch.yml` 在同一插件页注册两个可分别启停的运行条目。`packages/bundle` 仅保留兼容入口，不是正常安装所需的第三个包。
 
 ## 包边界与数据流
 
@@ -81,6 +81,7 @@ flowchart TD
 | `src/lib/store.mts`、`src/lib/preset-package.mts` | 状态持久化、版本校验、单文件导入导出 |
 | `src/lib/dsh-system-template.mts`、`src/lib/request-settings.mts`、`src/lib/buffered-response.mts` | 模式系统模板与动态 DSH 宏、请求参数与非流式响应接入 |
 | `src/lib/dsh-assembly.mts`、`src/lib/dsh-template-source.mts`、`src/client/dsh-template-editor.ts` | 本轮组装关联、共享段落选择、分段编辑和只读上下文预览 |
+| `src/lib/context-files.mts`、`src/lib/preset-context.mts`、`src/client/context-attachments.ts` | 附件校验、请求期宿主入库与两个编辑器共用预览 |
 | `src/lib/preset.mts`、`src/lib/macros.mts` | 顺序表、深度注入、变量宏、最终消息和预填充判定 |
 | `src/lib/spreset-tools.mts`、`src/lib/spreset-script.mts`、`src/client/spreset-tools.ts` | 实验性工具注册、输出调用消费、受限脚本执行与编辑界面 |
 | `src/lib/tool-presets.mts`、`src/lib/tool-restrictions.mts` | 工具策略、分组、会话作用域限制和 PTC 工具可见性 |
@@ -148,3 +149,11 @@ flowchart TD
 ## 维护入口
 
 源码与生成物分工见[包地图](../packages/README.md)，命令与 locale 范围见[开发验证](DEVELOPMENT.md)。用户操作以 `guides/`、接入契约以 `api/` 为准；[任务索引](plans/PACKAGE_IMPLEMENTATION_TASKS.md)区分未落地能力，测试记录保留其具体版本和证据边界。
+
+## 上下文附件
+
+提示词条目通过 `contextFiles` 保存图片和文件；旧 `contextFile` 读取为单项。编译阶段仅生成带条目标识和索引的 `preset-context` 块，请求阶段再从当前记录及分享资源解析字节，交给宿主附件服务。图片批量入库时保留同消息中的推理、工具调用及其他块；文件入库失败会跳过并告警。图片还需通过模型输入能力检查，Chat 的系统/助手图片降级为文字占位。
+
+分享导出将实际引用的字节去重为 `extensions.assets`，导入校验大小与摘要；编辑器在草稿中恢复字节，支持复制到资源库及再次导出。图片单项最多 8 MiB，每条目最多 24 项，保存请求最多 32 MiB（含 JSON/base64）。不导出仅对本机有效的附件 ID。
+
+两个编辑器共用附件预览模块与样式。预设保存同时校验全局 revision 和该预设的 editVersion，避免自动重试覆盖其他窗口保存的草稿；不自动合并冲突。
