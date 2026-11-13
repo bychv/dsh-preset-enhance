@@ -148,7 +148,7 @@ templates.register(ctx, {
 
 ## 外部动态预填充
 
-提供者检查 `templates.capabilities.externalPrefillV1`。注册一个目标为 `dshDynamicPrefill`、角色为 `assistant` 的动态模板，声明 `dynamic.prefill`。普通 marker 和历史修改模板继续沿用原契约。
+这是面向所有宿主插件的模板扩展接口。提供者自行决定如何生成前缀，例如使用本地规则或独立模型。接入时检查 `templates.capabilities.externalPrefillV1`，注册一个目标为 `dshDynamicPrefill`、角色为 `assistant` 的动态模板，并声明 `dynamic.prefill`。普通 marker 和历史修改模板继续沿用原契约。
 
 ```js
 templates.register(ctx, {
@@ -171,7 +171,7 @@ templates.register(ctx, {
 });
 ```
 
-`generateOpening` 由提供者实现。模型连接和凭据由提供者管理，配置时应向用户说明正文将发往何处。回调只接收指定窗口中的正文，按用户发起的轮次分组，包含本次输入。宿主过滤 system、工具调用与结果、附件、结构化推理和内联 think/thinking/reasoning 段。生成器上下文没有原始 history 或 latestUser，variables 为空。`turns` 的范围为 1–50，`maxChars` 为 1–200000，超过预算会报错。独立超时范围 100–30000 毫秒。配置中请使用凭据引用或外部插件设置。
+`generateOpening` 由示例提供者实现。若使用独立模型，连接和凭据由提供者管理，配置时应向用户说明正文将发往何处。回调只接收指定窗口中的正文，按用户发起的轮次分组，包含本次输入。宿主过滤 system、工具调用与结果、附件、结构化推理和内联 think/thinking/reasoning 段。生成器上下文没有原始 history 或 latestUser，variables 为空。`turns` 的范围为 1–50，`maxChars` 为 1–200000，超过预算会报错。独立超时范围 100–30000 毫秒。配置中请使用凭据引用或外部插件设置。
 
 `input.prefill` 提供 `phase`、`turnId`、`step`、`reuseKey`、`turns`、`tailRole`、`target` 和预设状态 `revision`。发送只在宿主确认的本轮首个请求调用。工具续轮保留现有静态或工具后前缀行为。无法确认轮次或连接不支持当前 Chat 前缀时跳过，预览会说明。存在末尾 assistant 时拒绝叠加，`requireUserTail` 可再限制末尾必须是 user。
 
