@@ -48,7 +48,7 @@ export interface TemplateRegistration {
 
 export interface PresetTemplatesV1 {
   readonly contractVersion: 1;
-  readonly capabilities: { readonly dynamicTemplatesV1: true; readonly historyPatchesV1: true; readonly externalPrefillV1: true };
+  readonly capabilities: { readonly dynamicTemplatesV1: true; readonly historyPatchesV1: true; readonly externalPrefillV1: true; readonly conversationTextV1: true };
   register(ownerContext: TemplateOwnerContext, definition: TemplateProviderV1, runtime?: TemplateRuntimeV1): TemplateRegistration;
   /** Returns a detached snapshot; editing it cannot change registered templates. */
   list(): TemplateCatalogSnapshot;
@@ -63,13 +63,18 @@ export interface DynamicMessageV1 {
   readonly source?: Readonly<{ kind?: string; [key: string]: unknown }>;
 }
 
+export interface ConversationTextMessageV1 {
+  readonly role: 'user' | 'assistant';
+  readonly text: string;
+}
+
 export interface PrefillContextV1 {
   readonly phase: 'first' | 'continuation' | 'preview' | 'unknown';
   readonly turnId?: string;
   readonly step?: number;
   /** Reuse only while the key and provider activation match. */
   readonly reuseKey?: string;
-  readonly turns: readonly (readonly Readonly<{ role: 'user' | 'assistant'; text: string }>[])[];
+  readonly turns: readonly (readonly ConversationTextMessageV1[])[];
   readonly tailRole?: string;
   readonly target: 'reasoning' | 'content';
   readonly revision?: number;
@@ -108,6 +113,8 @@ export interface DynamicTemplateContextV1 {
   readonly latestUser?: DynamicMessageV1;
   readonly userText: string;
   readonly history?: readonly DynamicMessageV1[];
+  /** Flat, chronological dialogue projection for ordinary conversation-text resolvers. */
+  readonly conversationText?: readonly ConversationTextMessageV1[];
   readonly prefill?: PrefillContextV1;
   readonly variables: Readonly<{ local: Readonly<Record<string, string>>; global: Readonly<Record<string, string>>; values: Readonly<Record<string, unknown>> }>;
   readonly config: Readonly<Record<string, unknown>>;

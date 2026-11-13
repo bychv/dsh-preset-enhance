@@ -71,7 +71,7 @@ TypeScript 可从同一公开子路径导入 `PresetTemplatesV1`、`PromptTempla
 | `description` | 可选文本，最多 2,000 字符 |
 | `role` | `system`、`user` 或 `assistant` |
 | `content` | 定义文本，可为空，最多 200,000 字符；注册时不展开宏、不执行回调 |
-| `dynamic` | 可选 `{ resolverId, input, output }`；input 为 latest-user（默认）、history 或外部预填充专用 conversation-text；output 默认为 text，须包含 {{dynamic::body}}；history-patches 见下节 |
+| `dynamic` | 可选 `{ resolverId, input, output }`；input 为 latest-user（默认）、history 或纯对话正文 conversation-text；output 默认为 text，须包含 {{dynamic::body}}；history-patches 见下节 |
 | `targetMarker` | 可选的酒馆 marker identifier，例如 charDescription、worldInfoBefore；声明后仅能关联该标记，不作为新增提示词插入 |
 | `defaults.placement` | 可选位置建议：`beforeHistory`、`afterHistory` 或 `depth` |
 | `defaults.depth` | depth 位置必须提供非负安全整数，其他位置不可填写 |
@@ -133,6 +133,12 @@ templates.register(ctx, {
 根包不跨请求缓存回调结果，不用旧静态编译缓存绕过解析。固定版本约束定义；更改回调语义应提供新模板版本，运行数据变化无需 update 目录。
 
 动态绑定的 mode 为 linked-dynamic；config、failurePolicy 和普通引用字段随单文件分享保留。本轮结果与历史不导出，旧版会跳过未知关联模式。转为本地副本会清除动态槽位并保留其余定义文本；如需保留某次实际正文，可先从预览复制。marker 解除关联仍恢复原标记来源。
+
+## 只读纯正文历史
+
+普通动态模板可在注册时声明 `dynamic: { resolverId: 'read', input: 'conversation-text' }`，并通过 `templates.capabilities.conversationTextV1` 探测支持。解析器从 `input.conversationText` 读取按时间顺序排列的只读 `{ role, text }` 数组。实际请求包含本次用户输入，草稿预览包含预览输入。没有可用正文时返回空数组。
+
+该投影仅保留用户与助手正文，过滤系统消息、工具调用及结果、附件、结构化推理和内联思考标签区段。工具调用所在消息即使夹带普通文本也会跳过。此模式的 `userText` 同样使用过滤后的用户正文，`history` 与 `latestUser` 不提供原始消息。需要按原始消息深度修改聊天记录的模板继续声明 `input: 'history'`。
 
 ## 外部动态预填充
 

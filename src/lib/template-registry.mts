@@ -49,7 +49,7 @@ function templatesOf(value: unknown): PromptTemplateV1[] {
         if (!['text', 'history-patches'].includes(String(raw.dynamic.output))) throw new Error('动态模板输出声明无效');
         item.dynamic.output = raw.dynamic.output as 'text' | 'history-patches';
       }
-      if (raw.dynamic.prefill !== undefined || raw.dynamic.input === 'conversation-text') {
+      if (raw.dynamic.prefill !== undefined) {
         const config = raw.dynamic.prefill;
         if (!isRecord(config) || raw.targetMarker !== 'dshDynamicPrefill' || raw.role !== 'assistant' ||
             raw.defaults !== undefined || item.dynamic.output === 'history-patches') throw new Error('预填充生成器必须关联 dshDynamicPrefill 并使用 assistant 文本');
@@ -140,7 +140,7 @@ export function createTemplateRegistry(onListenerError: (error: unknown) => void
   };
   const service: PresetTemplatesV1 = Object.freeze({
     contractVersion: 1 as const,
-    capabilities: Object.freeze({ dynamicTemplatesV1: true as const, historyPatchesV1: true as const, externalPrefillV1: true as const }),
+    capabilities: Object.freeze({ dynamicTemplatesV1: true as const, historyPatchesV1: true as const, externalPrefillV1: true as const, conversationTextV1: true as const }),
     register(owner: TemplateOwnerContext, definition: TemplateProviderV1, runtime?: TemplateRuntimeV1) {
       assertOpen();
       if (!owner || typeof owner.effect !== 'function') throw new Error('注册模板需要有效的插件作用域');

@@ -1,6 +1,6 @@
 import { isUserAuthored } from './compaction.mjs';
 import type { PluginContext, StreamOptions } from '../host-types.mjs';
-import type { PrefillContextV1 } from '../template-api.mjs';
+import type { ConversationTextMessageV1, PrefillContextV1 } from '../template-api.mjs';
 import type { HostMessage } from './types.mjs';
 
 export const DYNAMIC_PREFILL_ID = 'dshDynamicPrefill';
@@ -54,19 +54,26 @@ function plainText(text: string): string {
   return (result + (open.length ? '' : text.slice(start))).trim();
 }
 
+const NON_DIALOGUE_SOURCES = new Set(['plugin', 'system-prompt', 'runtime-context', 'tool', 'developer', 'compact-checkpoint']);
+
+export function projectConversationMessage(message: HostMessage): ConversationTextMessageV1 | undefined {
+  const user = isUserAuthored(message);
+  if (!user && message.role !== 'assistant') return;
+  if (NON_DIALOGUE_SOURCES.has(message.source?.kind ?? '') ||
+      message.content?.some(block => block.type === 'tool-call' || block.type === 'tool-result')) return;
+  const text = plainText((message.content ?? []).filter(block => block.type === 'text').map(block => block.text ?? '').join('\n'));
+  return { role: user ? 'user' : 'assistant', text };
+}
+
 export function conversationText(history: HostMessage[], count: number, maxChars: number): PrefillContextV1['turns'] {
-  const turns: { role: 'user' | 'assistant'; text: string }[][] = [];
-  let current: typeof turns[number] = [];
+  const turns: ConversationTextMessageV1[][] = [];
+  let current: ConversationTextMessageV1[] = [];
   // Work backwards so old history outside the configured window is never copied.
   for (let index = history.length - 1; index >= 0 && turns.length < count; index--) {
-    const message = history[index];
-    const user = isUserAuthored(message);
-    if (!user && message.role !== 'assistant') continue;
-    if (['plugin', 'system-prompt', 'runtime-context', 'tool', 'developer', 'compact-checkpoint'].includes(message.source?.kind ?? '') ||
-        message.content?.some(block => block.type === 'tool-call' || block.type === 'tool-result')) continue;
-    const text = plainText((message.content ?? []).filter(block => block.type === 'text').map(block => block.text ?? '').join('\n'));
-    if (text) current.push({ role: user ? 'user' : 'assistant', text });
-    if (user) { turns.push(current.reverse()); current = []; }
+    const row = projectConversationMessage(history[index]);
+    if (!row) continue;
+    if (row.text) current.push(row);
+    if (row.role === 'user') { turns.push(current.reverse()); current = []; }
   }
   const selected = turns.reverse();
   if (selected.reduce((total, turn) => total + turn.reduce((n, message) => n + message.text.length, 0), 0) > maxChars) {

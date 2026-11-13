@@ -3,6 +3,6 @@ export const PRESET_TEMPLATES_SERVICE = 'presetTemplates';
 export type {
   TemplateOwnerContext, PromptTemplateV1, TemplateProviderV1,
   TemplateCatalogSnapshot, TemplateRegistration, PresetTemplatesV1,
-  DynamicMessageV1, DynamicTemplateContextV1, TemplateRuntimeV1,
+  DynamicMessageV1, ConversationTextMessageV1, DynamicTemplateContextV1, TemplateRuntimeV1,
   HistoryPatchV1, HistoryPatchResultV1, DynamicTemplateResultV1, PrefillContextV1, PrefillResultV1, PresetPrefillSummaryV1,
 } from './template-api.mjs';

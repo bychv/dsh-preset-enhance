@@ -123,3 +123,39 @@ test('dynamic marker keeps its original role and has revision-aware configuratio
     assert.equal(preset.prompts[0].marker, true);
   } finally { f.registry.close(); }
 });
+
+test('conversation-text exposes only immutable user and assistant prose in order', async () => {
+  const f = fixture(ctx => {
+    assert.equal(ctx.latestUser, undefined);
+    assert.equal(ctx.history, undefined);
+    assert.equal(ctx.prefill, undefined);
+    assert.equal(ctx.userText, 'Latest');
+    assert.deepEqual(ctx.conversationText, [
+      { role: 'user', text: 'Question' },
+      { role: 'assistant', text: 'Answer' },
+      { role: 'user', text: 'Latest' },
+    ]);
+    assert.ok(Object.isFrozen(ctx.conversationText));
+    assert.ok(Object.isFrozen(ctx.conversationText[0]));
+    return 'safe';
+  }, { dynamic: { resolverId: 'read', input: 'conversation-text' } });
+  try {
+    assert.equal(f.registry.service.capabilities.conversationTextV1, true);
+    const text = text => ({ type: 'text', text });
+    const history = [
+      { role: 'system', content: [text('System')] },
+      user('Question'),
+      { role: 'assistant', content: [text('Tool preamble'), { type: 'tool-call', id: 't' }] },
+      { role: 'user', source: { kind: 'tool' }, content: [text('Tool result')] },
+      { role: 'user', source: { kind: 'compact-checkpoint' }, content: [text('Summary')] },
+      { role: 'assistant', source: { kind: 'model' }, content: [
+        { type: 'reasoning', text: 'Private reasoning' }, text('<thinking>hidden</thinking>Answer'),
+      ] },
+      { role: 'user', content: [text('Latest<reasoning>unfinished'), { type: 'image' }] },
+    ];
+    for (const purpose of ['request', 'preview']) {
+      const prepared = await prepareDynamicTemplates(f.registry, f.preset, history, { purpose });
+      assert.equal(prepared.bodies[f.id].text, 'safe');
+    }
+  } finally { f.registry.close(); }
+});
