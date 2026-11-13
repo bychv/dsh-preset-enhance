@@ -12,7 +12,7 @@ const user = (id, text) => ({ id, role: 'user', source: { kind: 'user' }, conten
 async function setup(run, historyMode = false, promptSource) {
   const dir = await mkdtemp(join(tmpdir(), 'preset-dynamic-request-'));
   const store = new PresetStore(join(dir, 'state.json'));
-  const originalFetch = globalThis.fetch, sent = [], routes = new Map(), services = new Map(), listeners = {}, disposers = [];
+  const originalFetch = globalThis.fetch, sent = [], routes = new Map(), services = new Map(), listeners = {}, hooks = {}, disposers = [];
   const histories = { a: [user('u1', 'hello')], b: [user('u2', 'other')] };
   const tools = [{ name: 'echo', description: 'Echo', parameters: { type: 'object', properties: {} } }];
   globalThis.fetch = async (url, init) => { sent.push({ url, raw: init.body }); return Response.json({ choices: [{ message: { role: 'assistant', content: 'done' }, finish_reason: 'stop' }] }); };
@@ -21,7 +21,12 @@ async function setup(run, historyMode = false, promptSource) {
     requestHeader: () => ({ config: { provider: 'preset-deepseek-chat', model: 'deepseek-chat', reasoningEffort: 'off' } }) });
   const ctx = {
     effect: fn => { const dispose = fn(); if (typeof dispose === 'function') disposers.push(dispose); },
-    provide: (key, value) => services.set(key, value), get: key => services.get(key), on: (key, fn) => { listeners[key] = fn; },
+    provide: (key, value) => services.set(key, value), get: key => services.get(key), on: (key, fn) => {
+      listeners[key] = fn;
+      const prior = hooks[key];
+      hooks[key] = prior ? key === 'agent/request' ? (payload, next) => prior(payload, () => fn(payload, next))
+        : (...args) => { prior(...args); return fn(...args); } : fn;
+    },
     sessions: { get: session }, agents: { get: id => ({ session: session(id), options: { model: 'deepseek-chat', provider: 'preset-deepseek-chat' }, ctx: { tools: { schemas: () => tools } } }) },
     systemPrompt: promptSource,
     webServer: { register: route => { routes.set(route.path, route); } },
@@ -55,8 +60,8 @@ async function setup(run, historyMode = false, promptSource) {
       state.presets.push({ id: 'p', name: 'Test', preset });
       for (const id of ['a', 'b']) state.bindings[id] = { enabled: true, presetId: 'p', values: {}, markers: {} };
     });
-    return { store, histories, preset, post, sent, tools, ctx, routes,
-      async send(sessionId, retries = 1) { for await (const _ of ctx.llm.stream({ sessionId, provider: 'preset-deepseek-chat', model: 'deepseek-chat', reasoningEffort: 'off', messages: histories[sessionId], tools, retries })) {} },
+    return { store, histories, preset, post, sent, tools, ctx, routes, hooks,
+      async send(sessionId, retries = 1, signal) { for await (const _ of ctx.llm.stream({ sessionId, provider: 'preset-deepseek-chat', model: 'deepseek-chat', reasoningEffort: 'off', messages: histories[sessionId], tools, retries, signal })) {} },
       async close() { await Promise.all(disposers.reverse().map(dispose => dispose())); await store.close(); globalThis.fetch = originalFetch; await rm(dir, { recursive: true, force: true }); },
     };
   } catch (error) { await Promise.all(disposers.reverse().map(f => f())); globalThis.fetch = originalFetch; await rm(dir, { recursive: true, force: true }); throw error; }
@@ -195,4 +200,102 @@ test('the first user request expands fresh DSH macros without any prior request 
     assert.ok(!raw.includes('{{dsh::')); assert.ok(!raw.includes('old-model'));
     assert.equal((await f.post({action:'request-snapshot',sessionId:'a'})).snapshot.raw,raw);
   } finally {await f.close();}
+});
+
+test('external prefill receives filtered text, sends a literal prefix and never calls on continuation', async () => {
+  const f = await setup(() => 'ordinary');
+  try {
+    const inputs = [];
+    let resolvePrefix = () => ({ status: 'generated', text: 'Literal {{incglobalvar::secret}}' });
+    const external = f.ctx.get('presetTemplates').register({ effect: fn => fn() }, {
+      providerId: 'prefix.example', title: 'Example', templates: [{
+        id: 'prefix', version: '1', title: 'Prefix', role: 'assistant', content: '{{dynamic::body}}',
+        targetMarker: 'dshDynamicPrefill', dynamic: { resolverId: 'prefix', prefill: { turns: 1, requireUserTail: true } },
+      }],
+    }, { resolvers: { prefix(input) { inputs.push(input); return resolvePrefix(input); } } });
+    const preset = { dsh_prefill_target: 'content', prompts: [
+      { identifier: 'chatHistory', marker: true },
+      { identifier: 'dshDynamicPrefill', marker: true, role: 'assistant' },
+    ] };
+    await f.store.transaction(state => {
+      state.presets[0].preset = preset;
+      state.deepseekBetaPrefix = true;
+      state.postToolPrefixMode = 'custom';
+      state.postToolPrefixText = 'After tools';
+    });
+    f.histories.a[0].content = [
+      { type: 'text', text: 'Visible<think>hidden</think><reasoning>unfinished' },
+      { type: 'reasoning', text: 'structured reasoning' },
+    ];
+    const preview = () => f.post({ action: 'preview', sessionId: 'a', preset, options: {} });
+    const draft = await preview();
+    assert.equal(inputs.length, 0);
+    assert.match(draft.warnings.join(' '), /等待实际发送/);
+    await f.post({ action: 'preview', sessionId: 'a', preset, options: {}, resolveExternalPrefill: true });
+    assert.equal(inputs.length, 1);
+    assert.equal(inputs[0].prefill.phase, 'preview');
+    assert.equal(inputs[0].prefill.reuseKey, undefined);
+    const signal = new AbortController().signal;
+    const hooks = f.hooks;
+    const agent = f.ctx.agents.get('a');
+    hooks['session/event'](agent.session, { type: 'turn/start', data: { turn: 7 } });
+    const step = n => hooks['agent/request']({ agent, turn: 7, step: n, signal }, async () => ({}));
+    await step(9);
+    await f.send('a', 2, signal);
+    assert.equal(inputs.length, 2);
+    assert.equal(inputs[1].prefill.turnId, '7');
+    assert.equal(inputs[1].prefill.step, 9);
+    assert.equal(inputs[1].latestUser, undefined);
+    assert.equal(inputs[1].history, undefined);
+    assert.deepEqual(inputs[1].prefill.turns, [[{ role: 'user', text: 'Visible' }]]);
+    assert.equal(inputs[1].userText, 'Visible');
+    assert.ok(inputs[1].prefill.reuseKey);
+    const outbound = JSON.parse(f.sent[0].raw);
+    assert.equal(outbound.messages.at(-1).content, 'Literal {{incglobalvar::secret}}');
+    assert.equal(outbound.messages.at(-1).prefix, true);
+    assert.equal(f.sent[0].raw, f.sent[1].raw);
+    await f.send('a', 1, signal);
+    assert.equal(inputs[1].prefill.reuseKey, inputs[2].prefill.reuseKey);
+    f.histories.a.push(
+      { id: 'call', role: 'assistant', content: [{ type: 'tool-call', id: 't', name: 'echo', arguments: '{}' }] },
+      { id: 'result', role: 'tool', toolCallId: 't', source: { kind: 'tool' }, content: [{ type: 'text', text: 'Tool result' }] },
+    );
+    await step(10);
+    await f.send('a', 1, signal);
+    assert.equal(inputs.length, 3);
+    assert.equal(JSON.parse(f.sent.at(-1).raw).messages.at(-1).content, 'After tools');
+    assert.equal((await f.store.read()).global.secret, undefined);
+    // A pre-existing assistant tail blocks the resolver before a paid call.
+    hooks['session/event'](agent.session, { type: 'turn/start', data: { turn: 7 } });
+    await step(11);
+    f.histories.a = [user('new', 'Next'), { id: 'prefix', role: 'assistant', content: [{ type: 'text', text: 'Already set' }] }];
+    await assert.rejects(f.send('a', 1, signal), /前缀|约束冲突/);
+    assert.equal(inputs.length, 3);
+
+    f.histories.a = [user('next', 'Next')];
+    await f.store.transaction(state => { state.presets[0].preset.prompts[1].content = 'Local fallback'; });
+    resolvePrefix = () => ({ status: 'fallback' });
+    await f.send('a', 1, signal);
+    assert.equal(JSON.parse(f.sent.at(-1).raw).messages.at(-1).content, 'Local fallback');
+
+    await f.store.transaction(state => { state.protocolMode = 'messages'; });
+    const called = inputs.length;
+    const messages = await f.post({ action: 'preview', sessionId: 'a', preset, options: {}, resolveExternalPrefill: true });
+    assert.equal(inputs.length, called);
+    assert.match(messages.warnings.join(' '), /未启用 Chat/);
+
+    await f.store.transaction(state => { state.protocolMode = 'chat-completions'; });
+    let began, late;
+    const entered = new Promise(resolve => { began = resolve; });
+    resolvePrefix = input => { began(input); return new Promise(resolve => { late = resolve; }); };
+    const running = f.send('a', 1, signal);
+    const pending = await entered;
+    const sentBefore = f.sent.length;
+    await f.store.transaction(state => { state.bindings.a.enabled = false; });
+    await assert.rejects(running, /动态预填充解析失败/);
+    assert.equal(pending.signal.aborted, true);
+    late('Too late');
+    assert.equal(f.sent.length, sentBefore);
+    external.dispose();
+  } finally { await f.close(); }
 });

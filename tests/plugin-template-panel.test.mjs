@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
-import { selectTemplate, templateFingerprint } from '../lib/template-bindings.mjs';
+import { selectTemplate, templateCatalogWithFingerprints, templateFingerprint } from '../lib/template-bindings.mjs';
 const element = tag => ({ tag, children: [], value: '', textContent: '', open: false,
   append(...nodes) { this.children.push(...nodes); },
   replaceChildren(...nodes) { this.children = nodes; },
@@ -75,4 +75,29 @@ test('template panel hands changes to normal save hook and refuses an outdated d
   assert.match(all(root).map(n => n.textContent).join(' '), /未覆盖/);
   await panel.refresh();
   assert.equal(draft.prompts[0].identifier, 'user-edit');
+});
+
+test('the catalog exposes missing built-in and provider markers without altering the draft', async () => {
+  const catalog = templateCatalogWithFingerprints({ contractVersion: 1, revision: 1, providers: [{
+    providerId: 'example', title: 'Example', templates: [
+      { id: 'custom', version: '1', title: 'Custom', role: 'user', content: 'text', targetMarker: 'exampleSlot' },
+      { id: 'other', version: '1', title: 'Other', role: 'system', content: 'text', targetMarker: 'exampleSlot' },
+    ],
+  }] });
+  const draft = { prompts: [{ identifier: 'chatHistory', marker: true }], prompt_order: [
+    { character_id: 100001, order: [{ identifier: 'chatHistory', enabled: false }] },
+  ] };
+  const original = structuredClone(draft);
+  const context = { document: { createElement: element, hidden: false }, window: { addEventListener() {} },
+    fetch: async () => ({ ok: true, json: async () => catalog }), setInterval: () => 1, clearInterval() {} };
+  runInNewContext(readFileSync(new URL('../web/plugin-templates.js', import.meta.url), 'utf8'), context);
+  const panel = context.PresetPluginTemplates.mount(element('details'), {
+    getPreset: () => draft, getOrder: () => draft.prompt_order[0].order, isLocked: () => false,
+  });
+  await tick();
+  const candidates = panel.unusedMarkers(draft);
+  assert.equal(candidates.filter(marker => marker.identifier === 'dshDynamicPrefill').length, 1);
+  assert.equal(candidates.filter(marker => marker.identifier === 'exampleSlot').length, 1);
+  assert.equal(candidates.some(marker => marker.identifier === 'chatHistory'), false);
+  assert.deepEqual(draft, original);
 });

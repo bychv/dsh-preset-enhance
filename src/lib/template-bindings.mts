@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { DYNAMIC_PREFILL_ID } from './external-prefill.mjs';
 import type { HistoryPatchV1, PromptTemplateV1, TemplateCatalogSnapshot } from '../template-api.mjs';
 import type { SillyTavernPreset, PresetPrompt, PromptOrderEntry } from './types.mjs';
 
@@ -33,8 +34,31 @@ export function templateBindings(preset: SillyTavernPreset, catalog?: TemplateCa
   return bindings;
 }
 export const templateFingerprint = (template: PromptTemplateV1) => createHash('sha256').update(JSON.stringify(template)).digest('hex');
+const BUILTIN_MARKERS = [
+  ['chatHistory', '聊天记录', 'user'],
+  [DYNAMIC_PREFILL_ID, '动态预填充', 'assistant'],
+  ['worldInfoBefore', '世界书（前）', 'system'],
+  ['worldInfoAfter', '世界书（后）', 'system'],
+  ['worldInfoDepth', '世界书（深度）', 'system'],
+  ['personaDescription', '用户描述', 'system'],
+  ['charDescription', '角色描述', 'system'],
+  ['charPersonality', '角色性格', 'system'],
+  ['scenario', '场景', 'system'],
+  ['dialogueExamples', '对话示例', 'system'],
+] as const;
+
+export function supportedMarkers(catalog: TemplateCatalogSnapshot): PresetPrompt[] {
+  const markers = new Map<string, PresetPrompt>(BUILTIN_MARKERS.map(([identifier, name, role]) =>
+    [identifier, { identifier, name, role, marker: true }]));
+  for (const provider of catalog.providers) for (const template of provider.templates) {
+    const identifier = template.targetMarker;
+    if (identifier && !markers.has(identifier)) markers.set(identifier, { identifier, name: identifier, role: template.role, marker: true });
+  }
+  return [...markers.values()];
+}
+
 export function templateCatalogWithFingerprints(catalog: TemplateCatalogSnapshot) {
-  return { ...catalog, fingerprints: catalog.providers.flatMap(provider => provider.templates.map(template => ({
+  return { ...catalog, markers: supportedMarkers(catalog), fingerprints: catalog.providers.flatMap(provider => provider.templates.map(template => ({
     providerId: provider.providerId, templateId: template.id, templateVersion: template.version,
     fingerprint: templateFingerprint(template),
   }))) };
@@ -43,11 +67,11 @@ function find(catalog: TemplateCatalogSnapshot | undefined, ref: Record<string, 
   return catalog?.providers.find(provider => provider.providerId === ref.providerId)?.templates
     .find(template => template.id === ref.templateId && template.version === ref.templateVersion);
 }
-const markerTarget = (prompt: PresetPrompt) => prompt.marker === true &&
+const markerTarget = (prompt: PresetPrompt) => (prompt.marker === true || prompt.identifier === DYNAMIC_PREFILL_ID) &&
   prompt.identifier !== 'dsh-preset-enhance:dsh-system-prompt';
 
 /** Resolve only into a request copy. Unavailable linked text must never fall back to its snapshot. */
-export interface DynamicBody { text?: string; patches?: HistoryPatchV1[]; reason?: string }
+export interface DynamicBody { text?: string; patches?: HistoryPatchV1[]; reason?: string; prefillStatus?: 'generated' | 'fallback' | 'skipped'; continuation?: boolean; requireUserTail?: boolean; notice?: string }
 export function resolveTemplateBindings(preset: SillyTavernPreset, catalog?: TemplateCatalogSnapshot, activeIds?: Set<string>, bodies?: Record<string, DynamicBody>) {
   const bindings = templateBindings(preset, catalog);
   const warnings: string[] = [];
@@ -76,12 +100,13 @@ export function resolveTemplateBindings(preset: SillyTavernPreset, catalog?: Tem
       : ref.fingerprint !== fingerprint ? '同版本内容已变化，请查看并重新接受'
       : '';
     const body = bodies && Object.hasOwn(bodies, prompt.identifier) ? bodies[prompt.identifier] : undefined;
-    const unavailable = reason || (template?.dynamic && bodies ? body?.reason || (history ? (!Array.isArray(body?.patches) ? '历史修改未解析' : '') : (typeof body?.text !== 'string' ? '动态正文未解析' : '')) : '');
+    const unavailable = reason || (template?.dynamic && bodies ? body?.reason || (history ? (!Array.isArray(body?.patches) ? '历史修改未解析' : '') : (typeof body?.text !== 'string' && !body?.prefillStatus ? '动态正文未解析' : '')) : '');
     if (!activeIds || activeIds.has(prompt.identifier)) {
       references.push({ identifier: prompt.identifier, fingerprint, reason: unavailable });
+      if (body?.notice) warnings.push(`插件模板「${prompt.name ?? prompt.identifier}」：${body.notice}`);
       if (unavailable) warnings.push(`插件模板「${prompt.name ?? prompt.identifier}」已跳过：${unavailable}`);
     }
-    if (unavailable) { missing.add(prompt.identifier); return prompt; }
+    if (unavailable || body?.prefillStatus === 'skipped' || body?.prefillStatus === 'fallback') { missing.add(prompt.identifier); return prompt; }
     if (history) return prompt;
     return { ...prompt, role: marker ? prompt.role : template!.role, content: template!.content, ...(marker ? { marker: false } : {}) };
   });

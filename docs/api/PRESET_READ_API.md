@@ -28,6 +28,12 @@ const access = reader.issueHttpAccess(agent);
 
 agent 必须是 ctx.agents.get(agent.session.id) 返回的当前宿主实例，不能只传一个 sessionId 或伪造对象。服务不接受 HTTP 签发凭证请求；也没有任意进程获取内部权限的公共接口。其他宿主插件本身属于受信任代码边界。
 
+## 进程内动态预填充摘要
+
+受信任的宿主插件可调用 `presetReader.readPrefill(agent, signal)`。与 `read` 一样校验当前宿主 agent 身份。返回 `PresetPrefillSummaryV1`，包含 revision、有效预设 ID、注入与 Beta 开关、思考/正文目标，以及动态标记在选中顺序表中的状态与模板关联。返回值省略正文、配置、生成结果和凭据。
+
+生成器读取本次输入请使用 resolver 的 `prefill` 快照。HTTP 和 `preset_read` 工具仍提供下面列出的只读查询。
+
 ## HTTP
 
 基础路径：`/preset-enhance/api/v1`。内部桥接器请求须带 `Authorization: Bearer <token>`。凭证绑定 agent 所属会话，有效期 5 分钟；同 agent 重新签发会撤销旧凭证。agent 不再存在或插件停用后不可用，凭证不持久化。Bearer 是持有者凭证，不证明调用进程身份，须由内部桥接器保管。

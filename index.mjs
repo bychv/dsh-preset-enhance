@@ -16,6 +16,7 @@ import { CompilationCache, macroChanges, replayMacros } from './lib/session-comp
 import { createTemplateRegistry } from './lib/template-registry.mjs';
 import { resolveTemplateBindings, selectTemplate, templateCatalogWithFingerprints, templateBindings } from './lib/template-bindings.mjs';
 import { prepareDynamicTemplates } from './lib/dynamic-templates.mjs';
+import { DYNAMIC_PREFILL_ID, trackPrefillTurns } from './lib/external-prefill.mjs';
 import { RequestSnapshots, traceRequest, previewMessages, messageOrigins } from './lib/request-preview.mjs';
 import { PRESET_TEMPLATES_SERVICE } from './templates.mjs';
 import { compilePreset, validatePreset, getOrder, dshSystemPromptEnabled, lastContentRole } from './lib/preset.mjs';
@@ -308,6 +309,7 @@ export async function apply(ctx, config = {}) {
         return record ? { id: record.id, preset: record.preset, characterId: binding?.characterId } : undefined;
     }, (agent, tool) => effectiveToolEnabled(policySnapshot, agent.session?.id, sessionModeId(agent.session), tool));
     const dshAssemblies = createDshAssemblyTracker(ctx, sessionModeId);
+    const prefillTurn = trackPrefillTurns(ctx);
     if (!startupError)
         installToolRestrictions(ctx, () => policySnapshot, sessionModeId, agent => spresetTools.prepare(agent), dshAssemblies.capture);
     const tools = ctx.tools;
@@ -361,13 +363,14 @@ export async function apply(ctx, config = {}) {
         const dependencyKey = (state) => {
             const binding = effectiveBinding(state);
             return digest({ binding, mode: sessionModeId(session), record: state.presets.find(p => p.id === binding?.presetId), global: state.global,
-                local: sessionVariables(state, sessionId, binding?.presetId)?.result.local, protocol: connectionProtocolFor(state, connectionInfo),
+                local: sessionVariables(state, sessionId, binding?.presetId)?.result.local, protocol: connectionProtocolFor(state, sessionConnection(ctx, sessionId, options.provider)),
                 beta: state.deepseekBetaPrefix, postToolPrefixMode: state.postToolPrefixMode, postToolPrefixText: state.postToolPrefixText,
                 prefixToolCalls: state.prefixToolCalls, prefixNonOfficialRemoveTools: state.prefixNonOfficialRemoveTools, prefixOutputExtraction: state.prefixOutputExtraction, forcePrefill: state.forcePrefill });
         };
         const initialBinding = effectiveBinding(initial);
         const initialRecord = initial.presets.find(p => p.id === initialBinding?.presetId);
-        const dynamic = initialBinding?.enabled && initialRecord && Object.values(templateBindings(initialRecord.preset, templateCatalog)).some(ref => ref?.mode === 'linked-dynamic');
+        const refs = initialRecord && templateBindings(initialRecord.preset, templateCatalog);
+        const dynamic = initialBinding?.enabled && initialRecord && Object.values(refs ?? {}).some(ref => ref?.mode === 'linked-dynamic');
         const needsDsh = initialBinding?.enabled && initialRecord && !exclusive && dshSystemPromptEnabled(initialRecord.preset);
         const expectedDependency = dynamic || needsDsh ? dependencyKey(initial) : undefined;
         const dshSystemTemplate = needsDsh ? dshAssemblies.forRequest(options, modeId)
@@ -379,13 +382,29 @@ export async function apply(ctx, config = {}) {
         let requestSettings;
         let prefixTarget = 'reasoning';
         const historyRevision = dynamic && session.deriveMessages ? digest(session.deriveMessages()) : undefined;
-        const dynamicBodies = dynamic ? (await lifecycle.track(prepareDynamicTemplates(templateRegistry, initialRecord.preset, preparedHistory(initialRecord.preset), {
-            ...initialBinding, local: sessionVariables(initial, sessionId, initialRecord.id)?.result.local, global: initial.global,
-            sessionId, presetId: initialRecord.id, mode: modeId, protocol: connectionProtocolFor(initial, connectionInfo),
-            purpose: 'request', signal: options.signal, templateCatalog,
-        }))).bodies : undefined;
+        const requestHistory = initialRecord ? preparedHistory(initialRecord.preset) : history;
+        const prepare = (record, binding) => {
+            const protocol = connectionProtocolFor(initial, connectionInfo);
+            const compileOptions = { ...binding, local: sessionVariables(initial, sessionId, record.id)?.result.local, global: initial.global,
+                dshSystemTemplate, forcePrefill: initial.forcePrefill };
+            return prepareDynamicTemplates(templateRegistry, record.preset, requestHistory, {
+                ...compileOptions, sessionId, presetId: record.id, mode: modeId, protocol, purpose: 'request', signal: options.signal, templateCatalog,
+                prefill: { ...prefillTurn(options), enabled: (initial.deepseekBetaPrefix || initial.forcePrefill) &&
+                        (connectionInfo?.protocol === 'chat-completions' || options.provider === DEEPSEEK_CHAT_PROVIDER_ID),
+                    revision: initial.revision, target: record.preset.dsh_prefill_target === 'content' ? 'content' : 'reasoning',
+                    bindingKey: digest({ binding, preset: record.preset, editVersion: record.editVersion, postToolPrefixMode: initial.postToolPrefixMode, postToolPrefixText: initial.postToolPrefixText }),
+                    watch: invalidate => store.subscribe(current => {
+                        if (dependencyKey(current) !== expectedDependency)
+                            invalidate();
+                    }),
+                    tail: bodies => prefillTail(record.preset, requestHistory, { ...compileOptions, templateCatalog, dynamicBodies: bodies }) },
+            });
+        };
+        const preparedTemplates = dynamic ? await lifecycle.track(prepare(initialRecord, initialBinding)) : undefined;
+        const dynamicBodies = preparedTemplates?.bodies;
         if (wantsPreset || catalogChanged) {
             const prepared = await lifecycle.track(store.transaction((current) => {
+                preparedTemplates?.assertAvailable();
                 if (expectedDependency !== undefined && (dependencyKey(current) !== expectedDependency ||
                     (historyRevision !== undefined && digest(session.deriveMessages()) !== historyRevision)))
                     throw new Error('动态解析期间预设、变量或会话已变化，请重新发送');
@@ -498,6 +517,7 @@ export async function apply(ctx, config = {}) {
             })
             : undefined;
         const messages = context === undefined ? compiledMessages : context.messages;
+        preparedTemplates?.assertAvailable();
         options.signal?.throwIfAborted();
         if (context !== undefined && context.imageCount > 0)
             await assertImageInput(ctx, options);
@@ -595,7 +615,7 @@ export async function apply(ctx, config = {}) {
             throw new Error('预设服务不可用');
         return await store.read();
     }, (state, sessionId) => ownGet(state.bindings, sessionId) ??
-        (shouldAutoEnable(state, ctx.sessions.get(sessionId)) ? defaultBinding(state) : undefined));
+        (shouldAutoEnable(state, ctx.sessions.get(sessionId)) ? defaultBinding(state) : undefined), () => templateRegistry.service.list());
     ctx.effect(() => () => reader.close(), 'preset-enhance: read API cleanup');
     ctx.provide?.('presetReader', reader.service);
     ctx.effect(() => ctx.webServer.register({ kind: 'prefix', path: PRESET_READ_BASE, handler: reader.handler }), 'preset-enhance: read API');
@@ -805,9 +825,16 @@ export async function apply(ctx, config = {}) {
                     const requestSettings = readRequestSettings(validatePreset(body.preset));
                     const options = { ...body.options, dshSystemTemplate, local: sessionVariables(current, sessionId, body.presetId ?? ownGet(current.bindings, sessionId)?.presetId)?.result.local, global: current.global,
                         postToolPrefix: current.deepseekBetaPrefix && current.postToolPrefixMode === 'custom' ? current.postToolPrefixText : undefined };
+                    const catalog = templateRegistry.service.list();
                     const prepared = await prepareDynamicTemplates(templateRegistry, validatePreset(body.preset), history, {
-                        ...options, sessionId, presetId: body.presetId, mode, protocol, purpose: 'preview', signal: controller.signal,
+                        ...options, sessionId, presetId: body.presetId, mode, protocol, purpose: 'preview', signal: controller.signal, templateCatalog: catalog,
+                        prefill: { phase: 'preview', target: body.preset.dsh_prefill_target === 'content' ? 'content' : 'reasoning',
+                            revision: current.revision, enabled: (current.deepseekBetaPrefix || current.forcePrefill) &&
+                                (connection?.protocol === 'chat-completions' || connectionSelection(ctx, sessionId).provider === DEEPSEEK_CHAT_PROVIDER_ID),
+                            allowPreview: body.resolveExternalPrefill === true,
+                            tail: bodies => prefillTail(body.preset, history, { ...options, templateCatalog: catalog, dynamicBodies: bodies, forcePrefill: current.forcePrefill }) },
                     });
+                    prepared.assertAvailable();
                     const references = resolveTemplateBindings(body.preset, prepared.catalog, new Set(getOrder(body.preset, options.characterId).filter(i => i.enabled).map(i => i.identifier))).references;
                     const key = compilationKey(body.preset, history, { ...options, forcePrefill: current.forcePrefill }, protocol, references, prepared.bodies);
                     const compiled = compilePreset(body.preset, history, { ...options, seed: key, templateCatalog: prepared.catalog, dynamicBodies: prepared.bodies, dshSystemTemplate, forcePrefill: current.forcePrefill === true });
@@ -857,11 +884,17 @@ export async function apply(ctx, config = {}) {
                     const preset = validatePreset(body.preset);
                     const order = getOrder(preset, body.options?.characterId).filter(i => i.enabled);
                     const ids = new Set(order.map(i => i.identifier));
-                    const dynamic = Object.entries(templateBindings(preset, templateRegistry.service.list())).some(([id, ref]) => ids.has(id) && ref?.mode === 'linked-dynamic');
+                    const catalog = templateRegistry.service.list();
+                    const bindings = templateBindings(preset, catalog);
+                    const dynamic = Object.entries(bindings).some(([id, ref]) => ids.has(id) && ref?.mode === 'linked-dynamic');
                     // Entries that produce no message never become the final message, so an empty marker or a
                     // blank prompt at the end of the order must not hide an assistant prefill in front of it.
                     const role = lastContentRole(preset, body.options?.characterId, body.options?.markers);
-                    return respond(res, 200, { pending: dynamic, assistantPrefix: { active: !!preset.assistant_prefill?.trim() || role === 'assistant' } });
+                    const ref = bindings[DYNAMIC_PREFILL_ID];
+                    const externalPrefill = ids.has(DYNAMIC_PREFILL_ID) && ref?.mode === 'linked-dynamic' &&
+                        catalog.providers.some(provider => provider.providerId === ref.providerId &&
+                            provider.templates.some(template => template.id === ref.templateId && template.version === ref.templateVersion && template.dynamic?.prefill));
+                    return respond(res, 200, { pending: dynamic, externalPrefill, assistantPrefix: { active: !!preset.assistant_prefill?.trim() || role === 'assistant' } });
                 }
                 // The workbench test box. Regular expressions, the placement/depth plan and the macro engine
                 // all come from the same modules a request uses; nothing returns or logs the chat text.
@@ -1314,6 +1347,9 @@ export async function apply(ctx, config = {}) {
             }
         },
     }), 'preset-enhance: API');
+}
+function prefillTail(preset, history, options) {
+    return compilePreset(preset, history, { ...options, omitDynamicPrefill: true }).messages.at(-1)?.role;
 }
 function sessionVariables(state, sessionId, presetId) {
     const row = ownGet(state.sessions, sessionId);

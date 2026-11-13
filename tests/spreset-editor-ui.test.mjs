@@ -477,3 +477,26 @@ test('model alias displays as assistant and copies to the library with its canon
   menuAction(ui, 'main', '复制为模板').click(); await flush();
   assert.equal(ui.requests.find(body => body.action === 'library-save').entry.role, 'assistant');
 });
+
+test('an available marker stays idle until joined to the selected SPreset order', async () => {
+  const marker = { identifier: 'dshDynamicPrefill', name: '动态预填充', role: 'assistant', marker: true };
+  const ui = editor({ pluginTemplates: {
+    linked: () => false,
+    mount: () => ({ render() {}, unusedMarkers: preset => preset.prompts.some(p => p.identifier === marker.identifier) ? [] : [marker] }),
+  } });
+  await flush();
+  const before = JSON.stringify(ui.draft());
+  await selectGroup(ui, 100003);
+  const card = ui.get('library-list').querySelectorAll('.card').find(node => node.textContent.includes(marker.name));
+  assert.ok(card);
+  assert.equal(JSON.stringify(ui.draft()), before);
+  assert.equal(byText(ui.get('chain-list'), marker.name), undefined);
+  card.querySelectorAll('button').find(button => button.textContent === '加入').click();
+  await flush();
+  const draft = ui.draft();
+  assert.equal(draft.prompts.filter(prompt => prompt.identifier === marker.identifier).length, 1);
+  assert.equal(draft.prompt_order.find(group => group.character_id === 100003).order.at(-1).identifier, marker.identifier);
+  assert.equal(draft.prompt_order.find(group => group.character_id === 100001).order.some(row => row.identifier === marker.identifier), false);
+  assert.ok(byText(ui.get('chain-list'), marker.name));
+  assert.equal(bodyArea(ui).disabled, false);
+});

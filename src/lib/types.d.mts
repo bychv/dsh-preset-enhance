@@ -249,6 +249,7 @@ export interface CompiledPreset {
 
 export interface CompilePresetOptions {
   templateCatalog?: import('../template-api.mjs').TemplateCatalogSnapshot;
+  omitDynamicPrefill?: boolean;
   dynamicBodies?: Record<string, import('./template-bindings.mjs').DynamicBody>;
   dshSystemTemplate?: import('./dsh-system-template.mjs').DshSystemTemplate;
   seed?: string;

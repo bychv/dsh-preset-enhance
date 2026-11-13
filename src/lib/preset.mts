@@ -1,3 +1,4 @@
+import { DYNAMIC_PREFILL_ID } from './external-prefill.mjs';
 import { isCompactionCheckpoint, isUserAuthored } from './compaction.mjs';
 import { DSH_TEMPLATE_ID, validateDshTemplates, validateDshSections } from './dsh-system-template.mjs';
 import { dshTemplateParts } from './dsh-template-source.mjs';
@@ -83,7 +84,7 @@ export function dshSystemPromptEnabled(preset: SillyTavernPreset | null | undefi
  * assistant continuation instead, so the prefill text can change per request (marker value, macro
  * or variable) without reordering the preset.
  */
-export const DYNAMIC_PREFILL_ID = 'dshDynamicPrefill';
+export { DYNAMIC_PREFILL_ID };
 
 export function getOrder(preset: SillyTavernPreset, characterId?: string | number | null): PromptOrderEntry[] {
   const groups = preset.prompt_order ?? [];
@@ -150,6 +151,7 @@ function textOf(message: HostMessage | undefined): string {
 export function compilePreset(preset: SillyTavernPreset, history: HostMessage[] = [], options: CompilePresetOptions = {}): CompiledPreset {
   validatePreset(preset);
   const resolved = resolveTemplateBindings(preset, options.templateCatalog, new Set(getOrder(preset, options.characterId).filter(item => item.enabled).map(item => item.identifier)), options.dynamicBodies ?? {});
+  const originalPrefill = preset.prompts.find(prompt => prompt.identifier === DYNAMIC_PREFILL_ID);
   preset = resolved.preset;
   // A compaction checkpoint is not a user turn: excluding it keeps lastusermessage, and the
   // dynamic values derived from it, pointing at what the user actually wrote. The checkpoint
@@ -191,15 +193,23 @@ export function compilePreset(preset: SillyTavernPreset, history: HostMessage[] 
       }
       continue;
     }
+    const trigger = p.injection_trigger;
+    if (trigger?.length && !trigger.includes(options.trigger ?? 'normal')) continue;
     if (p.identifier === DYNAMIC_PREFILL_ID) {
-      // Exception to injection: render it here and append it after everything instead.
-      const dynamicText = renderMacros(options.markers?.[p.identifier] ?? p.content ?? '', ctx);
+      const body = options.dynamicBodies?.[p.identifier];
+      const linked = resolved.references.find(ref => ref.identifier === p.identifier);
+      if (options.omitDynamicPrefill || body?.prefillStatus === 'skipped' || (linked?.reason && body?.prefillStatus !== 'fallback')) continue;
+      const original = originalPrefill;
+      const source = body?.prefillStatus === 'fallback'
+        ? options.markers?.[p.identifier] ?? original?.content ?? ''
+        : linked ? p.content ?? '' : options.markers?.[p.identifier] ?? p.content ?? '';
+      if (body?.text !== undefined) ctx.values['dynamic::body'] = body.text;
+      const dynamicText = renderMacros(source, ctx);
+      delete ctx.values['dynamic::body'];
       entries.push({ identifier: p.identifier, name: p.name ?? p.identifier, role: 'assistant', text: dynamicText });
       if (dynamicText.trim()) dynamicPrefillText = dynamicText;
       continue;
     }
-    const trigger = p.injection_trigger;
-    if (trigger?.length && !trigger.includes(options.trigger ?? 'normal')) continue;
     let content = p.content ?? '';
     const fromMarker = p.marker === true;
     if (p.marker) {
@@ -240,11 +250,16 @@ export function compilePreset(preset: SillyTavernPreset, history: HostMessage[] 
   const messages = [...before];
   for (let i = 0; i <= history.length; i++) { messages.push(...(buckets.get(i) ?? [])); if (i < history.length) messages.push(history[i]); }
   messages.push(...after);
+  const externalPrefill = options.dynamicBodies?.[DYNAMIC_PREFILL_ID];
   if (preset.assistant_prefill) {
     const text = renderMacros(preset.assistant_prefill, ctx);
     if (text.trim()) messages.push({ id: `preset:${options.seed ?? 'preview'}:prefill`, role: 'assistant', content: [{ type: 'text', text }], source: { kind: 'plugin', plugin: 'dsh-preset-enhance' } });
   }
   if (dynamicPrefillText.trim()) {
+    const role = messages.at(-1)?.role;
+    if (externalPrefill?.prefillStatus === 'generated' && (role === 'assistant' || (externalPrefill.requireUserTail && role !== 'user'))) {
+      throw new Error('出站消息末尾与动态预填充约束冲突');
+    }
     messages.push({ id: `preset:${options.seed ?? 'preview'}:${DYNAMIC_PREFILL_ID}`, role: 'assistant',
       content: [{ type: 'text', text: dynamicPrefillText }], source: { kind: 'plugin', plugin: 'dsh-preset-enhance' } });
   }
@@ -271,14 +286,20 @@ export function compilePreset(preset: SillyTavernPreset, history: HostMessage[] 
   const lastHistory = history.at(-1);
   const afterTool = lastHistory?.role === 'tool' || lastHistory?.source?.kind === 'tool' ||
     lastHistory?.content?.some(block => block.type === 'tool-result');
-  if (afterTool && typeof options.postToolPrefix === 'string' && options.postToolPrefix.trim() &&
-      tail?.role === 'assistant' && tail.source?.plugin === 'dsh-preset-enhance') {
+  const ownTail = tail?.role === 'assistant' && tail.source?.plugin === 'dsh-preset-enhance';
+  const externalContinuation = options.dynamicBodies?.[DYNAMIC_PREFILL_ID]?.prefillStatus === 'fallback' &&
+    options.dynamicBodies[DYNAMIC_PREFILL_ID].continuation === true;
+  if (afterTool && typeof options.postToolPrefix === 'string' && options.postToolPrefix.trim() && (ownTail || externalContinuation)) {
     const text = renderMacros(options.postToolPrefix, ctx);
     // An empty custom template falls back to the preset's existing prefix.
     if (text.trim()) {
-      const prefixed: HostMessage = { ...tail, content: [{ type: 'text', text }] };
+      const prefixed: HostMessage = ownTail
+        ? { ...tail!, content: [{ type: 'text', text }] }
+        : { id: `preset:${options.seed ?? 'preview'}:post-tool-prefill`, role: 'assistant', content: [{ type: 'text', text }],
+          source: { kind: 'plugin', plugin: 'dsh-preset-enhance' } };
       tail = prefixed;
-      messages[messages.length - 1] = prefixed;
+      if (ownTail) messages[messages.length - 1] = prefixed;
+      else messages.push(prefixed);
     }
   }
   // Prompt-side regex runs last, over this request copy only: history text by chat floor, and the

@@ -13,7 +13,12 @@ export interface PromptTemplateV1 {
   role: 'system' | 'user' | 'assistant';
   content: string;
   /** Request-time literal body for {{dynamic::body}}; callbacks are registered separately. */
-  dynamic?: { resolverId: string; input?: 'latest-user' | 'history'; output?: 'text' | 'history-patches' };
+  dynamic?: {
+    resolverId: string;
+    input?: 'latest-user' | 'history' | 'conversation-text';
+    output?: 'text' | 'history-patches';
+    prefill?: { turns?: number; maxChars?: number; timeoutMs?: number; requireUserTail?: boolean };
+  };
   /** Optional Tavern marker identifier; unique target auto-binds; conflicts need selection. chatHistory requires history-patches. */
   targetMarker?: string;
   defaults?: {
@@ -43,7 +48,7 @@ export interface TemplateRegistration {
 
 export interface PresetTemplatesV1 {
   readonly contractVersion: 1;
-  readonly capabilities: { readonly dynamicTemplatesV1: true; readonly historyPatchesV1: true };
+  readonly capabilities: { readonly dynamicTemplatesV1: true; readonly historyPatchesV1: true; readonly externalPrefillV1: true };
   register(ownerContext: TemplateOwnerContext, definition: TemplateProviderV1, runtime?: TemplateRuntimeV1): TemplateRegistration;
   /** Returns a detached snapshot; editing it cannot change registered templates. */
   list(): TemplateCatalogSnapshot;
@@ -58,6 +63,39 @@ export interface DynamicMessageV1 {
   readonly source?: Readonly<{ kind?: string; [key: string]: unknown }>;
 }
 
+export interface PrefillContextV1 {
+  readonly phase: 'first' | 'continuation' | 'preview' | 'unknown';
+  readonly turnId?: string;
+  readonly step?: number;
+  /** Reuse only while the key and provider activation match. */
+  readonly reuseKey?: string;
+  readonly turns: readonly (readonly Readonly<{ role: 'user' | 'assistant'; text: string }>[])[];
+  readonly tailRole?: string;
+  readonly target: 'reasoning' | 'content';
+  readonly revision?: number;
+}
+
+export type PrefillResultV1 =
+  | { status: 'generated'; text: string }
+  | { status: 'fallback' | 'skipped' };
+
+export interface PresetPrefillSummaryV1 {
+  apiVersion: 1;
+  revision: number;
+  sessionId: string;
+  presetId: string | null;
+  enabled: boolean;
+  betaEnabled: boolean;
+  target: 'reasoning' | 'content';
+  marker: null | {
+    identifier: string;
+    inOrder: boolean;
+    enabled: boolean;
+    binding: null | { mode: 'auto-conflict'; candidates: string[] } |
+      { mode: string; providerId: string; templateId: string; templateVersion: string };
+  };
+}
+
 export interface DynamicTemplateContextV1 {
   readonly sessionId: string;
   readonly requestId: string;
@@ -70,6 +108,7 @@ export interface DynamicTemplateContextV1 {
   readonly latestUser?: DynamicMessageV1;
   readonly userText: string;
   readonly history?: readonly DynamicMessageV1[];
+  readonly prefill?: PrefillContextV1;
   readonly variables: Readonly<{ local: Readonly<Record<string, string>>; global: Readonly<Record<string, string>>; values: Readonly<Record<string, unknown>> }>;
   readonly config: Readonly<Record<string, unknown>>;
   readonly signal: AbortSignal;
@@ -80,7 +119,7 @@ export type HistoryPatchV1 =
   | { operation: 'insert'; depth: number; role: 'system' | 'user' | 'assistant'; text: string }
   | { operation: 'replace-text' | 'append-text'; depth: number; text: string; textIndex?: number };
 export interface HistoryPatchResultV1 { patches: HistoryPatchV1[] }
-export type DynamicTemplateResultV1 = string | HistoryPatchResultV1;
+export type DynamicTemplateResultV1 = string | HistoryPatchResultV1 | PrefillResultV1;
 
 export interface TemplateRuntimeV1 {
   resolvers: Record<string, (context: DynamicTemplateContextV1) => DynamicTemplateResultV1 | Promise<DynamicTemplateResultV1>>;

@@ -20,6 +20,7 @@ let displayAvailable = false;
 let pluginTemplatePanel = null;
 let requestPreview = null, previewController = null, previewGeneration = 0;
 const isLinkedTemplate = id => globalThis.PresetPluginTemplates?.linked(preset, id) === true;
+const isDynamicPrefill = id => id === 'dshDynamicPrefill';
 const DSH_SYSTEM_PROMPT_TEMPLATE_ID = 'dsh-preset-enhance:dsh-system-prompt';
 let dshTemplateEditMode = '';
 const PRESET_AUTO_SAVE_KEY = 'dsh-preset-enhance.preset-auto-save';
@@ -1653,8 +1654,9 @@ function renderList() {
     item,
     prompt: preset.prompts.find(prompt => prompt.identifier === item.identifier),
   })).filter(entry => entry.prompt)];
-  const unused = preset.prompts.filter(prompt => prompt.identifier !== DSH_SYSTEM_PROMPT_TEMPLATE_ID &&
-    !listed.has(prompt.identifier)).map(prompt => ({ prompt }));
+  const unused = [...preset.prompts, ...(pluginTemplatePanel?.unusedMarkers(preset) ?? [])]
+    .filter(prompt => prompt.identifier !== DSH_SYSTEM_PROMPT_TEMPLATE_ID && !listed.has(prompt.identifier))
+    .map(prompt => ({ prompt }));
   $('used-count').textContent = `${used.length} 项`;
   $('unused-count').textContent = `${unused.length} 项`;
   $('used-prompts').replaceChildren();
@@ -1684,6 +1686,7 @@ function renderPromptItem(prompt, item, used, term, parent) {
   button.dataset.promptId = prompt.identifier;
   button.textContent = fixed ? `${prompt.name} · 内置模板` :
     `${prompt.name ?? prompt.identifier} · ${prompt.marker ? '标记' : prompt.role ?? 'system'}`;
+  button.disabled = !fixed && !preset.prompts.some(entry => entry.identifier === prompt.identifier);
   button.onclick = () => {
     selectedPrompt = prompt.identifier;
     renderList();
@@ -1693,10 +1696,11 @@ function renderPromptItem(prompt, item, used, term, parent) {
   membership.className = 'membership';
   membership.type = 'button';
   membership.textContent = used ? '移出' : '加入';
-  membership.disabled = fixed || prompt.identifier === 'chatHistory';
+  membership.disabled = fixed || (used && prompt.identifier === 'chatHistory');
   membership.setAttribute('aria-label', `${used ? '移出顺序表' : '加入顺序表'} ${prompt.name ?? prompt.identifier}`);
   membership.onclick = () => {
     used ? removeFromOrder(prompt.identifier) : addToOrder(prompt.identifier);
+    selectedPrompt = prompt.identifier;
     renderList();
     renderEditor();
   };
@@ -1716,6 +1720,11 @@ function setEnabled(id, enabled) {
 }
 function addToOrder(id) {
   if (order().some(item => item.identifier === id)) return;
+  if (!preset.prompts.some(prompt => prompt.identifier === id)) {
+    const marker = pluginTemplatePanel?.unusedMarkers(preset).find(prompt => prompt.identifier === id);
+    if (!marker) return;
+    preset.prompts.push(structuredClone(marker));
+  }
   const marker = order().findIndex(item => item.identifier === 'chatHistory');
   order().splice(marker < 0 ? order().length : marker, 0, { identifier: id, enabled: true });
   markDirty();
@@ -1743,10 +1752,11 @@ function renderEditor() {
   $('depth').value = prompt.injection_depth ?? 4;
   $('priority').value = prompt.injection_order ?? 100;
   const chatHistory = prompt.identifier === 'chatHistory';
+  const dynamicPrefill = isDynamicPrefill(prompt.identifier);
   const templateRef = globalThis.PresetPluginTemplates?.bindings(preset)?.[prompt.identifier];
-  $('content').value = chatHistory ? '此内容从当前聊天记录读取' : templateRef?.target === 'marker' ? templateRef.contentSnapshot ?? '' : prompt.content ?? '';
-  for (const id of ['prompt-name', 'role', 'position', 'depth', 'priority']) $(id).disabled = fixed;
-  $('content').disabled = fixed ? !state.dshSystemTemplate?.available || !dshSectionEditor : !!prompt.marker || isLinkedTemplate(prompt.identifier);
+  $('content').value = chatHistory ? '此内容从当前聊天记录读取' : templateRef?.target === 'marker' && !dynamicPrefill ? templateRef.contentSnapshot ?? '' : prompt.content ?? '';
+  for (const id of ['prompt-name', 'role', 'position', 'depth', 'priority']) $(id).disabled = fixed || (dynamicPrefill && id !== 'prompt-name');
+  $('content').disabled = fixed ? !state.dshSystemTemplate?.available || !dshSectionEditor : !dynamicPrefill && (!!prompt.marker || isLinkedTemplate(prompt.identifier));
   const wholeDshTemplate = Object.hasOwn(preset.dsh_system_prompt_templates ?? {}, state.sessionMode ?? '');
   if ($('content-field')) $('content-field').hidden = fixed && !wholeDshTemplate && !!dshSectionEditor;
   renderContextFileField(prompt);
@@ -1756,13 +1766,13 @@ function renderEditor() {
     if (dshSectionEditor) dshSectionEditor({ preset, info: state.dshSystemTemplate, mode: dshTemplateEditMode, changed: markDirty, refresh: renderEditor });
     else if ($('dsh-template-sections')) $('dsh-template-sections').textContent = '分段编辑器未能加载，请重启 DSH 后刷新页面。';
   }
-  $('role').disabled = fixed || isLinkedTemplate(prompt.identifier);
+  $('role').disabled = fixed || dynamicPrefill || isLinkedTemplate(prompt.identifier);
   $('prompt-enabled').checked = fixed ? preset.dsh_system_prompt_enabled !== false : item?.enabled ?? false;
   $('prompt-enabled').disabled = !used;
   $('up').disabled = fixed || !used;
   $('down').disabled = fixed || !used;
   $('marker-note').textContent = fixed ?
-    `DSH 模式：${(state.agentModes ?? []).find(m => m.id === state.sessionMode)?.name ?? state.sessionMode ?? '默认'} · 动态宏在每次发送和预览时更新。${state.presetMode ? '专用预设模式不注入 DSH 提示词。' : ''}${state.dshSystemTemplate?.available ? '' : '当前无法读取模式模板。'}` : prompt.marker ?
+    `DSH 模式：${(state.agentModes ?? []).find(m => m.id === state.sessionMode)?.name ?? state.sessionMode ?? '默认'} · 动态宏在每次发送和预览时更新。${state.presetMode ? '专用预设模式不注入 DSH 提示词。' : ''}${state.dshSystemTemplate?.available ? '' : '当前无法读取模式模板。'}` : dynamicPrefill ? '静态回退前缀。外部模板可在插件模板区配置。' : prompt.marker ?
     (templateRef?.target === 'marker' ? `标记 ${prompt.identifier}：正文由插件模板提供；可在插件模板区恢复原标记。` : `标记 ${prompt.identifier}：chatHistory 展开真实会话；其他标记在下方 JSON 中填写。`) :
     `${prompt.identifier}${used ? '' : ' · 当前为闲置条目，加入顺序表后才会参与注入'}${isLinkedTemplate(prompt.identifier) ? ' · 插件关联正文只读；请在插件模板区更新版本或转为本地副本' : ''}`;
 }
@@ -2128,7 +2138,7 @@ for (const [id, key, numeric] of [
       }
       return;
     }
-    if (isLinkedTemplate(selectedPrompt) && (key === 'content' || key === 'role')) return;
+    if (isLinkedTemplate(selectedPrompt) && (key === 'role' || (key === 'content' && !isDynamicPrefill(selectedPrompt)))) return;
     current()[key] = numeric ? Number($(id).value) : $(id).value;
     markDirty();
     if (id === 'prompt-name' || id === 'role') renderList();
@@ -2754,7 +2764,13 @@ $('preview').onclick = guard(async () => {
   const generation = ++previewGeneration;
   const controller = previewController;
   try {
-    const result = await api({ action: 'preview', sessionId, presetId: selectedId, preset, input: $('input').value, options: options() }, { signal: controller.signal });
+    const draft = structuredClone(preset);
+    const previewOptions = options();
+    const input = $('input').value;
+    const info = await api({ action: 'prefill-inspect', preset: draft, options: previewOptions }, { signal: controller.signal });
+    if (generation !== previewGeneration) return;
+    const resolveExternalPrefill = info.externalPrefill === true && confirm('解析预览可能调用外部插件生成前缀，并把近期对话正文交给该插件。是否允许本次调用？');
+    const result = await api({ action: 'preview', sessionId, presetId: selectedId, preset: draft, input, options: previewOptions, resolveExternalPrefill }, { signal: controller.signal });
     if (generation === previewGeneration) show(result);
   } catch (error) { if (!controller.signal.aborted) throw error; }
 });
@@ -3423,6 +3439,7 @@ window.addEventListener('focus', () => { void refreshConnectionState(); });
 pluginTemplatePanel = globalThis.PresetPluginTemplates?.mount($('plugin-template-panel'), {
   api, getPreset: () => preset, getPresetId: () => selectedId, getCharacterId: () => $('order').value,
   getOrder: order, isLocked: id => (state.sPresetEditor?.locks?.[selectedId] ?? []).includes(id),
+  onCatalog: () => { renderList(); renderEditor(); },
   onSelect: id => { selectedPrompt = id; renderList(); renderEditor(); },
   onChange: (draft, id) => { preset = draft; ensureGroups(); selectedPrompt = id; markDirty(); renderList(); renderEditor(); },
 });

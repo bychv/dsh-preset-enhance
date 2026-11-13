@@ -71,7 +71,7 @@ TypeScript 可从同一公开子路径导入 `PresetTemplatesV1`、`PromptTempla
 | `description` | 可选文本，最多 2,000 字符 |
 | `role` | `system`、`user` 或 `assistant` |
 | `content` | 定义文本，可为空，最多 200,000 字符；注册时不展开宏、不执行回调 |
-| `dynamic` | 可选 `{ resolverId, input, output }`；input 为 latest-user（默认）或 history；output 默认为 text，须包含 {{dynamic::body}}；history-patches 见下节 |
+| `dynamic` | 可选 `{ resolverId, input, output }`；input 为 latest-user（默认）、history 或外部预填充专用 conversation-text；output 默认为 text，须包含 {{dynamic::body}}；history-patches 见下节 |
 | `targetMarker` | 可选的酒馆 marker identifier，例如 charDescription、worldInfoBefore；声明后仅能关联该标记，不作为新增提示词插入 |
 | `defaults.placement` | 可选位置建议：`beforeHistory`、`afterHistory` 或 `depth` |
 | `defaults.depth` | depth 位置必须提供非负安全整数，其他位置不可填写 |
@@ -133,6 +133,41 @@ templates.register(ctx, {
 根包不跨请求缓存回调结果，不用旧静态编译缓存绕过解析。固定版本约束定义；更改回调语义应提供新模板版本，运行数据变化无需 update 目录。
 
 动态绑定的 mode 为 linked-dynamic；config、failurePolicy 和普通引用字段随单文件分享保留。本轮结果与历史不导出，旧版会跳过未知关联模式。转为本地副本会清除动态槽位并保留其余定义文本；如需保留某次实际正文，可先从预览复制。marker 解除关联仍恢复原标记来源。
+
+## 外部动态预填充
+
+提供者检查 `templates.capabilities.externalPrefillV1`。注册一个目标为 `dshDynamicPrefill`、角色为 `assistant` 的动态模板，声明 `dynamic.prefill`。普通 marker 和历史修改模板继续沿用原契约。
+
+```js
+templates.register(ctx, {
+  providerId: 'example.continuation',
+  title: '续写生成器',
+  templates: [{
+    id: 'opening', version: '1', title: '生成开头', role: 'assistant',
+    targetMarker: 'dshDynamicPrefill', content: '{{dynamic::body}}',
+    dynamic: { resolverId: 'opening', prefill: {
+      turns: 4, maxChars: 24000, timeoutMs: 5000, requireUserTail: true,
+    } },
+  }],
+}, {
+  resolvers: {
+    async opening(input) {
+      const text = await generateOpening(input.prefill.turns, input.signal, input.prefill.reuseKey);
+      return text ? { status: 'generated', text } : { status: 'fallback' };
+    },
+  },
+});
+```
+
+`generateOpening` 由提供者实现。模型连接和凭据由提供者管理，配置时应向用户说明正文将发往何处。回调只接收指定窗口中的正文，按用户发起的轮次分组，包含本次输入。宿主过滤 system、工具调用与结果、附件、结构化推理和内联 think/thinking/reasoning 段。生成器上下文没有原始 history 或 latestUser，variables 为空。`turns` 的范围为 1–50，`maxChars` 为 1–200000，超过预算会报错。独立超时范围 100–30000 毫秒。配置中请使用凭据引用或外部插件设置。
+
+`input.prefill` 提供 `phase`、`turnId`、`step`、`reuseKey`、`turns`、`tailRole`、`target` 和预设状态 `revision`。发送只在宿主确认的本轮首个请求调用。工具续轮保留现有静态或工具后前缀行为。无法确认轮次或连接不支持当前 Chat 前缀时跳过，预览会说明。存在末尾 assistant 时拒绝叠加，`requireUserTail` 可再限制末尾必须是 user。
+
+`reuseKey` 绑定提供者激活、会话、轮次与步骤、历史、预设关联、目标和配置。相同准备再次执行时，提供者可凭此合并并发或复用生成结果。主包的传输重试沿用已准备的请求。显式授权的草稿预览是独立调用，没有发送复用键。结果不进入预设或分享包。绑定修改、请求取消、超时和提供者卸载会使已失效结果无法发送。
+
+返回非空字符串或 `{ status: 'generated', text }` 作为字面前缀。返回 `{ status: 'fallback' }` 采用同一条目保存的静态正文或会话标记值，`{ status: 'skipped' }` 跳过当前动态标记。失败沿用 abort/skip 配置，实际请求和 Raw 预览会附带跳过或回退原因。思考/正文位置沿用预设的前缀目标。
+
+两个编辑器会把内置标记及插件目录声明的缺失标记列在「闲置」或「未使用」，点「加入」才创建条目并插入选中顺序表。已在该表但停用的条目仍留在顺序表。唯一提供者自动关联，出现冲突可在「插件模板」中选择。
 
 ## 工作台消息与 Raw 预览
 

@@ -1,10 +1,14 @@
+import { getOrder } from './preset.mjs';
+import { templateBindings } from './template-bindings.mjs';
+import { DYNAMIC_PREFILL_ID } from './external-prefill.mjs';
+import type { PresetPrefillSummaryV1, TemplateCatalogSnapshot } from '../template-api.mjs';
 import { randomBytes } from 'node:crypto';
 import type { PluginContext, AgentHandle, HostRequest, HostResponse } from '../host-types.mjs';
-import type { PresetState } from './types.mjs';
+import type { PresetState, PresetBinding } from './types.mjs';
 
 export const PRESET_READ_BASE = '/preset-enhance/api/v1';
 class ReadError extends Error { status: number; code: string; constructor(status: number, code: string, message: string) { super(message); this.status = status; this.code = code; } }
-export function createPresetReader(ctx: PluginContext, readState: () => Promise<PresetState>, currentBinding: (state: PresetState, sessionId: string) => { enabled?: boolean; presetId?: string } | undefined) {
+export function createPresetReader(ctx: PluginContext, readState: () => Promise<PresetState>, currentBinding: (state: PresetState, sessionId: string) => PresetBinding | undefined, templateCatalog?: () => TemplateCatalogSnapshot) {
   const grants = new Map<string, { agent: AgentHandle; expiresAt: number }>();
   let closed = false;
   const identity = (agent: AgentHandle | undefined) => {
@@ -38,6 +42,25 @@ export function createPresetReader(ctx: PluginContext, readState: () => Promise<
     return { ...base, sessionId, enabled: binding?.enabled === true, presetId: binding?.presetId ?? null, selectedPresetId: state.selectedPresetId ?? null };
   }
   const service = Object.freeze({ apiVersion: 1, read,
+    async readPrefill(agent: AgentHandle, signal?: AbortSignal): Promise<PresetPrefillSummaryV1> {
+      const sessionId = identity(agent);
+      signal?.throwIfAborted();
+      const state = await readState();
+      identity(agent); signal?.throwIfAborted();
+      const binding = currentBinding(state, sessionId);
+      const record = state.presets.find(row => row.id === binding?.presetId);
+      const marker = record?.preset.prompts.find(prompt => prompt.identifier === DYNAMIC_PREFILL_ID);
+      const entry = marker && record && getOrder(record.preset, binding?.characterId).find(row => row.identifier === DYNAMIC_PREFILL_ID);
+      const ref = marker && record && templateBindings(record.preset, templateCatalog?.())[DYNAMIC_PREFILL_ID];
+      return { apiVersion: 1, revision: state.revision, sessionId, presetId: record?.id ?? null,
+        enabled: binding?.enabled === true, betaEnabled: state.deepseekBetaPrefix || state.forcePrefill,
+        target: record?.preset.dsh_prefill_target === 'content' ? 'content' : 'reasoning',
+        marker: marker ? { identifier: marker.identifier, inOrder: !!entry, enabled: entry?.enabled === true,
+          binding: ref?.mode === 'auto-conflict' ? { mode: 'auto-conflict', candidates: [...ref.candidates] }
+            : ref ? { mode: ref.mode, providerId: ref.providerId, templateId: ref.templateId, templateVersion: ref.templateVersion } : null,
+        } : null,
+      };
+    },
     issueHttpAccess(agent: AgentHandle) {
       identity(agent);
       for (const [key, grant] of grants) if (grant.expiresAt <= Date.now() || grant.agent === agent) grants.delete(key);

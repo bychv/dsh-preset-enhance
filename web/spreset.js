@@ -209,7 +209,8 @@ function loadPreset(id) {
     prompt.contextFiles = [prompt.contextFile];
     delete prompt.contextFile;
   }
-  if (!Array.isArray(preset.prompt_order)) preset.prompt_order = [];
+  if (!preset.prompt_order?.length) preset.prompt_order = [{ character_id: 100001,
+    order: preset.prompts.map(prompt => ({ identifier: prompt.identifier, enabled: prompt.enabled !== false })) }];
   const binding = state.binding ?? {};
   const preferred = binding.presetId === presetId && binding.characterId != null ? String(binding.characterId) : '';
   groupId = String(chainGroups().find(group => preferred && String(group.character_id) === preferred)?.character_id
@@ -227,7 +228,8 @@ function loadPreset(id) {
 function libraryEntries() { return library.entries ?? []; }
 function unusedPrompts() {
   const used = chainIdentifiers();
-  return (preset?.prompts ?? []).filter(prompt => prompt && !used.has(prompt.identifier));
+  return [...(preset?.prompts ?? []), ...(preset ? pluginTemplatePanel?.unusedMarkers(preset) ?? [] : [])]
+    .filter(prompt => prompt && !used.has(prompt.identifier));
 }
 function libraryCategories(entries) {
   const groups = new Map();
@@ -276,15 +278,15 @@ function renderLibraryCard(row) {
   const top = el('div', 'card-top');
   top.append(el('span', 'name', row.title), el('span', 'badge role', ROLE_LABEL[row.role] || String(row.role).toUpperCase()));
   const actions = el('span', 'card-actions');
-  actions.append(
-    button('加入', '加入当前提示词链', () => insertIntoChain(row), 'primary'),
+  actions.append(button('加入', '加入当前提示词链', () => insertIntoChain(row), 'primary'));
+  if (row.kind !== 'prompt' || promptOf(row.id)) actions.append(
     button('复制', '复制一份', () => duplicateRow(row)),
     button('下载', '下载为 JSON', () => downloadJson(exportRow(row), (row.title || 'entry') + '.json')),
     button('…', '更多', event => openMenu(event.currentTarget, libraryMenu(row))),
   );
   top.append(actions);
   card.append(top, el('p', 'preview', short(row.content, 90) || '（空内容）'));
-  card.onclick = () => { selection = { kind: row.kind, id: row.id }; renderAll(); };
+  if (row.kind !== 'prompt' || promptOf(row.id)) card.onclick = () => { selection = { kind: row.kind, id: row.id }; renderAll(); };
   return card;
 }
 function libraryMenu(row) {
@@ -538,6 +540,7 @@ function insertIntoChain(row) {
   if (!preset) return;
   if (row.kind === 'prompt') {
     if (chainIdentifiers().has(row.id)) { status('该条目已在链路上'); return; }
+    if (!promptOf(row.id)) preset.prompts.push(structuredClone(row.prompt));
     chainOrder().push({ identifier: row.id, enabled: true });
     selection = { kind: 'chain', id: row.id };
     markPreset();
@@ -1142,18 +1145,19 @@ function renderInspector() {
   const counter = el('div', 'counter');
   const textarea = el('textarea');
   const templateRef = !isTemplate ? globalThis.PresetPluginTemplates?.bindings(preset)?.[source.identifier] : null;
-  const displayContent = () => templateRef?.target === 'marker' ? templateRef.contentSnapshot ?? '' : source.content ?? '';
+  const dynamicPrefill = !isTemplate && source.identifier === 'dshDynamicPrefill';
+  const displayContent = () => templateRef?.target === 'marker' && !dynamicPrefill ? templateRef.contentSnapshot ?? '' : source.content ?? '';
   textarea.value = displayContent();
   textarea.spellcheck = false;
   const marker = !isTemplate && source.marker === true;
   // 锁定正文：编辑器侧防误编辑。锁定后正文只读，粘贴/输入/程序化写入都不生效。
-  textarea.disabled = marker || bodyLocked || linked;
+  textarea.disabled = bodyLocked || (!dynamicPrefill && (marker || linked));
   const refreshCounter = () => {
     const value = textarea.value;
     counter.textContent = fmtCount(value.length) + ' 字符 · ' + fmtCount(value ? value.split('\n').length : 0) + ' 行';
   };
   textarea.oninput = () => {
-    if (linked) { textarea.value = displayContent(); return; }
+    if (linked && !dynamicPrefill) { textarea.value = displayContent(); return; }
     if (isTemplate) { source.content = textarea.value; templateDirty = true; status('模板未保存', 'dirty'); }
     else { source.content = textarea.value; markPreset(); renderChainRowInPlace(selection.id); }
     refreshCounter();
@@ -1168,7 +1172,8 @@ function renderInspector() {
   }
   refreshCounter();
   const contentField = field('提示词正文', textarea);
-  if (marker) contentField.append(el('span', 'muted', '占位符条目的正文由酒馆按标记填充，这里不可编辑。'));
+  if (dynamicPrefill) contentField.append(el('span', 'muted', '静态回退前缀'));
+  else if (marker) contentField.append(el('span', 'muted', '占位符条目的正文由酒馆按标记填充，这里不可编辑。'));
   if (bodyLocked) {
     const lockRow = el('div', 'lock-row');
     lockRow.append(
@@ -1496,6 +1501,7 @@ async function boot() {
 pluginTemplatePanel = globalThis.PresetPluginTemplates?.mount($('plugin-template-panel'), {
   api, getPreset: () => preset, getPresetId: () => presetId, getCharacterId: () => groupId,
   getOrder: chainOrder, isLocked: id => lockedIds().has(id),
+  onCatalog: () => { renderLibrary(); renderInspector(); },
   onSelect: id => { selection = { kind: 'chain', id }; renderAll(); },
   onChange: (draft, id) => { preset = draft; selection = { kind: 'chain', id }; markPreset(); renderAll(); },
 });

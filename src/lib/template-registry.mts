@@ -43,11 +43,25 @@ function templatesOf(value: unknown): PromptTemplateV1[] {
     };
     if (raw.description !== undefined) item.description = text(raw.description, '模板 description', 2000, true);
     if (raw.dynamic !== undefined) {
-      if (!isRecord(raw.dynamic) || (raw.dynamic.input !== undefined && !['latest-user', 'history'].includes(String(raw.dynamic.input)))) throw new Error('动态模板输入声明无效');
-      item.dynamic = { resolverId: identifier(raw.dynamic.resolverId, 'resolverId'), input: raw.dynamic.input === 'history' ? 'history' : 'latest-user' };
+      if (!isRecord(raw.dynamic) || (raw.dynamic.input !== undefined && !['latest-user', 'history', 'conversation-text'].includes(String(raw.dynamic.input)))) throw new Error('动态模板输入声明无效');
+      item.dynamic = { resolverId: identifier(raw.dynamic.resolverId, 'resolverId'), input: raw.dynamic.input as NonNullable<PromptTemplateV1['dynamic']>['input'] ?? 'latest-user' };
       if (raw.dynamic.output !== undefined) {
         if (!['text', 'history-patches'].includes(String(raw.dynamic.output))) throw new Error('动态模板输出声明无效');
         item.dynamic.output = raw.dynamic.output as 'text' | 'history-patches';
+      }
+      if (raw.dynamic.prefill !== undefined || raw.dynamic.input === 'conversation-text') {
+        const config = raw.dynamic.prefill;
+        if (!isRecord(config) || raw.targetMarker !== 'dshDynamicPrefill' || raw.role !== 'assistant' ||
+            raw.defaults !== undefined || item.dynamic.output === 'history-patches') throw new Error('预填充生成器必须关联 dshDynamicPrefill 并使用 assistant 文本');
+        const bounded = (key: string, min: number, max: number, fallback: number) => {
+          const value = config[key] ?? fallback;
+          if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min || value > max) throw new Error('预填充配置无效：' + key);
+          return value;
+        };
+        if (config.requireUserTail !== undefined && typeof config.requireUserTail !== 'boolean') throw new Error('预填充末尾约束无效');
+        item.dynamic.input = 'conversation-text';
+        item.dynamic.prefill = { turns: bounded('turns', 1, 50, 4), maxChars: bounded('maxChars', 1, 200_000, 24_000),
+          timeoutMs: bounded('timeoutMs', 100, 30_000, 5000), requireUserTail: config.requireUserTail === true };
       }
       if (item.dynamic.output === 'history-patches') {
         if (raw.targetMarker !== 'chatHistory' || raw.dynamic.input !== 'history' || item.content !== '' || raw.defaults !== undefined) throw new Error('历史修改模板需指定 chatHistory、history 输入、空 content，且不设 defaults');
@@ -126,7 +140,7 @@ export function createTemplateRegistry(onListenerError: (error: unknown) => void
   };
   const service: PresetTemplatesV1 = Object.freeze({
     contractVersion: 1 as const,
-    capabilities: Object.freeze({ dynamicTemplatesV1: true as const, historyPatchesV1: true as const }),
+    capabilities: Object.freeze({ dynamicTemplatesV1: true as const, historyPatchesV1: true as const, externalPrefillV1: true as const }),
     register(owner: TemplateOwnerContext, definition: TemplateProviderV1, runtime?: TemplateRuntimeV1) {
       assertOpen();
       if (!owner || typeof owner.effect !== 'function') throw new Error('注册模板需要有效的插件作用域');
@@ -147,12 +161,13 @@ export function createTemplateRegistry(onListenerError: (error: unknown) => void
       };
       validateRuntime(entry.templates);
       let controller = new AbortController();
+      let runtimeController = controller;
       const fingerprints = checkCatalog(entry, true);
       let active = false;
       const dispose = () => {
         if (!active) return;
         active = false;
-        controller.abort(new Error('模板提供者已卸载'));
+        runtimeController.abort(new Error('模板提供者已卸载'));
         runtimes.delete(providerId);
         if (!closed && providers.get(providerId) === entry) { providers.delete(providerId); changed(); }
       };
@@ -163,7 +178,8 @@ export function createTemplateRegistry(onListenerError: (error: unknown) => void
           controller = new AbortController();
           const lease = controller;
           providers.set(providerId, entry);
-          runtimes.set(providerId, { resolvers, controller });
+          runtimeController = controller;
+          runtimes.set(providerId, { resolvers, controller: runtimeController });
           remember(fingerprints);
           active = true;
           changed();
@@ -181,6 +197,9 @@ export function createTemplateRegistry(onListenerError: (error: unknown) => void
           if (JSON.stringify(next) === JSON.stringify(entry)) return;
           remember(updates);
           entry = next;
+          runtimeController.abort(new Error('模板目录已更新'));
+          runtimeController = new AbortController();
+          runtimes.set(providerId, { resolvers, controller: runtimeController });
           providers.set(providerId, entry);
           changed();
         },

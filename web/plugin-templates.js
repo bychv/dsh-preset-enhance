@@ -3,6 +3,10 @@
   const namespace = 'dsh-preset-enhance';
   const bindings = preset => preset?.extensions?.[namespace]?.templateBindings ?? {};
   const linked = (preset, id) => Object.hasOwn(bindings(preset), id) && !bindings(preset)[id]?.automatic;
+  function unusedMarkers(preset, catalog = []) {
+    const present = new Set((preset?.prompts ?? []).map(prompt => prompt.identifier));
+    return catalog.filter(prompt => !present.has(prompt.identifier));
+  }
   const key = ref => JSON.stringify([ref.providerId, ref.templateId, ref.templateVersion]);
   const node = (tag, text) => {
     const out = document.createElement(tag);
@@ -21,7 +25,7 @@
       const refs = Object.fromEntries(Object.entries(stored).filter(([, ref]) => !ref?.automatic));
       const disabled = preset?.extensions?.[namespace]?.autoTemplateDisabled ?? [];
       for (const prompt of preset?.prompts ?? []) {
-        if (!prompt.marker || prompt.identifier === 'dsh-preset-enhance:dsh-system-prompt' || Object.hasOwn(refs, prompt.identifier) || disabled.includes(prompt.identifier)) continue;
+        if ((!prompt.marker && prompt.identifier !== 'dshDynamicPrefill') || prompt.identifier === 'dsh-preset-enhance:dsh-system-prompt' || Object.hasOwn(refs, prompt.identifier) || disabled.includes(prompt.identifier)) continue;
         const matches = rows().filter(row => row.template.targetMarker === prompt.identifier);
         if (matches.length === 1) {
           const row = matches[0]; refs[prompt.identifier] = { ...row.ref, target: 'marker', automatic: true,
@@ -81,7 +85,7 @@
         const content = node('pre', selected.template.content); content.className = 'plugin-template-text'; root.append(content);
         if (!selected.template.targetMarker) root.append(button('加入当前顺序表', () => mutate({ operation: 'add', ...selected.ref,
           expectedFingerprint: fingerprint(selected.ref) }), !ready || !options.getPreset()));
-        const targets = (options.getPreset()?.prompts ?? []).filter(prompt => prompt.marker === true &&
+        const targets = (options.getPreset()?.prompts ?? []).filter(prompt => (prompt.marker === true || prompt.identifier === 'dshDynamicPrefill') &&
           prompt.identifier !== 'dsh-preset-enhance:dsh-system-prompt' &&
           (prompt.identifier !== 'chatHistory' || selected.template.dynamic?.output === 'history-patches') &&
           (!selected.template.targetMarker || selected.template.targetMarker === prompt.identifier));
@@ -156,6 +160,7 @@
     function refresh() {
       if (stopped) return Promise.resolve();
       if (refreshing) { refreshAgain = true; return refreshing; }
+      const previous = catalog;
       refreshing = (async () => {
         try {
           const response = await fetch('/preset-enhance/api/templates');
@@ -164,7 +169,7 @@
           if (value.contractVersion !== 1) throw new Error('不支持的模板目录版本');
           catalog = value; ready = true; note = '';
         } catch (error) { ready = false; note = error.message; }
-        finally { refreshing = null; if (!stopped) { render(); options.onCatalog?.(); if (refreshAgain) { refreshAgain = false; void Promise.resolve().then(refresh); } } }
+        finally { refreshing = null; if (!stopped) { render(); if (previous.revision !== catalog.revision || previous.markers === undefined && catalog.markers !== undefined) options.onCatalog?.(); if (refreshAgain) { refreshAgain = false; void Promise.resolve().then(refresh); } } }
       })();
       return refreshing;
     }
@@ -176,7 +181,7 @@
     window.addEventListener('pageshow', start);
     start();
     render(); void refresh();
-    return { render, refresh };
+    return { render, refresh, unusedMarkers: preset => unusedMarkers(preset, catalog.markers) };
   }
   globalThis.PresetPluginTemplates = Object.freeze({ mount, linked, bindings });
 })();

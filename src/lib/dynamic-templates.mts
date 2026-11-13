@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { isUserAuthored } from './compaction.mjs';
 import { validateHistoryPatches } from './history-patches.mjs';
-import type { DynamicTemplateResultV1 } from '../template-api.mjs';
+import { conversationText, DYNAMIC_PREFILL_ID } from './external-prefill.mjs';
+import type { DynamicTemplateContextV1, DynamicTemplateResultV1, PrefillContextV1 } from '../template-api.mjs';
 import { getOrder } from './preset.mjs';
 import { resolveTemplateBindings, templateBindings } from './template-bindings.mjs';
 import type { DynamicBody } from './template-bindings.mjs';
@@ -18,6 +19,18 @@ const freeze = <T,>(value: T): T => {
 export interface DynamicPreparation extends CompilePresetOptions {
   sessionId?: string; requestId?: string; presetId?: string; mode?: string; protocol?: string;
   purpose: 'preview' | 'request'; signal?: AbortSignal; timeoutMs?: number;
+  prefill?: Pick<PrefillContextV1, 'phase' | 'turnId' | 'step' | 'target' | 'revision'> & {
+    enabled: boolean; allowPreview?: boolean; bindingKey?: string; turnSignal?: AbortSignal;
+    watch?: (invalidate: () => void) => () => void;
+    tail?: (bodies: Record<string, DynamicBody>) => string | undefined;
+  };
+}
+
+const activationIds = new WeakMap<AbortSignal, string>();
+function activationId(signal: AbortSignal): string {
+  let id = activationIds.get(signal);
+  if (!id) activationIds.set(signal, id = randomUUID());
+  return id;
 }
 
 /** No store lock, no write or cross-request memoization. One shared immutable input per preparation. */
@@ -29,7 +42,7 @@ export async function prepareDynamicTemplates(registry: ReturnType<typeof create
   const refs = templateBindings(preset, catalog);
   const work = [...ids].filter(id => refs[id]?.mode === 'linked-dynamic');
   const bodies: Record<string, DynamicBody> = Object.create(null);
-  if (!work.length) return { catalog, bodies };
+  if (!work.length) return { catalog, bodies, assertAvailable() {} };
   const references = resolveTemplateBindings(preset, catalog, ids).references;
   // Pin the registration leases too: a reload must not mix old and new callbacks in one request.
   const leases = new Map(work.map(id => {
@@ -37,22 +50,25 @@ export async function prepareDynamicTemplates(registry: ReturnType<typeof create
     const template = catalog.providers.find(p => p.providerId === ref.providerId)?.templates.find(t => t.id === ref.templateId && t.version === ref.templateVersion);
     return [id, { template, runtime: template?.dynamic ? registry.resolver(ref.providerId, template.dynamic.resolverId) : undefined }] as const;
   }));
-  const needsHistory = work.some(id => catalog.providers.find(p => p.providerId === refs[id].providerId)?.templates.find(t => t.id === refs[id].templateId && t.version === refs[id].templateVersion)?.dynamic?.input === 'history');
+  const needsHistory = work.some(id => leases.get(id)?.template?.dynamic?.input === 'history');
+  const ordinary = work.filter(id => !leases.get(id)?.template?.dynamic?.prefill);
+  const generators = work.filter(id => leases.get(id)?.template?.dynamic?.prefill);
   const copied = needsHistory ? freeze(structuredClone(history)) : undefined;
   // A compaction checkpoint is not user input: latestUser/userText must not become a
   // summary. The checkpoint stays in the history a 'history' resolver receives.
-  const latest = (copied ?? history).findLast(m => isUserAuthored(m) && !m.content?.some(b => b.type === 'tool-result'));
+  const latest = ordinary.length ? (copied ?? history).findLast(m => isUserAuthored(m) && !m.content?.some(b => b.type === 'tool-result')) : undefined;
   const latestUser = latest ? copied ? latest : freeze(structuredClone(latest)) : undefined;
   const userText = latestUser?.content?.filter(b => b.type === 'text').map(b => b.text ?? '').join('\n') ?? '';
-  const variables = freeze(structuredClone({ local: options.local ?? {}, global: options.global ?? {}, values: options.values ?? {} }));
+  const variables = ordinary.length ? freeze(structuredClone({ local: options.local ?? {}, global: options.global ?? {}, values: options.values ?? {} }))
+    : freeze({ local: {}, global: {}, values: {} });
   const historyRevision = createHash('sha256').update(JSON.stringify(history)).digest('hex');
   const requestId = options.requestId ?? randomUUID();
   const deadline = new AbortController();
   const timer = setTimeout(() => deadline.abort(new Error('动态模板解析超时')), options.timeoutMs ?? 5000);
   let cursor = 0, total = 0;
   const worker = async () => {
-    while (cursor < work.length) {
-      const id = work[cursor++], ref = refs[id];
+    while (cursor < ordinary.length) {
+      const id = ordinary[cursor++], ref = refs[id];
       options.signal?.throwIfAborted();
       try {
         const invalid = references.find(r => r.identifier === id)?.reason;
@@ -66,12 +82,7 @@ export async function prepareDynamicTemplates(registry: ReturnType<typeof create
           identifier: id, mode: options.mode ?? '', protocol: options.protocol ?? 'unknown', purpose: options.purpose,
           latestUser, userText, ...(template!.dynamic!.input === 'history' ? { history: copied } : {}), variables,
           config: freeze(structuredClone(ref.config ?? {})), signal });
-        const text = await new Promise<DynamicTemplateResultV1>((resolve, reject) => {
-          const aborted = () => reject(signal.reason);
-          signal.addEventListener('abort', aborted, { once: true });
-          Promise.resolve().then(() => { signal.throwIfAborted(); return runtime.run(context); }).then(resolve, reject)
-            .finally(() => signal.removeEventListener('abort', aborted));
-        });
+        const text = await resolveWithSignal(runtime.run, context);
         signal.throwIfAborted();
         if (template?.dynamic?.output === 'history-patches') {
           const patches = validateHistoryPatches(text, history);
@@ -91,6 +102,88 @@ export async function prepareDynamicTemplates(registry: ReturnType<typeof create
       }
     }
   };
-  try { await Promise.all(Array.from({ length: Math.min(4, work.length) }, worker)); return { catalog, bodies }; }
-  finally { clearTimeout(timer); deadline.abort(new Error('动态模板准备已结束')); }
+  try {
+    await Promise.all(Array.from({ length: Math.min(4, ordinary.length) }, worker));
+  } finally { clearTimeout(timer); deadline.abort(new Error('动态模板准备已结束')); }
+  const leasesToCheck: AbortSignal[] = [];
+  for (const id of generators) {
+    const ref = refs[id];
+    const { template, runtime } = leases.get(id)!;
+    const config = template!.dynamic!.prefill!;
+    const prefill = options.prefill;
+    const phase = options.purpose === 'preview' ? 'preview' : prefill?.phase ?? 'unknown';
+    const invalid = references.find(r => r.identifier === id)?.reason;
+    const skipped = (reason: string) => { bodies[id] = { prefillStatus: 'skipped', reason }; };
+    if (invalid) { skipped(invalid); continue; }
+    if (!prefill?.enabled || options.protocol !== 'chat-completions') { skipped('当前连接未启用 Chat 预填充'); continue; }
+    if (phase === 'unknown') { skipped('宿主未确认当前请求的轮次'); continue; }
+    if (phase === 'continuation') {
+      bodies[id] = { prefillStatus: 'fallback', continuation: true, notice: '工具续轮沿用预填充配置' };
+      continue;
+    }
+    if (phase === 'preview' && !prefill.allowPreview) { skipped('等待实际发送或授权解析预览'); continue; }
+    const tailRole = prefill.tail ? prefill.tail(bodies) : history.at(-1)?.role;
+    if (tailRole === 'assistant' || (config.requireUserTail && tailRole !== 'user')) throw new Error('出站消息末尾与动态预填充约束冲突');
+    const controller = new AbortController();
+    const timeoutError = new Error('动态预填充解析超时');
+    const timeout = setTimeout(() => controller.abort(timeoutError), config.timeoutMs ?? 5000);
+    let unwatch: (() => void) | undefined;
+    try {
+      if (!runtime) throw new Error('动态预填充解析器不可用');
+      const leaseSignals = [runtime.signal, ...(prefill.turnSignal ? [prefill.turnSignal] : [])];
+      const dependency = new AbortController();
+      unwatch = prefill.watch?.(() => dependency.abort(new Error('动态解析期间预设、变量或会话已变化，请重新发送')));
+      const signal = AbortSignal.any([controller.signal, dependency.signal, ...leaseSignals, ...(options.signal ? [options.signal] : [])]);
+      const turns = freeze(conversationText(history, config.turns ?? 4, config.maxChars ?? 24_000));
+      const rawConfig = ref.config ?? {};
+      if (!rawConfig || typeof rawConfig !== 'object' || Array.isArray(rawConfig) || JSON.stringify(rawConfig).length > 20_000) throw new Error('动态模板配置无效');
+      const reuseKey = phase === 'first' ? createHash('sha256').update(JSON.stringify([
+        activationId(runtime.signal), options.sessionId, prefill.turnId, prefill.step, historyRevision, options.presetId,
+        prefill.bindingKey, options.mode, options.protocol, prefill.target, tailRole, ref.fingerprint, rawConfig,
+      ])).digest('hex') : undefined;
+      const context: DynamicTemplateContextV1 = Object.freeze({
+        sessionId: options.sessionId ?? '', requestId, historyRevision, presetId: options.presetId, identifier: DYNAMIC_PREFILL_ID,
+        mode: options.mode ?? '', protocol: options.protocol, purpose: options.purpose, userText: turns.at(-1)?.filter(row => row.role === 'user').map(row => row.text).join('\n') ?? '',
+        prefill: Object.freeze({ phase, turnId: phase === 'first' ? prefill.turnId : undefined, step: prefill.step, reuseKey,
+          turns, tailRole, target: prefill.target, revision: prefill.revision }),
+        variables: freeze({ local: {}, global: {}, values: {} }), config: freeze(structuredClone(rawConfig)), signal,
+      });
+      const result = await resolveWithSignal(runtime.run, context);
+      const value = typeof result === 'string' ? { status: 'generated', text: result } : result;
+      if (value && 'status' in value && (value.status === 'fallback' || value.status === 'skipped')) {
+        bodies[id] = { prefillStatus: value.status, notice: value.status === 'fallback' ? '使用原静态前缀' : '提供者跳过动态预填充' };
+      } else if (value && 'status' in value && value.status === 'generated' && typeof value.text === 'string' && value.text.trim() && value.text.length <= 200_000 && total + value.text.length <= 2_000_000) {
+        bodies[id] = { prefillStatus: 'generated', text: value.text, requireUserTail: config.requireUserTail };
+        leasesToCheck.push(...leaseSignals);
+      } else throw new Error('动态预填充必须返回非空文本，且符合输出长度上限');
+    } catch (error) {
+      options.signal?.throwIfAborted();
+      const reason = error === timeoutError ? timeoutError.message : '动态预填充解析失败，请检查外部插件';
+      if (ref.failurePolicy !== 'skip') throw new Error(reason);
+      skipped(reason);
+    } finally {
+      unwatch?.();
+      clearTimeout(timeout);
+      controller.abort(new Error('动态预填充准备已结束'));
+    }
+  }
+  return { catalog, bodies, assertAvailable: () => { for (const signal of leasesToCheck) signal.throwIfAborted(); } };
+}
+
+async function resolveWithSignal(run: (context: DynamicTemplateContextV1) => DynamicTemplateResultV1 | Promise<DynamicTemplateResultV1>,
+  context: DynamicTemplateContextV1): Promise<DynamicTemplateResultV1> {
+  const { signal } = context;
+  signal.throwIfAborted();
+  let abort!: () => void;
+  try {
+    const result = await Promise.race([
+      new Promise<never>((_, reject) => {
+        abort = () => reject(signal.reason);
+        signal.addEventListener('abort', abort, { once: true });
+      }),
+      Promise.resolve().then(() => { signal.throwIfAborted(); return run(context); }),
+    ]);
+    signal.throwIfAborted();
+    return result;
+  } finally { signal.removeEventListener('abort', abort); }
 }
