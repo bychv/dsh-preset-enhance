@@ -12,6 +12,7 @@ import { createHash, randomUUID } from 'node:crypto';
 export { Config } from './lib/plugin-config.mjs';
 import { createChatModelCatalog } from './lib/chat-models.mjs';
 import { PresetStore } from './lib/store.mjs';
+import { CompilationCache, macroChanges, replayMacros } from './lib/session-compilation.mjs';
 import { createTemplateRegistry } from './lib/template-registry.mjs';
 import { resolveTemplateBindings, selectTemplate, templateCatalogWithFingerprints, templateBindings } from './lib/template-bindings.mjs';
 import { prepareDynamicTemplates } from './lib/dynamic-templates.mjs';
@@ -46,6 +47,7 @@ function compilationKey(preset, messages, options, protocol, references, dynamic
     return digest({ compiler: PRESET_COMPILER_VERSION, preset, messages, characterId: String(options.characterId ?? 100001),
         values: { user: 'User', char: 'Assistant', ...options.values }, markers: options.markers ?? {},
         trigger: options.trigger ?? 'normal', postToolPrefix: options.postToolPrefix, protocol, references, dshSystemTemplate: options.dshSystemTemplate,
+        forcePrefill: options.forcePrefill === true ? true : undefined,
         dynamicBodies: dynamicBodies && Object.keys(dynamicBodies).length ? dynamicBodies : undefined });
 }
 const ownGet = (object, key) => key !== undefined && Object.hasOwn(object, key) ? object[key] : undefined;
@@ -165,6 +167,7 @@ export async function apply(ctx, config = {}) {
     const lifecycle = createPluginLifecycle();
     const routed = new WeakSet();
     const snapshots = new RequestSnapshots();
+    const compilations = new CompilationCache();
     // DSH 0.1.6 defaults the official connection to the Messages protocol, where the
     // assistant-prefix/toolcall compatibility bridge cannot apply. Observations are
     // recorded per session so the workbench can say so instead of pretending.
@@ -214,6 +217,7 @@ export async function apply(ctx, config = {}) {
             disposeChatAdapter?.();
             deepSeekBeta.dispose();
             snapshots.close();
+            compilations.clear();
         });
     }, 'preset-enhance: ordered teardown');
     // 0.1.7 declares agent presets through the registry; 0.1.6 materialised a mode file on
@@ -268,7 +272,9 @@ export async function apply(ctx, config = {}) {
     let policySnapshot = toolPolicySnapshot();
     if (!startupError) {
         try {
-            policySnapshot = toolPolicySnapshot((await store.read()));
+            policySnapshot = toolPolicySnapshot(await store.read());
+            // A locked file can still be read and used. A later actual commit can compact it.
+            await store.maintain().catch(error => console.warn('preset-enhance: state maintenance failed', error));
         }
         catch (error) {
             startupError = describeStartupFailure('无法读取状态文件', `${store.file}（插件不会自动清空它，请修复或移走该文件后重新启用）`, error);
@@ -284,6 +290,7 @@ export async function apply(ctx, config = {}) {
         clearPresetEnhanceUnavailableReason();
     }
     const refreshPolicies = (state) => { policySnapshot = toolPolicySnapshot(state); };
+    ctx.effect(() => store.subscribe(refreshPolicies), 'preset-enhance: committed tool policies');
     const templateRegistry = createTemplateRegistry(error => console.warn('preset-enhance: template catalog listener failed', error));
     ctx.effect(() => () => templateRegistry.close(), 'preset-enhance: template registry');
     const templateServiceAvailable = !startupError && typeof ctx.provide === 'function';
@@ -346,15 +353,17 @@ export async function apply(ctx, config = {}) {
             (!explicit && shouldAutoEnable(initial, session) && defaultRecord(initial));
         const catalogChanged = observed.length > 0 && !sameCatalog(initial.toolCatalogs[modeId] ?? [], editableToolCatalog([initial.toolCatalogs, { [modeId]: observed }])[modeId]);
         let compiled = null;
+        let requestState = initial;
+        let requestRecord;
         // Resolver I/O must not hold the shared store's write queue.
         const effectiveBinding = (state) => ownGet(state.bindings, sessionId) ??
             (shouldAutoEnable(state, session) && defaultRecord(state) ? { enabled: true, presetId: defaultRecord(state).id, characterId: null, values: {}, markers: {} } : undefined);
         const dependencyKey = (state) => {
             const binding = effectiveBinding(state);
             return digest({ binding, mode: sessionModeId(session), record: state.presets.find(p => p.id === binding?.presetId), global: state.global,
-                local: ownGet(state.sessions, sessionId)?.result.local, protocol: connectionProtocolFor(state, connectionInfo),
+                local: sessionVariables(state, sessionId, binding?.presetId)?.result.local, protocol: connectionProtocolFor(state, connectionInfo),
                 beta: state.deepseekBetaPrefix, postToolPrefixMode: state.postToolPrefixMode, postToolPrefixText: state.postToolPrefixText,
-                prefixToolCalls: state.prefixToolCalls, prefixNonOfficialRemoveTools: state.prefixNonOfficialRemoveTools, prefixOutputExtraction: state.prefixOutputExtraction });
+                prefixToolCalls: state.prefixToolCalls, prefixNonOfficialRemoveTools: state.prefixNonOfficialRemoveTools, prefixOutputExtraction: state.prefixOutputExtraction, forcePrefill: state.forcePrefill });
         };
         const initialBinding = effectiveBinding(initial);
         const initialRecord = initial.presets.find(p => p.id === initialBinding?.presetId);
@@ -371,12 +380,12 @@ export async function apply(ctx, config = {}) {
         let prefixTarget = 'reasoning';
         const historyRevision = dynamic && session.deriveMessages ? digest(session.deriveMessages()) : undefined;
         const dynamicBodies = dynamic ? (await lifecycle.track(prepareDynamicTemplates(templateRegistry, initialRecord.preset, preparedHistory(initialRecord.preset), {
-            ...initialBinding, local: ownGet(initial.sessions, sessionId)?.result.local, global: initial.global,
+            ...initialBinding, local: sessionVariables(initial, sessionId, initialRecord.id)?.result.local, global: initial.global,
             sessionId, presetId: initialRecord.id, mode: modeId, protocol: connectionProtocolFor(initial, connectionInfo),
             purpose: 'request', signal: options.signal, templateCatalog,
         }))).bodies : undefined;
         if (wantsPreset || catalogChanged) {
-            compiled = await lifecycle.track(store.transaction((current) => {
+            const prepared = await lifecycle.track(store.transaction((current) => {
                 if (expectedDependency !== undefined && (dependencyKey(current) !== expectedDependency ||
                     (historyRevision !== undefined && digest(session.deriveMessages()) !== historyRevision)))
                     throw new Error('动态解析期间预设、变量或会话已变化，请重新发送');
@@ -394,9 +403,8 @@ export async function apply(ctx, config = {}) {
                 }
                 if (changed)
                     current.revision++;
-                refreshPolicies(current);
                 if (!binding?.enabled)
-                    return null;
+                    return { changed, current };
                 const record = current.presets.find(p => p.id === binding.presetId);
                 if (!record)
                     throw new Error('当前会话启用的预设不存在');
@@ -406,13 +414,21 @@ export async function apply(ctx, config = {}) {
                 const postToolPrefix = current.deepseekBetaPrefix && current.postToolPrefixMode === 'custom'
                     ? current.postToolPrefixText : undefined;
                 const templateReferences = resolveTemplateBindings(record.preset, templateCatalog, new Set(getOrder(record.preset, binding.characterId).filter(item => item.enabled).map(item => item.identifier))).references;
-                const key = compilationKey(record.preset, presetHistory, { ...binding, postToolPrefix, dshSystemTemplate }, connectionProtocolFor(current, connectionInfo), templateReferences, dynamicBodies);
-                const prior = ownGet(current.sessions, sessionId);
-                if (prior?.key === key)
-                    return prior.result;
+                const protocol = connectionProtocolFor(current, connectionInfo);
+                const forcePrefill = current.forcePrefill === true;
+                const key = compilationKey(record.preset, presetHistory, { ...binding, postToolPrefix, dshSystemTemplate, forcePrefill }, protocol, templateReferences, dynamicBodies);
+                const saved = ownGet(current.sessions, sessionId);
+                const prior = saved?.presetId === record.id ? saved : undefined;
+                const local = prior?.result.local ?? {};
+                const global = current.global;
+                const variables = digest({ local, global, replay: prior?.replay?.key });
+                const hit = compilations.get(sessionId, record.id, key, variables);
+                if (hit)
+                    return { changed, current, record, compilation: hit, variables, hit: true };
+                const replay = prior?.replay?.key === key ? prior.replay : undefined;
                 const compiledResult = compilePreset(record.preset, presetHistory, {
-                    ...binding, seed: key, local: prior?.result.local, global: current.global, postToolPrefix, templateCatalog, dynamicBodies, dshSystemTemplate,
-                    forcePrefill: current.forcePrefill === true,
+                    ...binding, seed: key, local: replayMacros(local, replay?.local), global: replayMacros(global, replay?.global),
+                    postToolPrefix, templateCatalog, dynamicBodies, dshSystemTemplate, forcePrefill,
                 });
                 options.signal?.throwIfAborted();
                 // The host serializes the request with whichever protocol its connection uses, and
@@ -424,22 +440,41 @@ export async function apply(ctx, config = {}) {
                 // the chat path is reached by rerouting an official Messages request, because that
                 // collapse already happened before the fetch bridge could reroute anything.
                 const adapted = adaptPresetForMessages(compiledResult.messages);
-                const messagesMode = connectionProtocolFor(current, connectionInfo) === 'messages';
+                const messagesMode = protocol === 'messages';
                 const result = messagesMode ? {
                     ...compiledResult,
                     messages: adapted.messages,
                     // No prefix flag exists on the Messages wire format: never claim one.
                     assistantPrefix: { active: false },
                 } : { ...compiledResult, messages: adapted.messages };
-                current.global = result.global;
-                assign(current.sessions, sessionId, {
+                if (!replay) {
+                    const localBefore = macroChanges(local, result.local);
+                    const globalBefore = macroChanges(global, result.global);
+                    if (localBefore || globalBefore || saved?.replay || (saved && saved.presetId !== record.id)) {
+                        current.global = result.global;
+                        assign(current.sessions, sessionId, { presetId: record.id, result: { local: result.local },
+                            ...(localBefore || globalBefore ? { replay: { key, local: localBefore, global: globalBefore } } : {}) });
+                        changed = true;
+                    }
+                }
+                const compilation = {
                     key, at: new Date().toISOString(), presetId: record.id, result,
-                    // Notes describe what the Messages wire format cannot express; they are only
-                    // meaningful for the mode that targets it.
                     ...(messagesMode ? { protocolNotes: adapted.notes } : {}),
-                });
-                return result;
-            }));
+                };
+                const committed = sessionVariables(current, sessionId, record.id);
+                return { changed, current, record, compilation, variables: digest({
+                        local: committed?.result.local ?? {}, global: current.global, replay: committed?.replay?.key,
+                    }), hit: false };
+            }, { shouldWrite: result => result.changed, signal: options.signal }));
+            requestState = prepared.current;
+            requestRecord = prepared.record;
+            refreshPolicies(requestState);
+            displayAvailability.sessionChanged(sessionId, prepared.current);
+            if (prepared.compilation) {
+                if (!prepared.hit)
+                    compilations.set(sessionId, prepared.compilation, prepared.variables);
+                compiled = prepared.compilation.result;
+            }
         }
         const policy = effectiveToolPolicy(policySnapshot, sessionId, modeId, options.tools);
         const filteredTools = filterTools(options.tools, policy);
@@ -452,17 +487,18 @@ export async function apply(ctx, config = {}) {
         const compiledImageCount = (compiledMessages ?? []).reduce((total, message) => total + (message.content ?? []).filter((block) => block?.type === PRESET_CONTEXT_BLOCK && block.kind === 'image').length, 0);
         if (compiledImageCount > 0)
             await assertImageInput(ctx, options);
-        const context = compiled !== null && initialRecord !== undefined
+        const context = compiled !== null && requestRecord !== undefined
             ? await materializePresetContext({
-                preset: initialRecord.preset,
+                preset: requestRecord.preset,
                 messages: compiledMessages,
-                assets: presetShareAssets(initialRecord),
+                assets: presetShareAssets(requestRecord),
                 admission: presetContextAdmission(ctx),
                 // Only our own adapter can upload bytes the attachment service never admitted.
                 allowInline: options.provider === DEEPSEEK_CHAT_PROVIDER_ID,
             })
             : undefined;
         const messages = context === undefined ? compiledMessages : context.messages;
+        options.signal?.throwIfAborted();
         if (context !== undefined && context.imageCount > 0)
             await assertImageInput(ctx, options);
         const messagesChanged = compiled !== null || messages !== options.messages;
@@ -471,7 +507,7 @@ export async function apply(ctx, config = {}) {
             yield* traceRequest(snapshots, sessionId, options, next());
             return;
         }
-        const spreset = compiled && initialRecord ? spresetSettings(initialRecord.preset) : undefined;
+        const spreset = compiled && requestRecord ? spresetSettings(requestRecord.preset) : undefined;
         if (spreset?.OutputPreprocessing?.enabled && spreset.OutputPreprocessing.consumeToolCalls && filteredTools.some(tool => tool.name === 'run_code')) {
             throw new Error('实验性 SPreset 调用消费暂不支持 PTC，请切换到原生工具模式或关闭消费');
         }
@@ -480,10 +516,10 @@ export async function apply(ctx, config = {}) {
         // must never arm, so an unadapted prefix is never sent.
         // `forcePrefill` is the manual fallback: when detection cannot see the prefill the workbench
         // can still ask for the compatibility path, and it implies the compatibility switch itself.
-        const betaEnabled = initial.deepseekBetaPrefix === true || initial.forcePrefill === true;
+        const betaEnabled = requestState.deepseekBetaPrefix === true || requestState.forcePrefill === true;
         const assistantPrefill = compiled?.assistantPrefix?.active === true ||
-            (compiled !== null && initial.forcePrefill === true);
-        const betaPrefix = connectionProtocolFor(initial, connectionInfo) !== 'messages' &&
+            (compiled !== null && requestState.forcePrefill === true);
+        const betaPrefix = connectionProtocolFor(requestState, connectionInfo) !== 'messages' &&
             betaEnabled && assistantPrefill;
         // Arm the fetch bridge only when this request actually carries an injected preset:
         // with no preset the plugin must not intervene at all (no reroute, no translation).
@@ -492,12 +528,12 @@ export async function apply(ctx, config = {}) {
         // the bridge to the reroute/translation role for ordinary injected requests.
         const prefixKey = betaPrefix ? messageText(messages.at(-1)) : '';
         const releaseBeta = compiled !== null ? deepSeekBeta.activate(sessionId, prefixKey, {
-            mode: connectionProtocolFor(initial, connectionInfo),
+            mode: connectionProtocolFor(requestState, connectionInfo),
             ...requestSettings,
             target: prefixTarget,
-            toolCalls: initial.prefixToolCalls === true,
-            removeNonOfficialTools: initial.prefixNonOfficialRemoveTools !== false,
-            extractOutput: initial.prefixOutputExtraction === true,
+            toolCalls: requestState.prefixToolCalls === true,
+            removeNonOfficialTools: requestState.prefixNonOfficialRemoveTools !== false,
+            extractOutput: requestState.prefixOutputExtraction === true,
         }) : () => { };
         routed.add(request);
         try {
@@ -658,6 +694,8 @@ export async function apply(ctx, config = {}) {
                     }
                     refreshPolicies(state);
                     const sessionId = url.searchParams.get('sessionId') ?? '';
+                    const lastBinding = ownGet(state.bindings, sessionId);
+                    const lastCompilation = lastBinding?.enabled ? compilations.latest(sessionId, lastBinding.presetId) : undefined;
                     const session = sessionId ? ctx.sessions.get(sessionId) : undefined;
                     const connectionInfo = sessionConnection(ctx, sessionId);
                     const fallback = !ownGet(state.bindings, sessionId) && shouldAutoEnable(state, session) ?
@@ -711,7 +749,7 @@ export async function apply(ctx, config = {}) {
                         sessionToolSelection: sessionId ? ownGet(state.sessionToolSelections, sessionId) ?? null : null,
                         toolPresetRefCounts: presetReferenceCounts(state),
                         unresolvedToolRefs: unresolvedToolRefs(state, catalogs),
-                        last: ownGet(state.sessions, sessionId) ?? null,
+                        last: lastCompilation ?? null,
                         // Null until a request has actually been observed for THIS session; without a
                         // session id the panel has nothing to report and must not fall back to another
                         // session's (or a session-less) observation.
@@ -720,7 +758,7 @@ export async function apply(ctx, config = {}) {
                         connection: connectionInfo,
                         // 0.1.7: which connection sessions are routed to, and the ones we can route to.
                         connectionChoice: connectionSelection(ctx, sessionId),
-                        protocolNotes: ownGet(state.sessions, sessionId)?.protocolNotes ?? [],
+                        protocolNotes: lastCompilation?.protocolNotes ?? [],
                         protocolSwitched: Boolean(sessionId && protocolObserver.last(sessionId)?.switchedFrom),
                         protocolMismatch: presetProtocolMismatch(state, sessionId, session, protocolObserver, connectionInfo),
                     });
@@ -765,13 +803,13 @@ export async function apply(ctx, config = {}) {
                     if (dshSystemTemplate?.available)
                         history = withoutDshPrompt(history);
                     const requestSettings = readRequestSettings(validatePreset(body.preset));
-                    const options = { ...body.options, dshSystemTemplate, local: ownGet(current.sessions, sessionId)?.result.local, global: current.global,
+                    const options = { ...body.options, dshSystemTemplate, local: sessionVariables(current, sessionId, body.presetId ?? ownGet(current.bindings, sessionId)?.presetId)?.result.local, global: current.global,
                         postToolPrefix: current.deepseekBetaPrefix && current.postToolPrefixMode === 'custom' ? current.postToolPrefixText : undefined };
                     const prepared = await prepareDynamicTemplates(templateRegistry, validatePreset(body.preset), history, {
                         ...options, sessionId, presetId: body.presetId, mode, protocol, purpose: 'preview', signal: controller.signal,
                     });
                     const references = resolveTemplateBindings(body.preset, prepared.catalog, new Set(getOrder(body.preset, options.characterId).filter(i => i.enabled).map(i => i.identifier))).references;
-                    const key = compilationKey(body.preset, history, options, protocol, references, prepared.bodies);
+                    const key = compilationKey(body.preset, history, { ...options, forcePrefill: current.forcePrefill }, protocol, references, prepared.bodies);
                     const compiled = compilePreset(body.preset, history, { ...options, seed: key, templateCatalog: prepared.catalog, dynamicBodies: prepared.bodies, dshSystemTemplate, forcePrefill: current.forcePrefill === true });
                     const adapted = adaptPresetForMessages(compiled.messages);
                     const result = { ...compiled, messages: adapted.messages,
@@ -931,7 +969,6 @@ export async function apply(ctx, config = {}) {
                         assertRevision(current, body);
                         current.toolGroups = groups;
                         current.revision++;
-                        refreshPolicies(current);
                         return { revision: current.revision, groups: current.toolGroups, warnings };
                     }));
                 }
@@ -957,7 +994,6 @@ export async function apply(ctx, config = {}) {
                         else
                             current.toolPresets.push(record);
                         current.revision++;
-                        refreshPolicies(current);
                         return { id: record.id, warnings };
                     }));
                 }
@@ -973,7 +1009,6 @@ export async function apply(ctx, config = {}) {
                         current.toolPresets.splice(index, 1);
                         const { modes, sessions } = resetPresetSelections(current, body.id);
                         current.revision++;
-                        refreshPolicies(current);
                         return { id: body.id, modes, sessions };
                     }));
                 }
@@ -1008,7 +1043,6 @@ export async function apply(ctx, config = {}) {
                         assertRevision(current, body);
                         assign(current[key], id, selection);
                         current.revision++;
-                        refreshPolicies(current);
                         return { selection };
                     }));
                 }
@@ -1024,7 +1058,6 @@ export async function apply(ctx, config = {}) {
                         assign(current.modeToolPolicies, body.modeId, policy);
                         assign(current.modeToolSelections, body.modeId, selection);
                         current.revision++;
-                        refreshPolicies(current);
                         return { modeId: body.modeId, selection, revision: current.revision };
                     }));
                 }
@@ -1050,7 +1083,6 @@ export async function apply(ctx, config = {}) {
                             assign(current.sessionToolSelections, body.sessionId, { kind: 'custom' });
                         }
                         current.revision++;
-                        refreshPolicies(current);
                         return { inherited: inherit, revision: current.revision };
                     }));
                 }
@@ -1074,7 +1106,6 @@ export async function apply(ctx, config = {}) {
                         current.toolGroups.push(...plan.tools.groups);
                         current.toolPresets.push(...plan.tools.presets);
                         current.revision++;
-                        refreshPolicies(current);
                         return { applied: true, stats: plan.stats, groups: plan.tools.groups, presets: plan.tools.presets };
                     }));
                 }
@@ -1283,6 +1314,10 @@ export async function apply(ctx, config = {}) {
             }
         },
     }), 'preset-enhance: API');
+}
+function sessionVariables(state, sessionId, presetId) {
+    const row = ownGet(state.sessions, sessionId);
+    return row?.presetId === presetId ? row : undefined;
 }
 function messageText(message) {
     return message?.content?.filter(block => block.type === 'text').map(block => block.text).join('') ?? '';

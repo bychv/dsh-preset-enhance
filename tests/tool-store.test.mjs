@@ -272,7 +272,7 @@ test('concurrent transactions are serialized and no write is lost', async () => 
   const state = await store.read();
   assert.equal(state.revision, 12);
   assert.deepEqual([...state.writeLog].sort((left, right) => left - right), [0, 1, 2, 3, 4, 5, 6, 7]);
-  const leftovers = (await readdir(dir)).filter(name => name !== 'state.json');
+  const leftovers = (await readdir(dir)).filter(name => name !== 'state.json' && name !== 'state.json.write-lock.sqlite');
   assert.deepEqual(leftovers, [], `atomic writes must not leave temp files: ${leftovers.join(', ')}`);
 });
 

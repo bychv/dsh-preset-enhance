@@ -509,7 +509,8 @@ test('the Files scope hashes endpoint and key without ever persisting the key', 
   const index = new DeepSeekUploadIndex(path);
   const record = { scope, attachmentId: ATTACHMENT_ID, variantId: VARIANT_ID, fileId: 'file-1', bytes: 4, createdAt: 1_000, expiresAt: 10_000 };
   assert.deepEqual(await index.commit(record, 1_000, 0), { record, accepted: true });
-  assert.deepEqual(await readdir(dir), ['deepseek-files.json'], 'atomic writes leave no temp or lock files');
+  assert.deepEqual((await readdir(dir)).sort(), ['deepseek-files.json', 'deepseek-files.json.write-lock.sqlite'],
+    'atomic writes leave no temp files and use a single persistent lock');
   const stored = await readFile(path, 'utf8');
   assert.equal(stored.includes(FILE_KEY), false, 'the API key is hash input only');
   assert.equal(JSON.parse(stored).formatVersion, 3);

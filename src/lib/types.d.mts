@@ -371,6 +371,16 @@ export interface SessionCompilation {
   [key: string]: unknown;
 }
 
+/** Previous values of the keys modified by a committed compilation. Null means absent. */
+export type MacroBefore = Record<string, string | null>;
+
+export interface SessionVariables {
+  presetId: string;
+  result: { local: Record<string, string> };
+  /** A matching compilation must render again without committing the same macro effects twice. */
+  replay?: { key: string; local?: MacroBefore; global?: MacroBefore };
+}
+
 /* ------------------------------------------------------------- state file */
 
 /** Wire protocol the plugin adapts the preset injection to. */
@@ -465,7 +475,7 @@ export interface PresetState {
   sPresetEditor: SPresetEditorState;
   bindings: Record<string, PresetBinding>;
   global: Record<string, string>;
-  sessions: Record<string, SessionCompilation>;
+  sessions: Record<string, SessionVariables>;
   /** Fields written by a newer version are preserved but not modelled. */
   [key: string]: unknown;
 }

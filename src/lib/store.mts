@@ -1,9 +1,9 @@
-import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { mkdir, readFile, readdir } from 'node:fs/promises';
+import { basename, dirname, resolve } from 'node:path';
+import { atomicFilePath, cleanAtomicTemps, isErrno, withWriterLock, writeAtomicFile } from './atomic-file.mjs';
 import { normalizeToolState } from './tool-presets.mjs';
 import { createDefaultSPresetLibrary, normalizeSPresetEditor, normalizeSPresetLibrary } from './s-preset-library.mjs';
-import type { PresetState, ToolCatalogRow, ToolPolicy } from './types.mjs';
+import type { PresetState, SessionVariables, ToolCatalogRow, ToolPolicy } from './types.mjs';
 
 const initialState = (): PresetState => ({
   version: 1,
@@ -82,35 +82,43 @@ function normalize(state: PresetState): PresetState {
   return state;
 }
 
-function parseState(raw: string): PresetState {
+function parseState(raw: string): { state: PresetState; legacySessions: boolean } {
   const parsed: unknown = JSON.parse(raw);
   if (parsed === null || typeof parsed !== 'object' || (parsed as { version?: unknown }).version !== 1) {
     throw new Error('不支持的预设数据库版本');
   }
-  return normalize(parsed as PresetState);
+  const state = normalize(parsed as PresetState);
+  const sessions: [string, SessionVariables][] = [];
+  let legacySessions = false;
+  for (const [id, entry] of Object.entries(recordOf<SessionVariables & { key?: string }>(state.sessions))) {
+    if (typeof entry?.presetId !== 'string') { legacySessions = true; continue; }
+    const local = recordOf<string>(entry.result?.local);
+    // Keep the old key for deduplication, but never let an older build treat this
+    // compact row as a usable compiled result. Older builds can still read local.
+    if (typeof entry.key === 'string') {
+      legacySessions = true;
+      sessions.push([id, { presetId: entry.presetId, result: { local }, replay: { key: entry.key } }]);
+    } else {
+      sessions.push([id, { presetId: entry.presetId, result: { local }, ...(entry.replay ? { replay: entry.replay } : {}) }]);
+    }
+  }
+  state.sessions = Object.fromEntries(sessions);
+  return { state, legacySessions };
 }
 
-function isErrno(error: unknown, code: string): boolean {
-  return error !== null && typeof error === 'object' && (error as { code?: unknown }).code === code;
+const CLEANUP_INTERVAL_MS = 60 * 60 * 1_000;
+
+interface StoreQueue {
+  tail: Promise<unknown>;
+  listeners?: Set<(state: PresetState) => void>;
+  nextCleanup?: number;
 }
 
-/** Atomic temp-file + rename: readers never observe a half-written state file. */
-async function writeStateFile(file: string, state: PresetState): Promise<void> {
-  await mkdir(dirname(file), { recursive: true });
-  const temp = file + '.' + randomUUID() + '.tmp';
-  await writeFile(temp, JSON.stringify(state), { mode: 0o600 });
-  await rename(temp, file);
+interface TransactionOptions<T> {
+  shouldWrite?: (result: T) => boolean;
+  compactLegacy?: boolean;
+  signal?: AbortSignal;
 }
-
-/**
- * One process owns a DSH home, but apply() builds a fresh PresetStore per
- * activation, so several instances can point at the same state file. Write
- * coordination is therefore keyed on the resolved file path and stored on
- * globalThis under a registered symbol, so every module copy in the process
- * (published lib/store.mjs and dist/lib/store.mjs) shares one queue and an old
- * instance can never interleave a read-modify-write with a newer one.
- */
-interface StoreQueue { tail: Promise<unknown>; listeners?: Set<(state: PresetState) => void> }
 
 const QUEUES_KEY = Symbol.for('dsh-preset-enhance.preset-store-queues');
 
@@ -145,7 +153,7 @@ export class PresetStoreClosedError extends Error {
   }
 }
 
-/** One process owns a DSH home. Serialized atomic updates prevent lost editor writes. */
+/** Serialized atomic updates prevent lost editor writes. */
 export class PresetStore {
   readonly file: string;
   #key: string;
@@ -160,13 +168,29 @@ export class PresetStore {
   /** Whether close() was called; from then on new transactions are refused. */
   get closed(): boolean { return this.#closed; }
 
-  /** Side-effect free: reading a missing file returns a fresh state and does not create it. */
-  async read(): Promise<PresetState> {
+  async #read(file = this.file): Promise<ReturnType<typeof parseState>> {
     try {
-      return parseState(await readFile(this.file, 'utf8'));
+      return parseState(await readFile(file, 'utf8'));
     } catch (error) {
       if (!isErrno(error, 'ENOENT')) throw error;
-      return initialState();
+      return { state: initialState(), legacySessions: false };
+    }
+  }
+
+  /** Side-effect free: reading a missing file returns a fresh state and does not create it. */
+  async read(): Promise<PresetState> {
+    return (await this.#read()).state;
+  }
+
+  /** Clean abandoned temps and compact legacy sessions on activation. */
+  async maintain(): Promise<void> {
+    // A missing parent is normal on a new install. Leave it untouched until a write.
+    const entries = await readdir(dirname(this.#key)).catch(error => {
+      if (isErrno(error, 'ENOENT')) return [];
+      throw error;
+    });
+    if (entries.some(name => name === basename(this.#key) || name.startsWith(basename(this.#key) + '.'))) {
+      await this.transaction(() => undefined, { shouldWrite: () => false, compactLegacy: true });
     }
   }
 
@@ -177,21 +201,32 @@ export class PresetStore {
     return () => { queue.listeners?.delete(listener); };
   }
 
-  /**
-   * Read-modify-write one state file atomically, serialized across every
-   * PresetStore instance that targets the same resolved path. Rejects
-   * immediately after close() so a disposed plugin cannot start new work.
-   */
-  transaction<T>(fn: (state: PresetState) => T | Promise<T>): Promise<T> {
+  /** Lock the complete read-modify-write across processes. Observers see committed state only. */
+  transaction<T>(fn: (state: PresetState) => T | Promise<T>, options: TransactionOptions<T> = {}): Promise<T> {
     if (this.#closed) return Promise.reject(new PresetStoreClosedError(this.file));
     return enqueueWrite(this.#key, async () => {
-      const state = await this.read();
-      const result = await fn(state);
-      await writeStateFile(this.file, state);
-      for (const listener of queueFor(this.#key).listeners ?? []) {
-        try { listener(structuredClone(state)); } catch { /* Observers cannot fail a committed write. */ }
+      options.signal?.throwIfAborted();
+      await mkdir(dirname(this.#key), { recursive: true, mode: 0o700 });
+      const file = await atomicFilePath(this.#key);
+      const queue = queueFor(this.#key);
+      const outcome = await withWriterLock(file, async () => {
+        if (options.compactLegacy || Date.now() >= (queue.nextCleanup ?? 0)) {
+          queue.nextCleanup = Date.now() + CLEANUP_INTERVAL_MS;
+          await cleanAtomicTemps(file).catch(error => console.warn('preset-enhance: could not scan abandoned state files', error));
+        }
+        const { state, legacySessions } = await this.#read(file);
+        options.signal?.throwIfAborted();
+        const result = await fn(state);
+        options.signal?.throwIfAborted();
+        const write = (options.compactLegacy && legacySessions) || (options.shouldWrite?.(result) ?? true);
+        if (write) await writeAtomicFile(file, JSON.stringify(state), options.signal);
+        return { result, committed: write ? state : undefined };
+      }, options.signal);
+      const { committed } = outcome;
+      if (committed) for (const listener of queueFor(this.#key).listeners ?? []) {
+        try { listener(structuredClone(committed)); } catch { /* Observers cannot fail a committed write. */ }
       }
-      return result;
+      return outcome.result;
     });
   }
 

@@ -24,6 +24,7 @@ export function installDisplayConfig(ctx: PluginContext, store: PresetStore,
     scoped.effect(() => () => notifyStatus(), 'preset-enhance: display capability scope');
   });
   const closers = new Set<() => void>();
+  const sessionListeners = new Map<string, Set<(state: PresetState) => void>>();
   const snapshot = (state: PresetState, sessionId: string) => {
     const session = ctx.sessions.get(sessionId);
     if (!session) throw new Error('会话不存在');
@@ -66,8 +67,21 @@ export function installDisplayConfig(ctx: PluginContext, store: PresetStore,
       const notify = () => { void store.read().then(send).catch(close); };
       statusListeners.add(notify);
       const unsubscribe = store.subscribe(send);
+      let listeners = sessionListeners.get(sessionId);
+      if (!listeners) sessionListeners.set(sessionId, listeners = new Set());
+      listeners.add(send);
       const timer = setInterval(() => { if (!available()) close(); else res.write!(': keepalive\n\n'); }, 15000);
-      const close = () => { if (closed) return; closed = true; clearInterval(timer); unsubscribe(); statusListeners.delete(notify); closers.delete(close); res.end(); };
+      const close = () => {
+        if (closed) return;
+        closed = true;
+        clearInterval(timer);
+        unsubscribe();
+        listeners.delete(send);
+        if (!listeners.size) sessionListeners.delete(sessionId);
+        statusListeners.delete(notify);
+        closers.delete(close);
+        res.end();
+      };
       closers.add(close); res.on?.('close', close);
       try { send(await store.read()); } catch { close(); }
     },
@@ -86,5 +100,11 @@ export function installDisplayConfig(ctx: PluginContext, store: PresetStore,
     },
   }), 'preset-enhance: display availability');
   ctx.effect(() => () => { for (const close of [...closers]) close(); }, 'preset-enhance: display cleanup');
-  return { status: capability, subscribe(notify: () => void) { statusListeners.add(notify); return () => { statusListeners.delete(notify); }; } };
+  return {
+    status: capability,
+    subscribe(notify: () => void) { statusListeners.add(notify); return () => { statusListeners.delete(notify); }; },
+    sessionChanged(sessionId: string, state: PresetState) {
+      for (const send of sessionListeners.get(sessionId) ?? []) send(state);
+    },
+  };
 }

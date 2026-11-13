@@ -111,26 +111,41 @@ test('agent preset mode refreshes managed files while keeping unrelated files', 
     assert.match(await readFile(join(destination, 'agent.cordis.yml'), 'utf8'), /includeRuntimeContext: false/);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
-test('routing: frozen input preserved, once-only injection, retries stable, isolation and durable audit', async () => {
+test('routing: no-op cache hits, frozen input and durable macro replay after reload', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-preset-route-'));
   try {
-    const file = join(dir, 'state.json'), store = new PresetStore(file), listeners = {}, calls = [];
+    const file = join(dir, 'state.json'), store = new PresetStore(file), listeners = {}, calls = [], disposers = [];
     await store.transaction(s => {
       s.presets.push({ id: 'p', preset: { prompts: [{ identifier: 'a', role: 'assistant', content: '{{incvar::count}}/{{roll 1d999999}}' }] } });
       s.bindings.s = { enabled: true, presetId: 'p' };
     });
     const ctx = { sessions: { get: id => id === 's' ? {} : undefined }, on: (name, fn) => listeners[name] = fn,
-      effect: fn => fn(), webServer: { register: () => () => {} },
+      effect: fn => { const dispose = fn(); if (typeof dispose === 'function') disposers.push(dispose); return dispose; }, webServer: { register: () => () => {} },
       llm: { stream: options => listeners['llm/stream'](options, async function* () { calls.push(options); yield { type: 'finish', reason: { kind: 'completed' } }; }) } };
     await apply(ctx, { dataFile: file, agentPresetRoot: join(dir, '.agent-presets') });
     const request = Object.freeze({ sessionId: 's', provider: 'mock', model: 'mock', messages: Object.freeze([Object.freeze(msg('u', 'user', 'hello'))]) });
+    let commits = 0;
+    const unsubscribe = store.subscribe(() => { commits++; });
     for await (const _ of ctx.llm.stream(request)) {}
+    const firstWrite = await readFile(file, 'utf8');
+    assert.equal(JSON.parse(firstWrite).sessions.s.result.messages, undefined);
+    assert.equal(commits, 1);
     for await (const _ of ctx.llm.stream(request)) {}
+    assert.equal(commits, 1);
+    assert.equal(await readFile(file, 'utf8'), firstWrite);
     assert.equal(calls.length, 2); assert.equal(calls[0].messages.length, 2); assert.equal(request.messages.length, 1);
     assert.deepEqual(calls[0].messages, calls[1].messages);
     assert.equal((await store.read()).sessions.s.result.local.count, '1');
+    await Promise.all(disposers.splice(0).reverse().map(dispose => dispose()));
+    await apply(ctx, { dataFile: file, agentPresetRoot: join(dir, '.agent-presets') });
+    for await (const _ of ctx.llm.stream(request)) {}
+    assert.deepEqual(calls[0].messages, calls[2].messages);
+    assert.equal((await store.read()).sessions.s.result.local.count, '1');
+    assert.equal(commits, 1, 'macro replay after reload must not write again');
+    unsubscribe();
     for await (const _ of ctx.llm.stream({ ...request, sessionId: 'other' })) {}
     assert.equal(calls.at(-1).messages, request.messages);
+    await Promise.all(disposers.reverse().map(dispose => dispose()));
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 test('new conversations inject and pin the globally selected preset after reopening the store', async () => {

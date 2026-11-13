@@ -2,19 +2,13 @@
  * Vendored from DeepSeek Harness, tag dsh-v0.1.7-alpha.1,
  * packages/llm/llm-deepseek/src/common/upload-index.ts.
  * Upstream is MIT licensed; Copyright (c) DeepSeek. Adapted for DSH 0.1.7-alpha.1:
- * self-contained (no @deepseek-ai/* imports). Two host helpers are unavailable
- * without that dependency and are re-implemented locally below:
- *   - dsh-atomic-write is replaced by writeFileAtomic (temp file + rename) and
- *     withFileLock (O_EXCL lock file, bounded wait, stale-lock recovery);
- *   - dsh-home-paths/resolveDshHome is NOT replicated. The index path is
- *     explicit instead: the plugin entry derives it from its own state file via
- *     deepSeekFilesIndexPath() in ./file-store.mjs, never from a new
- *     DSH_HOME/llm-deepseek location.
+ * no @deepseek-ai/* imports. The plugin's atomic-file helper coordinates writes.
+ * The index path is explicit and stays beside the plugin's own state file.
  */
 
-import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, open, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
-import type { FileHandle } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, readFile } from 'node:fs/promises';
+import { atomicFilePath, cleanAtomicTemps, isErrno, withWriterLock, writeAtomicFile } from '../../lib/atomic-file.mjs';
 import { dirname } from 'node:path';
 import { DeepSeekFileId, DeepSeekFileScope } from './file-id.mjs';
 import type {
@@ -45,64 +39,6 @@ class InvalidUploadIndexError extends Error {}
 export interface UploadIndexCommit {
   record: DeepSeekUploadRecord;
   accepted: boolean;
-}
-
-/** How long a competing writer waits for the index lock before failing. */
-const LOCK_WAIT_MS = 10_000;
-/** A lock file older than this is treated as abandoned by a crashed writer. */
-const LOCK_STALE_MS = 30_000;
-/** Poll interval while another writer holds the lock. */
-const LOCK_RETRY_MS = 25;
-
-function absent(error: unknown): boolean {
-  return (error as NodeJS.ErrnoException | null)?.code === 'ENOENT';
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-/** Atomic temp-file + rename replacement for the host writeFileAtomic helper. */
-async function writeFileAtomic(path: string, text: string, options: { mode: number; dirMode: number }): Promise<void> {
-  await mkdir(dirname(path), { recursive: true, mode: options.dirMode });
-  const temp = path + '.' + randomUUID() + '.tmp';
-  await writeFile(temp, text, { mode: options.mode });
-  await rename(temp, path);
-}
-
-/** O_EXCL acquisition; null means another writer currently owns the lock. */
-async function acquireLockFile(lockPath: string): Promise<FileHandle | null> {
-  try {
-    return await open(lockPath, 'wx', 0o600);
-  } catch (error: unknown) {
-    if ((error as NodeJS.ErrnoException | null)?.code === 'EEXIST') return null;
-    throw error;
-  }
-}
-
-/** Replacement for the host withFileLock helper: bounded wait plus stale-lock recovery. */
-async function withFileLock<T>(path: string, work: () => Promise<T>): Promise<T> {
-  const lockPath = path + '.lock';
-  const deadline = Date.now() + LOCK_WAIT_MS;
-  for (;;) {
-    const handle = await acquireLockFile(lockPath);
-    if (handle === null) {
-      const info = await stat(lockPath).catch(() => null);
-      if (info !== null && Date.now() - info.mtimeMs > LOCK_STALE_MS) {
-        await unlink(lockPath).catch(() => {});
-        continue;
-      }
-      if (Date.now() > deadline) throw new Error('deepseek files: timed out waiting for the upload index lock');
-      await sleep(LOCK_RETRY_MS);
-      continue;
-    }
-    try {
-      return await work();
-    } finally {
-      await handle.close().catch(() => {});
-      await unlink(lockPath).catch(() => {});
-    }
-  }
 }
 
 /**
@@ -177,6 +113,7 @@ function reusable(record: DeepSeekUploadRecord, now: number, refreshMarginMs: nu
 export class DeepSeekUploadIndex {
   /** Absolute owner-private JSON index path. */
   readonly path: string;
+  #nextCleanup = 0;
 
   /**
    * @param path - explicit index path. The plugin entry derives it from its own
@@ -187,22 +124,31 @@ export class DeepSeekUploadIndex {
     this.path = path;
   }
 
-  private async load(): Promise<StoredIndex> {
+  private async load(path = this.path): Promise<StoredIndex> {
     try {
-      return parseIndex(await readFile(this.path, 'utf8'));
+      return parseIndex(await readFile(path, 'utf8'));
     } catch (error: unknown) {
-      if (absent(error) || error instanceof InvalidUploadIndexError) {
+      if (isErrno(error, 'ENOENT') || error instanceof InvalidUploadIndexError) {
         return { formatVersion: 3, records: [] };
       }
       throw error;
     }
   }
 
-  private async save(index: StoredIndex): Promise<void> {
-    await writeFileAtomic(this.path, JSON.stringify(index, undefined, 2) + '\n', {
-      mode: 0o600,
-      dirMode: 0o700,
-    });
+  private async transaction<T>(fn: (path: string, index: StoredIndex) => Promise<T>): Promise<T> {
+    await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
+    const path = await atomicFilePath(this.path);
+    return withWriterLock(path, async () => {
+      if (Date.now() >= this.#nextCleanup) {
+        this.#nextCleanup = Date.now() + 60 * 60 * 1_000;
+        await cleanAtomicTemps(path).catch(error => console.warn('preset-enhance: could not scan upload index temp files', error));
+      }
+      return fn(path, await this.load(path));
+    }, undefined, 10_000);
+  }
+
+  private async save(path: string, records: DeepSeekUploadRecord[]): Promise<void> {
+    await writeAtomicFile(path, JSON.stringify({ formatVersion: 3, records }, undefined, 2) + '\n');
   }
 
   /**
@@ -237,9 +183,7 @@ export class DeepSeekUploadIndex {
     now: number,
     refreshMarginMs: number,
   ): Promise<UploadIndexCommit> {
-    await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
-    return withFileLock(this.path, async () => {
-      const index = await this.load();
+    return this.transaction(async (path, index) => {
       const existing = index.records.find(record => (
         record.scope === candidate.scope
         && record.variantId === candidate.variantId
@@ -251,7 +195,7 @@ export class DeepSeekUploadIndex {
         && !(record.scope === candidate.scope && record.variantId === candidate.variantId)
       ));
       records.push(candidate);
-      await this.save({ formatVersion: 3, records });
+      await this.save(path, records);
       return { record: candidate, accepted: true };
     });
   }
@@ -267,13 +211,11 @@ export class DeepSeekUploadIndex {
     variantId: ImageVariantId,
     fileId: DeepSeekFileIdType,
   ): Promise<void> {
-    await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
-    await withFileLock(this.path, async () => {
-      const index = await this.load();
+    await this.transaction(async (path, index) => {
       const records = index.records.filter(record => !(
         record.scope === scope && record.variantId === variantId && record.fileId === fileId
       ));
-      if (records.length !== index.records.length) await this.save({ formatVersion: 3, records });
+      if (records.length !== index.records.length) await this.save(path, records);
     });
   }
 
@@ -282,11 +224,9 @@ export class DeepSeekUploadIndex {
    * @param scope - endpoint/API-key namespace.
    */
   async clear(scope: DeepSeekFileScopeType): Promise<void> {
-    await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
-    await withFileLock(this.path, async () => {
-      const index = await this.load();
+    await this.transaction(async (path, index) => {
       const records = index.records.filter(record => record.scope !== scope);
-      if (records.length !== index.records.length) await this.save({ formatVersion: 3, records });
+      if (records.length !== index.records.length) await this.save(path, records);
     });
   }
 }
