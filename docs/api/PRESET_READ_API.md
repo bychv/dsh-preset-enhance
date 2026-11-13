@@ -1,6 +1,6 @@
 # 预设只读 API v1
 
-状态：next-ver 已实现。仅查看预设；没有修改、切换、启停、导入、删除、动态解析或外部授权接口。
+本文对应 `next-ver` 当前源码。接口提供预设及会话绑定查询，进程内服务还可读取动态预填充摘要。
 
 ## 内部 agent
 
@@ -30,7 +30,7 @@ agent 必须是 ctx.agents.get(agent.session.id) 返回的当前宿主实例，�
 
 ## 进程内动态预填充摘要
 
-受信任的宿主插件可调用 `presetReader.readPrefill(agent, signal)`。与 `read` 一样校验当前宿主 agent 身份。返回 `PresetPrefillSummaryV1`，包含 revision、有效预设 ID、注入与 Beta 开关、思考/正文目标，以及动态标记在选中顺序表中的状态与模板关联。返回值省略正文、配置、生成结果和凭据。
+受信任的宿主插件可调用 `presetReader.readPrefill(agent, signal)`。与 `read` 一样校验当前宿主 agent 身份。返回 `PresetPrefillSummaryV1`，包含 revision、会话所选预设 ID、注入状态、Beta 兼容开关和思考/正文目标。已有动态标记时还会返回它在选中顺序表中的状态及关联。Beta 开关为「预填充自动兼容」或「强制启用预填充」的设置值。返回值省略正文、配置、生成结果和凭据。
 
 生成器读取本次输入请使用 resolver 的 `prefill` 快照。HTTP 和 `preset_read` 工具仍提供下面列出的只读查询。
 

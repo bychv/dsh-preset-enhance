@@ -71,7 +71,7 @@ TypeScript 可从同一公开子路径导入 `PresetTemplatesV1`、`PromptTempla
 | `description` | 可选文本，最多 2,000 字符 |
 | `role` | `system`、`user` 或 `assistant` |
 | `content` | 定义文本，可为空，最多 200,000 字符；注册时不展开宏、不执行回调 |
-| `dynamic` | 可选 `{ resolverId, input, output }`；input 为 latest-user（默认）、history 或纯对话正文 conversation-text；output 默认为 text，须包含 {{dynamic::body}}；history-patches 见下节 |
+| `dynamic` | 可选 `{ resolverId, input, output, prefill }`。普通模板的 input 可选 latest-user（默认）、history 或 conversation-text。text 输出使用 {{dynamic::body}} 槽位。prefill 用于外部动态预填充 |
 | `targetMarker` | 可选的酒馆 marker identifier，例如 charDescription、worldInfoBefore；声明后仅能关联该标记，不作为新增提示词插入 |
 | `defaults.placement` | 可选位置建议：`beforeHistory`、`afterHistory` 或 `depth` |
 | `defaults.depth` | depth 位置必须提供非负安全整数，其他位置不可填写 |
@@ -91,7 +91,7 @@ TypeScript 可从同一公开子路径导入 `PresetTemplatesV1`、`PromptTempla
 GET /preset-enhance/api/templates
 ```
 
-响应包含 `list()` 的字段，并附带 `fingerprints` 数组（providerId、templateId、templateVersion、fingerprint），供编辑器确认所查看的内容；空目录返回 `providers: []`，使用 `Cache-Control: no-store`。端点复用宿主 Web 服务的访问控制，不另开端口，不需要 sessionId，也不返回会话、变量或连接配置。
+响应包含 `list()` 的字段，附带 `fingerprints` 供编辑器确认所选版本，以及 `markers` 供编辑器列出可加入的标记。每个标记包含 identifier、name、role 和 marker。无提供者时 `providers` 为空数组，内置标记仍可用。响应使用 `Cache-Control: no-store`。端点复用宿主 Web 服务的访问控制，不另开端口，不需要 sessionId，也不返回会话、变量或连接配置。
 
 - `200`：当前目录快照。
 - `405`：非 GET 请求；没有 HTTP 注册或写入接口。
@@ -122,13 +122,19 @@ templates.register(ctx, {
 });
 ```
 
-解析器返回字符串或 Promise<string>，最多 200,000 字符。输入为只读快照：sessionId、requestId、historyRevision、presetId、identifier、mode、protocol、purpose、latestUser、userText、variables、config 和 signal；声明 history 时才附带完整 history。工具结果不作为 latestUser。variables 提供已提交 local/global/values，不含本次稍后才执行的宏变更。
+普通正文解析器返回字符串或 `Promise<string>`，最多 200,000 字符。只读上下文包含 sessionId、requestId、historyRevision、presetId、identifier、mode、protocol、purpose、userText、variables、config 和 signal。variables 提供本次宏展开前的 local/global/values。消息字段随 input 选择变化。
 
-定义文本的宏照常展开；槽位结果作为字面文本插入，不递归执行其包含的宏。可用上下文类型为 DynamicTemplateContextV1，运行时注册类型为 TemplateRuntimeV1。解析器只读取数据，不写预设、变量和历史，不自动启动独立模型生成。
+| input | 提供的消息字段 |
+| --- | --- |
+| `latest-user` | `latestUser` 为最近一条用户消息，排除工具结果和压缩检查点 |
+| `history` | `history` 为编译前的历史消息，`latestUser` 指向其中的最近用户消息。可用于按原始深度修改历史 |
+| `conversation-text` | `conversationText` 为按时间顺序排列的纯正文，`userText` 也经过过滤 |
+
+定义文本的宏照常展开；槽位结果作为字面文本插入，不递归执行其包含的宏。可用上下文类型为 DynamicTemplateContextV1，运行时注册类型为 TemplateRuntimeV1。解析器通过返回值提供本次编译数据。外部模型的调用由动态预填充提供者实现。
 
 用户在两个编辑器的关联条目中填写配置 JSON、选择“失败时停止发送”（默认）或“失败时跳过条目”，点击“应用动态配置”后沿用普通保存/自动保存。template-select 新增 configure 动作，参数为 identifier、config（最多 20,000 字符 JSON 对象）和 failurePolicy（abort/skip）；锁定条目仍需先解锁。
 
-仅启用且命中触发条件的条目执行，最多并发 4 个解析器，共用 5 秒截止时间。解析器响应发送取消、超时和作用域卸载；迟到结果丢弃。工具续轮重新读取当前历史，传输重试沿用同一份准备结果。动态调用不占保存事务，期间依赖发生变化会停止发送并提示重试，失败不会提交半成品宏变量。
+仅启用且命中触发条件的条目执行。普通动态解析器最多并发 4 个，共用 5 秒截止时间。解析器响应发送取消、超时和作用域卸载；迟到结果丢弃。工具续轮重新读取当前历史，传输重试沿用同一份准备结果。动态调用不占保存事务，期间依赖发生变化会停止发送并提示重试，失败不会提交半成品宏变量。
 
 根包不跨请求缓存回调结果，不用旧静态编译缓存绕过解析。固定版本约束定义；更改回调语义应提供新模板版本，运行数据变化无需 update 目录。
 
@@ -171,13 +177,13 @@ templates.register(ctx, {
 
 `reuseKey` 绑定提供者激活、会话、轮次与步骤、历史、预设关联、目标和配置。相同准备再次执行时，提供者可凭此合并并发或复用生成结果。主包的传输重试沿用已准备的请求。显式授权的草稿预览是独立调用，没有发送复用键。结果不进入预设或分享包。绑定修改、请求取消、超时和提供者卸载会使已失效结果无法发送。
 
-返回非空字符串或 `{ status: 'generated', text }` 作为字面前缀。返回 `{ status: 'fallback' }` 采用同一条目保存的静态正文或会话标记值，`{ status: 'skipped' }` 跳过当前动态标记。失败沿用 abort/skip 配置，实际请求和 Raw 预览会附带跳过或回退原因。思考/正文位置沿用预设的前缀目标。
+返回非空字符串或 `{ status: 'generated', text }` 作为字面前缀。返回 `{ status: 'fallback' }` 采用同一条目保存的静态正文或会话标记值，`{ status: 'skipped' }` 跳过当前动态标记。失败沿用 abort/skip 配置。工作台在请求预览的提示区显示跳过或回退原因。思考/正文位置沿用预设的前缀目标。
 
 两个编辑器会把内置标记及插件目录声明的缺失标记列在「闲置」或「未使用」，点「加入」才创建条目并插入选中顺序表。已在该表但停用的条目仍留在顺序表。唯一提供者自动关联，出现冲突可在「插件模板」中选择。
 
 ## 工作台消息与 Raw 预览
 
-“解析当前草稿”才执行动态解析；加载、自动保存及预填充检测不调用解析器。chatHistory 默认只展示最近两条消息，完整展开沿用同一快照，预设注入保持原位置。标题旁的“原始消息（Raw）”以紧凑 JSON 树查看请求，默认展开消息及工具浅层结构，支持长文本就地展开、展开一层与收起全部；大对象和数组每批显示 50 项。复制仍返回完整原始请求文本，保留空白与数字原文；历史折叠不影响 Raw。无法解析 JSON 时显示原文。
+“解析当前草稿”才执行草稿的动态解析。外部生成器需本次授权。加载、自动保存及预填充检测只读取状态。chatHistory 默认只展示最近两条消息，完整展开沿用同一快照，预设注入保持原位置。标题旁的“原始消息（Raw）”以紧凑 JSON 树查看请求，默认展开消息及工具浅层结构，支持长文本就地展开、展开一层与收起全部；大对象和数组每批显示 50 项。复制仍返回完整原始请求文本，保留空白与数字原文；历史折叠不影响 Raw。无法解析 JSON 时显示原文。
 
 “查看最近实际请求”读取发送边界记录；Chat、Messages 和 Beta/DSML 转换后的正文按原文保存，HTTP 失败也可查看。工作台打开时接收新快照通知，可选择工具续轮和传输尝试。快照仅在内存中保留，每会话最近 4 次、总正文最多 32 MiB，插件重载后清空；缺失和超限明确提示。
 

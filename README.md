@@ -20,7 +20,7 @@
 dsh plugin --profile web add dsh-preset-enhance@next
 ```
 
-安装本次实验版可将命令中的 `@next` 换为 `@alpha`。
+安装已发布的实验版可将命令中的 `@next` 换为 `@alpha`。
 
 重新启动 `dsh web`，在侧边栏打开「预设工作台」。导入预设后，新建「预设模式」对话即可使用；已有会话用 `/preset on` 或 `/preset off` 控制注入。
 
@@ -40,6 +40,6 @@ dsh plugin --profile web add dsh-preset-enhance@next
 | 外部插件与内部 agent 接入 | [模板 API](docs/api/TEMPLATE_API.md) · [只读 API](docs/api/PRESET_READ_API.md) |
 | 架构与开发 | [插件架构](docs/ARCHITECTURE.md) · [开发验证](docs/DEVELOPMENT.md) |
 
-完整索引及兼容记录见[文档导航](docs/README.md)。
+文档随 `next-ver` 源码更新。外部动态预填充和纯正文历史在 0.3.7-rc.1 发布后加入。完整索引及兼容记录见[文档导航](docs/README.md)。
 
 [MIT 许可证](LICENSE)

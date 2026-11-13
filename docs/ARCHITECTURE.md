@@ -1,6 +1,6 @@
 # 插件逻辑架构
 
-本文对应 0.3.7-rc.1，支持 DSH 0.2.1 和 0.2.2。安装入口是 `dsh-preset-enhance`，主包精确依赖 `dsh-preset-display-regex`，由根目录 `cordis.patch.yml` 在同一插件页注册两个可分别启停的运行条目。`packages/bundle` 仅保留兼容入口，不是正常安装所需的第三个包。
+本文对应 `next-ver` 当前源码，支持 DSH 0.2.1 和 0.2.2。安装入口是 `dsh-preset-enhance`，主包精确依赖 `dsh-preset-display-regex`，由根目录 `cordis.patch.yml` 在同一插件页注册两个可分别启停的运行条目。`packages/bundle` 仅保留兼容入口，不是正常安装所需的第三个包。
 
 ## 包边界与数据流
 
@@ -70,7 +70,7 @@ flowchart TD
 
 `src/lib/dsh-assembly.mts` 在已有准备桥接返回后记录最终 assembly，通过 Agent、turn/step 和请求信号关联，核对原系统正文与 schemas 后复用。预览带独立标记，不能覆盖本轮；step/turn 结束、模式切换及停用时清理。它不保留 toolSet 的所有权，也不重新执行 tools.resolve。无关联的手工/旧式调用保留独立组装路径，模型选择读取 live Agent 与公开 projection snapshot，并显式传入 modelSelection。
 
-草稿预览复用动态解析与编译，但不提交变量写入，也不发送模型请求。实际发送另建请求快照，经过适配器和 HTTP 桥接后捕获真正出站的请求体；两次准备之间输入或外部数据变化时，草稿与实际请求可能不同。消息卡片与 Raw 都读取同一快照，折叠和切换视图不会触发重新解析。
+草稿预览复用动态解析与编译，宏变更留在预览副本。授权解析外部动态预填充时，提供者可以调用自己的生成服务。实际发送另建请求快照，经过适配器和 HTTP 桥接后捕获真正出站的请求体；两次准备之间输入或外部数据变化时，草稿与实际请求可能不同。消息卡片与 Raw 都读取同一快照，折叠和切换视图不会触发重新解析。
 
 ### 代码对应关系
 
@@ -87,7 +87,7 @@ flowchart TD
 | `src/lib/tool-presets.mts`、`src/lib/tool-restrictions.mts` | 工具策略、分组、会话作用域限制和 PTC 工具可见性 |
 | `src/lib/connection.mts`、`src/lib/protocol.mts`、`src/lib/messages.mts` | 读取实际连接协议、记录协议观察结果、Messages 消息适配 |
 | `src/lib/deepseek-beta.mts`、`src/lib/toolcall-prefill.mts`、`src/lib/output-extractor.mts` | 请求匹配、预填充兼容、DSML 转换和实验性正文提取 |
-| `src/templates.mts`、`src/template-api.d.mts`、`src/lib/template-registry.mts`、`src/lib/template-bindings.mts`、`src/lib/dynamic-templates.mts` | 外部模板公开入口、注册、关联和动态解析；契约见[模板 API](api/TEMPLATE_API.md) |
+| `src/templates.mts`、`src/template-api.d.mts`、`src/lib/template-registry.mts`、`src/lib/template-bindings.mts`、`src/lib/dynamic-templates.mts`、`src/lib/external-prefill.mts` | 外部模板公开入口、注册、关联、动态解析、正文投影和预填充轮次跟踪；契约见[模板 API](api/TEMPLATE_API.md) |
 | `src/lib/request-preview.mts`、`src/client/request-preview.ts`、`src/client/request-events.ts` | 请求快照、Raw JSON 树和活动页订阅；来源区别见[请求预览](guides/REQUEST_PREVIEW.md) |
 | `src/lib/preset-reader.mts` | 内部 agent 的预设查询、字段裁剪与权限边界；见[只读 API](api/PRESET_READ_API.md) |
 | `src/lib/prompt-regex.mts`、`src/lib/display-regex.mts`、`src/lib/display-config.mts`、`src/client/regex-editor.ts` | 提示词/显示两通道的规则、配置与共享编辑器；见[正文正则](api/DISPLAY_REGEX.md) |
@@ -135,7 +135,7 @@ flowchart TD
 
 ### 外部模板与只读查询
 
-外部插件通过 `presetTemplates` 注册普通模板、动态模板及 marker 关联。主包跟踪提供者的启停和热重载，失效引用保留用于恢复；冲突及固定版本由工作台处理。当前支持模板和 chatHistory 的约定扩展，通用提示词序列处理链、通用脚本运行时、MVU 和组件状态服务仍属规划；已实现的受限 SPreset 工具脚本不提供这些接口，不能按方案接口直接调用。
+外部插件通过 `presetTemplates` 注册普通模板、动态模板及 marker 关联。普通动态模板可选择纯正文历史。外部动态预填充通过 `dshDynamicPrefill` 接入，使用按用户轮次分组的纯正文和宿主首请求标识。主包跟踪提供者的启停和热重载，失效引用保留用于恢复；冲突及固定版本由工作台处理。当前支持模板和 chatHistory 的约定扩展，通用提示词序列处理链、通用脚本运行时、MVU 和组件状态服务仍属规划；已实现的受限 SPreset 工具脚本不提供这些接口，不能按方案接口直接调用。
 
 工作台编辑 API 与显示配置 API 使用 DSH Web 登录边界。内部 agent 的只读查询由 `src/lib/preset-reader.mts` 发放绑定 agent 的短期凭证，不沿用浏览器登录作为外部公开授权；当前不提供外部匿名读取。公开契约见[模板 API](api/TEMPLATE_API.md)和[只读 API](api/PRESET_READ_API.md)。
 
