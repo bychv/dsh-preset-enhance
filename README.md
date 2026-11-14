@@ -14,13 +14,13 @@
 
 ## 安装与升级
 
-安装已发布的 RC 通道版本：
+按需选择 npm 安装通道。命令会安装该标签当前指向的版本。
 
-```powershell
-dsh plugin --profile web add dsh-preset-enhance@next
-```
-
-安装已发布的实验版可将命令中的 `@next` 换为 `@alpha`。
+| 通道 | 安装命令 |
+| --- | --- |
+| 默认发布 `latest` | `dsh plugin --profile web add dsh-preset-enhance@latest` |
+| RC 预览 `next` | `dsh plugin --profile web add dsh-preset-enhance@next` |
+| 实验版本 `alpha` | `dsh plugin --profile web add dsh-preset-enhance@alpha` |
 
 重新启动 `dsh web`，在侧边栏打开「预设工作台」。导入预设后，新建「预设模式」对话即可使用；已有会话用 `/preset on` 或 `/preset off` 控制注入。
 
