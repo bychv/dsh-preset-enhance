@@ -5,13 +5,14 @@ import { toolPolicySnapshot } from '../lib/tool-presets.mjs';
 import { createDshAssemblyTracker } from '../lib/dsh-assembly.mjs';
 import { readDshSystemTemplate, dshTemplateFromAssembly } from '../lib/dsh-system-template.mjs';
 
-function fixture() {
+function fixture(sectionsForStep) {
   const events = {}, stops = [], agents = new Map(); let calls = 0, phase = 0;
   const prompt = { async assemble(context) {
     calls++;
     const allowed = context.toolSet ?? [{ name: 'allowed' }, { name: 'not-admitted' }];
     // This is the final return, including any later waterfall/complete rule.
-    return { sections: [{ name: 'third:dynamic', text: `sdk ${phase}: ${allowed.map(t => t.name).join(',')}` }],
+    return { ...(sectionsForStep ? { systemUpdates: () => [] } : {}),
+      sections: sectionsForStep?.(phase) ?? [{ name: 'third:dynamic', text: `sdk ${phase}: ${allowed.map(t => t.name).join(',')}` }],
       contexts: [{ name: 'cwd', text: '/fictional' }], variables: {}, tools: allowed };
   } };
   const ctx = { effect(fn) { stops.push(fn()); }, on(key, fn) { events[key] = fn; },
@@ -50,6 +51,39 @@ test('accepted step uses admitted SDK without a second assembly; previews cannot
   assert.throws(() => f.tracker.forRequest(request, 'standard'), /正文或工具集合/);
   // Transport retries keep the same accepted result, including resolved adapter defaults.
   assert.equal(f.tracker.forRequest({ ...continuation, reasoningEffort: 'high' }, 'standard').text, 'sdk 1: allowed');
+});
+
+test('incremental host prompts reuse unchanged sources and apply deltas, resets and retirements', async () => {
+  const f = fixture(phase => [
+    { name: 'stable', text: 'Stable instructions' },
+    { name: 'variable', text: phase ? 'Second value' : 'First value' },
+    { name: 'removed', text: phase ? 'Retirement notice' : 'Old value', retire: phase > 0 },
+  ]);
+  const agent = f.agent('incremental'), signal = new AbortController().signal;
+  const active = (name, contentIndex) => ({ name, state: 'active', contentIndex });
+  const system = (texts, sections, reset = false) => ({
+    role: 'system', source: { kind: 'system-prompt', sections, reset },
+    content: texts.map(text => ({ type: 'text', text })),
+  });
+  const head = system(['Stable instructions', 'First value', 'Old value'],
+    [active('stable', 0), active('variable', 1), active('removed', 2)]);
+  const first = await f.prepare(agent, signal);
+  assert.equal(f.tracker.forRequest({ ...first, messages: [head] }, 'standard').text,
+    'Stable instructions\n\nFirst value\n\nOld value');
+
+  f.phase();
+  const followup = await f.prepare(agent, signal, 2);
+  const delta = system(['Replacement notice', 'Second value', 'Retirement notice'], [
+    { ...active('variable', 1), noticeIndex: [0] },
+    { name: 'removed', state: 'retired', noticeIndex: [2] },
+  ]);
+  const request = { ...followup, messages: [head, { role: 'user' }, delta] };
+  assert.equal(f.tracker.forRequest(request, 'standard').text, 'Stable instructions\n\nSecond value');
+  const afterReset = system(['Stable instructions', 'Second value'], [active('stable', 0), active('variable', 1)], true);
+  assert.equal(f.tracker.forRequest({ ...request, messages: [head, afterReset] }, 'standard').text,
+    'Stable instructions\n\nSecond value');
+  assert.throws(() => f.tracker.forRequest({ ...request, messages: [head] }, 'standard'), /正文或工具集合/);
+  assert.throws(() => f.tracker.forRequest({ ...request, tools: [] }, 'standard'), /正文或工具集合/);
 });
 
 test('association isolates agents, excludes auxiliary calls and rejects changed envelopes', async () => {

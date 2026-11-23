@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from 'node:util';
-import type { AgentHandle, PluginContext, SessionLike, StreamOptions } from '../host-types.mjs';
+import type { AgentHandle, HostMessage, PluginContext, SessionLike, StreamOptions } from '../host-types.mjs';
 import { DSH_PREVIEW, dshTemplateFromAssembly } from './dsh-system-template.mjs';
 import type { DshAssembly, DshSystemTemplate } from './dsh-system-template.mjs';
 import type { Preparation } from './tool-restrictions.mjs';
@@ -9,8 +9,30 @@ interface Accepted {
   mode: string;
   selection: Record<string, unknown>;
   assembly: DshAssembly;
+  incremental: boolean;
   position?: { turn: number; step: number };
   ready?: boolean;
+}
+
+/** DSH 0.2.3 admits changed sources as deltas and stores notices in separate blocks. */
+function matchesIncrementalPrompt(messages: HostMessage[], assembly: DshAssembly, template: DshSystemTemplate): boolean {
+  const effective = new Map<string, string>();
+  for (const message of messages) {
+    const source = message.source;
+    if (source?.kind !== 'system-prompt') continue;
+    if (source.reset || !source.sections) effective.clear();
+    for (const section of source.sections ?? []) {
+      if (section.state === 'retired') {
+        effective.delete(section.name);
+        continue;
+      }
+      const block = message.content?.[section.contentIndex];
+      if (block?.type !== 'text' || typeof block.text !== 'string') return false;
+      effective.set(section.name, block.text);
+    }
+  }
+  return assembly.sections.every(section => !section.retire || !effective.has(section.name))
+    && template.sections.every(section => (effective.get(section.name) ?? '') === section.text.trim());
 }
 
 /** Only real step assemblies participate. Preview reads never replace an accepted step. */
@@ -50,6 +72,7 @@ export function createDshAssemblyTracker(ctx: PluginContext, modeOf: (session: S
       if (!Array.isArray(assembly?.sections)) return;
       // Detach data only: never retain or dispose the host's scope/toolSet.
       records.set(agent, { signal, mode: modeOf(agent.session), selection: { ...(context.modelSelection as object ?? agent.options) },
+        incremental: typeof assembly.systemUpdates === 'function',
         assembly: structuredClone({ sections: assembly.sections, contexts: assembly.contexts ?? [], variables: assembly.variables ?? {}, tools: assembly.tools ?? [] }) });
     },
     forRequest(options: StreamOptions, mode: string): DshSystemTemplate | undefined {
@@ -61,9 +84,12 @@ export function createDshAssemblyTracker(ctx: PluginContext, modeOf: (session: S
         throw new Error('DSH 本轮系统模板与请求不匹配，请重新发送');
       }
       const info = dshTemplateFromAssembly(accepted.assembly, mode);
-      const system = options.messages?.findLast(message => message.source?.kind === 'system-prompt');
-      const text = system?.content?.filter(block => block.type === 'text').map(block => block.text ?? '').join('') ?? '';
-      if (text !== info.text || !isDeepStrictEqual(options.tools ?? [], accepted.assembly.tools ?? [])) {
+      const messages = options.messages ?? [];
+      const matches = accepted.incremental
+        ? matchesIncrementalPrompt(messages, accepted.assembly, info)
+        : (messages.findLast(message => message.source?.kind === 'system-prompt')
+          ?.content?.filter(block => block.type === 'text').map(block => block.text ?? '').join('') ?? '') === info.text;
+      if (!matches || !isDeepStrictEqual(options.tools ?? [], accepted.assembly.tools ?? [])) {
         throw new Error('DSH 本轮系统正文或工具集合已变化，请重新发送');
       }
       return info;

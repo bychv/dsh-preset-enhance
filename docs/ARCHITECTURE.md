@@ -1,6 +1,6 @@
 # 插件逻辑架构
 
-本文对应 0.3.7-rc.2，支持 DSH 0.2.1 和 0.2.2。安装入口是 `dsh-preset-enhance`，主包精确依赖 `dsh-preset-display-regex`，由根目录 `cordis.patch.yml` 在同一插件页注册两个可分别启停的运行条目。`packages/bundle` 仅保留兼容入口，不是正常安装所需的第三个包。
+本文对应当前源码。宿主版本见[兼容记录](README.md#兼容与验证记录)。安装入口是 `dsh-preset-enhance`，主包精确依赖 `dsh-preset-display-regex`，由根目录 `cordis.patch.yml` 在同一插件页注册两个可分别启停的运行条目。`packages/bundle` 保留兼容入口。
 
 ## 包边界与数据流
 
@@ -68,7 +68,7 @@ flowchart TD
 
 编译负责模板关联、marker、chatHistory 深度修改、宏、提示词正则和末条预填充。缓存键包含预设、消息、协议、模板引用、动态正文和本次 DSH 系统模板，命中时复用结果，避免重复提交宏变量变更。模式系统模板按预设、模式和段落保存局部覆盖，其他段落跟随宿主默认；旧整篇模板优先使用，恢复默认不会修改其他模式。
 
-`src/lib/dsh-assembly.mts` 在已有准备桥接返回后记录最终 assembly，通过 Agent、turn/step 和请求信号关联，核对原系统正文与 schemas 后复用。预览带独立标记，不能覆盖本轮；step/turn 结束、模式切换及停用时清理。它不保留 toolSet 的所有权，也不重新执行 tools.resolve。无关联的手工/旧式调用保留独立组装路径，模型选择读取 live Agent 与公开 projection snapshot，并显式传入 modelSelection。
+`src/lib/dsh-assembly.mts` 在已有准备桥接返回后记录最终 assembly，通过 Agent、turn/step 和请求信号关联，核对原系统正文与 schemas 后复用。DSH 0.2.3 按来源提交变更，插件根据消息的段落元数据还原本轮需要核对的有效正文。预览带独立标记，不能覆盖本轮；step/turn 结束、模式切换及停用时清理。它不保留 toolSet 的所有权，也不重新执行 tools.resolve。无关联的手工/旧式调用保留独立组装路径，模型选择读取 live Agent 与公开 projection snapshot，并显式传入 modelSelection。
 
 草稿预览复用动态解析与编译，宏变更留在预览副本。授权解析外部动态预填充时，提供者可以调用自己的生成服务。实际发送另建请求快照，经过适配器和 HTTP 桥接后捕获真正出站的请求体；两次准备之间输入或外部数据变化时，草稿与实际请求可能不同。消息卡片与 Raw 都读取同一快照，折叠和切换视图不会触发重新解析。
 

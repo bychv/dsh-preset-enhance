@@ -3,12 +3,13 @@ import { connectionSelection, sessionSelection } from './connection.mjs';
 export { dshTemplateSource } from './dsh-template-source.mjs';
 
 export const DSH_TEMPLATE_ID = 'dsh-preset-enhance:dsh-system-prompt';
-interface Section { name: string; text: string; interpolate?: boolean }
+interface Section { name: string; text: string; interpolate?: boolean; retire?: boolean }
 export interface DshAssembly {
   sections: Section[];
   contexts?: Section[];
   variables?: Record<string, string | undefined>;
   tools?: unknown[];
+  systemUpdates?: unknown;
 }
 export type DshSectionOverride = { mode: 'custom'; template: string } | { mode: 'disabled' };
 export type DshSectionTemplates = Record<string, Record<string, DshSectionOverride>>;
@@ -52,7 +53,7 @@ export function dshTemplateFromAssembly(assembly: DshAssembly, modeId: string): 
   const values: Record<string, string> = Object.create(null);
   for (const [key, value] of Object.entries(variables)) if (typeof value === 'string') values['dsh::var::' + key.toLowerCase()] = value;
   const missing = new Set<string>();
-  const sections = assembly.sections.map(section => {
+  const sections = assembly.sections.filter(section => !section.retire).map(section => {
     const sectionMissing = new Set<string>(), text = renderedSection(section, variables, sectionMissing);
     for (const key of sectionMissing) missing.add(key);
     if (sectionMissing.size === 0) {

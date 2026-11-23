@@ -1,6 +1,6 @@
 # 工作台使用指南
 
-本文对应 0.3.7-rc.2，面向 DSH 0.2.1 和 0.2.2。外部动态预填充和闲置标记候选在 0.3.7-rc.2 加入。
+本文对应当前源码。外部动态预填充和闲置标记候选在 0.3.7-rc.2 加入。
 
 预设模式的能力、适用场景和任务示例见[模式说明与如何使用](PRESET_MODE.md)。
 
@@ -35,7 +35,7 @@ dsh plugin --profile web add dsh-preset-enhance@next
 dsh plugin --profile web add dsh-preset-enhance@0.3.2-rc.2
 ```
 
-当前源码的兼容声明为 `>=0.2.1-0 <0.2.2 || >=0.2.2-0 <0.2.3`，覆盖 0.2.1 和 0.2.2 的 alpha、rc 和正式版；新增 0.2.2 的实际验证见[兼容记录](../compatibility/DSH_0.2.2_COMPATIBILITY.md)。旧宿主应使用对应的旧插件版本。历史适配及实际验证范围见[兼容记录](../compatibility/DSH_0.2.1_COMPATIBILITY.md)。
+当前源码覆盖 DSH 0.2.1、0.2.2，以及从 0.2.3-alpha.2 开始的 0.2.3 系列。npm 已发布版本的兼容范围以各自的包声明为准。实际验证范围见[兼容记录](../README.md#兼容与验证记录)。
 
 ## 连接协议与能力范围
 
