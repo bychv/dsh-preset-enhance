@@ -81,7 +81,7 @@ try {
     if (file === 'client.js') text = text.replace("import('./runtime.mjs')", "import('/preset-enhance-display/runtime.mjs')").replace(/export \{\};?\s*$/, '');
     await writeFile(join(root, 'packages', 'display-regex', file), text);
   }
-  for (const file of ['workbench-activity.js', 'request-events.js', 'display-availability.js', 'regex-editor.js', 'request-preview.js', 'disclosures.js', 'scroll-state.js', 'spreset-tools.js', 'dsh-template-editor.js']) {
+  for (const file of ['workbench-activity.js', 'request-events.js', 'display-availability.js', 'regex-editor.js', 'request-preview.js', 'disclosures.js', 'scroll-state.js', 'spreset-tools.js', 'dsh-template-editor.js', 'preset-picker.js']) {
     await emit(join(browser, 'src', 'client', file), join(root, 'web', file));
   }
   await writeFile(join(root, 'web', 'context-attachments.js'), (await readFile(join(browser, 'src', 'client', 'context-attachments.js'), 'utf8')).replace(/^export \{\};?\s*$/gm, ''));

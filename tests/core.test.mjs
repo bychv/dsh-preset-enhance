@@ -225,8 +225,9 @@ test('client hides conversation width handles locally while keeping sidebar resi
       inject(name, fn) { injected.push(name); return fn(); },
       register(options, component) { registered.push({ options, component }); return () => {}; },
     } });
-    assert.deepEqual(injected, ['conversation.view', 'main', 'sidebar.panellist']);
+    assert.deepEqual(injected, ['conversation.input.right', 'conversation.view', 'main', 'sidebar.panellist']);
     assert.deepEqual(registered.map(x => [x.options.name, x.options.id ?? x.options.key]), [
+      ['conversation.input.right', 'preset-enhance-picker'],
       ['conversation.view', 'preset-enhance-editor'], ['main', 'preset-enhance-editor'], ['sidebar.panellist', 'preset-enhance-editor'],
     ]);
 
@@ -598,6 +599,78 @@ test('selecting a preset rebinds only the current session and drops the previous
       assert.match(await send(), /^B:\d+:Alice$/);
     }
   } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('mode defaults and picker writes resolve the first request independently per session', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-mode-picker-'));
+  const file = join(dir, 'state.json');
+  const store = new PresetStore(file);
+  const listeners = {};
+  const calls = [];
+  const sessions = new Map([
+    ['standard', { id: 'standard', header: { agentPreset: 'standard' } }],
+    ['fresh', { id: 'fresh', header: { agentPreset: 'st-preset' } }],
+    ['custom', { id: 'custom', header: { agentPreset: 'plugin-mode' } }],
+  ]);
+  const disposers = [];
+  let api;
+  const ctx = {
+    sessions: { get: id => sessions.get(id) },
+    agentPresets: { list: async () => ['standard', 'st-preset', 'plugin-mode'].map(id => ({ id, name: id })) },
+    on: (name, fn) => { listeners[name] = fn; },
+    effect(setup) { const dispose = setup(); if (typeof dispose === 'function') disposers.push(dispose); },
+    webServer: { register(definition) {
+      if (definition.path === '/preset-enhance/api') api = definition.handler;
+      return () => {};
+    } },
+    llm: { stream: options => listeners['llm/stream'](options, async function* () { calls.push(options); }) },
+  };
+  try {
+    await store.transaction(state => {
+      state.selectedPresetId = 'A';
+      state.autoEnableModes.push('standard');
+      state.presets = ['A', 'B', 'C'].map(id => ({ id, name: id, preset: { prompts: [
+        { identifier: 'p', role: 'system', content: 'Opening ' + id },
+        { identifier: 'chatHistory', role: 'user', marker: true },
+      ] } }));
+    });
+    await apply(ctx, { dataFile: file, agentPresetRoot: join(dir, 'modes') });
+    const request = async (query = '', body, expected = 200) => {
+      const req = Readable.from(body ? [JSON.stringify({ revision: (await store.read()).revision, ...body })] : []);
+      Object.assign(req, { url: '/preset-enhance/api' + query, method: body ? 'POST' : 'GET',
+        headers: { 'content-type': 'application/json', host: 'localhost' } });
+      let status, result;
+      await api(req, { writeHead: code => { status = code; }, end: value => { result = JSON.parse(String(value)); } });
+      assert.equal(status, expected, result?.error);
+      return result;
+    };
+    const setDefault = (modeId, presetId) => request('', { action: 'save-mode-default', modeId, presetId });
+    const select = (sessionId, presetId, expected) => request('', { action: 'select-session-preset', sessionId, presetId }, expected);
+    const readPicker = sessionId => request('?picker&sessionId=' + sessionId);
+    const send = async sessionId => {
+      for await (const _ of ctx.llm.stream({ sessionId, provider: 'mock', model: 'mock', messages: [msg('u', 'user', 'hi')] })) {}
+      return calls.at(-1).messages[0].content[0].text;
+    };
+    await setDefault('standard', 'B');
+    await setDefault('plugin-mode', 'C');
+    assert.deepEqual((await new PresetStore(file).read()).modeDefaultPresets, { standard: 'B', 'plugin-mode': 'C' });
+    assert.equal((await readPicker('standard')).preview.entries[0].text, 'Opening B');
+    assert.equal((await readPicker('custom')).enabled, false);
+    assert.deepEqual((await store.read()).bindings, {}, 'read-only preview does not bind');
+    await select('missing', 'C', 400);
+    await select('standard', 'C');
+    assert.equal(await send('standard'), 'Opening C');
+    assert.equal(await send('fresh'), 'Opening A');
+    assert.equal(await send('custom'), 'hi');
+    assert.equal((await store.read()).selectedPresetId, 'A');
+    await select('standard', null);
+    assert.equal(await send('standard'), 'Opening B');
+    await request('', { action: 'delete-preset', id: 'B' });
+    assert.deepEqual((await store.read()).modeDefaultPresets, { 'plugin-mode': 'C' });
+  } finally {
+    await Promise.all(disposers.map(dispose => dispose()));
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('tool catalogs are resolved independently for every built-in and plugin-provided mode', async () => {

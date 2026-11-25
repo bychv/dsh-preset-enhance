@@ -1,0 +1,15 @@
+:root { color-scheme: light dark; font: 14px/1.5 system-ui, sans-serif; }
+body { margin: 0; padding: 12px; color: CanvasText; background: Canvas; }
+header, .actions { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
+header { justify-content: space-between; }
+header a { color: LinkText; font-size: .86em; }
+input, select, button { font: inherit; }
+input, select { width: 100%; box-sizing: border-box; margin: 0 0 .6rem; }
+input, button { padding: .35rem .55rem; }
+select { border: 1px solid GrayText; border-radius: .35rem; }
+option { padding: .2rem .35rem; }
+#status { min-height: 1.5em; }
+details { padding: .35rem 0; border-top: 1px solid color-mix(in srgb, CanvasText 16%, transparent); }
+summary { cursor: pointer; overflow-wrap: anywhere; }
+small { display: block; color: GrayText; }
+pre { margin: .45rem 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }

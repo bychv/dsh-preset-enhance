@@ -86,7 +86,7 @@ const assign = <T,>(object: Record<string, T>, key: string, value: T): void => {
 const isRecord = (value: unknown): value is Record<string, any> =>
   !!value && typeof value === 'object' && !Array.isArray(value);
 /** Actions that need the DSH mode registry; catalog-backed ones also enumerate mode tools. */
-const MODE_ACTIONS = new Set(['save-auto-modes', 'save-mode-tools', 'save-session-tools',
+const MODE_ACTIONS = new Set(['save-auto-modes', 'save-mode-default', 'save-mode-tools', 'save-session-tools',
   'save-tool-groups', 'save-tool-preset', 'select-tool-policy', 'import-package-tools']);
 const CATALOG_ACTIONS = new Set(['save-mode-tools', 'save-session-tools',
   'save-tool-groups', 'save-tool-preset', 'import-package-tools']);
@@ -157,6 +157,7 @@ function degradedPayload(reason: string): Record<string, unknown> {
     defaultPresetId: null,
     modeDefaultPresetId: null,
     modeDefaultName: null,
+    modeDefaultPresets: {},
     postToolPrefixMode: 'inherit',
     postToolPrefixText: '',
     deepseekBetaPrefix: false,
@@ -332,7 +333,7 @@ const chatConnection = () => {
     const state = await store.read() as PresetState;
     refreshPolicies(state);
     const binding = ownGet(state.bindings, session.id) ??
-      (shouldAutoEnable(state, session) ? defaultBinding(state) : undefined);
+      (shouldAutoEnable(state, session) ? defaultBinding(state, sessionModeId(session)) : undefined);
     const record = binding?.enabled ? state.presets.find(row => row.id === binding.presetId) : undefined;
     return record ? { id: record.id, preset: record.preset, characterId: binding?.characterId } : undefined;
   }, (agent, tool) => effectiveToolEnabled(policySnapshot, agent.session?.id, sessionModeId(agent.session), tool));
@@ -374,7 +375,7 @@ const chatConnection = () => {
     refreshPolicies(initial);
     const explicit = ownGet(initial.bindings, sessionId);
     const wantsPreset = explicit?.enabled ||
-      (!explicit && shouldAutoEnable(initial, session) && defaultRecord(initial));
+      (!explicit && shouldAutoEnable(initial, session) && defaultRecord(initial, modeId));
     const catalogChanged = observed.length > 0 && !sameCatalog(initial.toolCatalogs[modeId] ?? [],
       editableToolCatalog([initial.toolCatalogs, { [modeId]: observed }])[modeId]);
     let compiled: CompiledPreset | null = null;
@@ -382,7 +383,7 @@ const chatConnection = () => {
     let requestRecord: PresetRecord | undefined;
     // Resolver I/O must not hold the shared store's write queue.
     const effectiveBinding = (state: PresetState) => ownGet(state.bindings, sessionId) ??
-      (shouldAutoEnable(state, session) && defaultRecord(state) ? { enabled: true, presetId: defaultRecord(state)!.id, characterId: null, values: {}, markers: {} } : undefined);
+      (shouldAutoEnable(state, session) ? defaultBinding(state, sessionModeId(session)) : undefined);
     const dependencyKey = (state: PresetState) => {
       const binding = effectiveBinding(state);
       return digest({ binding, mode: sessionModeId(session), record: state.presets.find(p => p.id === binding?.presetId), global: state.global,
@@ -433,7 +434,7 @@ const chatConnection = () => {
         if (observed.length > 0 && syncToolCatalog(current, modeId, observed)) changed = true;
         let binding = ownGet(current.bindings, sessionId);
         if (!binding && shouldAutoEnable(current, session)) {
-          const record = defaultRecord(current);
+          const record = defaultRecord(current, sessionModeId(session));
           if (record) {
             binding = { enabled: true, presetId: record.id, characterId: null, values: {}, markers: {} };
             assign(current.bindings, sessionId, binding);
@@ -601,10 +602,13 @@ const chatConnection = () => {
   });
 
   const displayAvailability = installDisplayConfig(ctx, store, () => !startupError && !lifecycle.closing,
-    (state, sessionId) => ownGet(state.bindings, sessionId) ?? defaultBinding(state));
+    (state, sessionId) => ownGet(state.bindings, sessionId) ?? defaultBinding(state, sessionModeId(ctx.sessions.get(sessionId))));
 
   const assets = new Map<string, [string, string]>([
     [BASE, ['web/index.html', 'text/html']],
+    [`${BASE}/picker`, ['web/preset-picker.html', 'text/html']],
+    [`${BASE}/preset-picker.js`, ['web/preset-picker.js', 'text/javascript']],
+    [`${BASE}/preset-picker.css`, ['web/preset-picker.css', 'text/css']],
     [`${BASE}/regex-editor.js`, ['web/regex-editor.js', 'text/javascript']],
     [`${BASE}/regex-worker.js`, ['web/regex-worker.js', 'text/javascript']],
     [`${BASE}/workbench-activity.js`, ['web/workbench-activity.js', 'text/javascript']],
@@ -633,7 +637,7 @@ const chatConnection = () => {
     if (startupError || lifecycle.closing) throw new Error('预设服务不可用');
     return await store.read() as PresetState;
   }, (state, sessionId) => ownGet(state.bindings, sessionId) ??
-    (shouldAutoEnable(state, ctx.sessions.get(sessionId)) ? defaultBinding(state) : undefined), () => templateRegistry.service.list());
+    (shouldAutoEnable(state, ctx.sessions.get(sessionId)) ? defaultBinding(state, sessionModeId(ctx.sessions.get(sessionId))) : undefined), () => templateRegistry.service.list());
   ctx.effect(() => () => reader.close(), 'preset-enhance: read API cleanup');
   ctx.provide?.('presetReader', reader.service);
   ctx.effect(() => ctx.webServer.register({ kind: 'prefix', path: PRESET_READ_BASE, handler: reader.handler }), 'preset-enhance: read API');
@@ -721,13 +725,32 @@ const chatConnection = () => {
           const lastBinding = ownGet(state.bindings, sessionId);
           const lastCompilation = lastBinding?.enabled ? compilations.latest(sessionId, lastBinding.presetId) : undefined;
           const session = sessionId ? ctx.sessions.get(sessionId) : undefined;
+          const inputMode = url.searchParams.get('modeId') ?? '';
+          const liveMode = sessionModeId(session) || inputMode || ctx.agentPresets?.defaultId || '';
+          if (url.searchParams.has('picker')) {
+            const mode = inputMode || liveMode;
+            const defaultPreset = defaultRecord(state, mode);
+            const binding = session ? lastBinding : undefined;
+            const presetId = binding?.presetId || defaultPreset?.id || null;
+            const picked = state.presets.find(record => record.id === (url.searchParams.get('presetId') ?? presetId));
+            const automatic = session && mode === sessionModeId(session)
+              ? shouldAutoEnable(state, session) : state.autoEnableModes.includes(mode);
+            const modes = await agentModeRows(ctx);
+            return respond(res, 200, {
+              revision: state.revision, sessionReady: !!session, mode: modes.find(row => row.id === mode)?.name ?? mode,
+              presets: state.presets.map(({ id, name }) => ({ id, name })),
+              presetId,
+              explicit: !!binding, enabled: binding?.enabled ?? Boolean(defaultPreset && automatic),
+              preview: picked ? presetPickerPreview(picked, binding?.presetId === picked.id ? binding : undefined,
+                templateBindings(picked.preset, templateRegistry.service.list())) : null,
+            });
+          }
           const connectionInfo = sessionConnection(ctx, sessionId);
           const fallback = !ownGet(state.bindings, sessionId) && shouldAutoEnable(state, session) ?
-            defaultBinding(state) : undefined;
-          const modeDefault = defaultRecord(state);
+            defaultBinding(state, liveMode) : undefined;
+          const modeDefault = defaultRecord(state, liveMode);
           const modes = await agentModeRows(ctx);
           const discovered = await discoverModeToolCatalogs(ctx, modes);
-          const liveMode = sessionModeId(session) || (!session ? url.searchParams.get('modeId') : '') || ctx.agentPresets?.defaultId || '';
           const catalogs = requestToolCatalogs(ctx, state, discovered.catalogs, sessionId);
           let dshSystemTemplate;
           try { dshSystemTemplate = await readDshSystemTemplate(ctx, sessionId, liveMode); }
@@ -738,7 +761,7 @@ const chatConnection = () => {
             startupError,
             presets: state.presets,
             binding: ownGet(state.bindings, sessionId) ?? fallback ?? { enabled: false },
-            selectedPresetId: state.selectedPresetId ?? modeDefault?.id ?? null,
+            selectedPresetId: state.selectedPresetId ?? defaultRecord(state)?.id ?? null,
             postToolPrefixMode: state.postToolPrefixMode,
             postToolPrefixText: state.postToolPrefixText,
             deepseekBetaPrefix: state.deepseekBetaPrefix === true,
@@ -749,6 +772,7 @@ const chatConnection = () => {
             outputExtractionTemplate: OUTPUT_EXTRACTION_PROMPT_TEMPLATE,
             modeDefaultPresetId: modeDefault?.id ?? null,
             modeDefaultName: modeDefault?.name ?? null,
+            modeDefaultPresets: state.modeDefaultPresets,
             presetMode: liveMode === AGENT_PRESET_ID,
             sessionMode: liveMode,
             agentModes: modes,
@@ -1191,6 +1215,9 @@ const chatConnection = () => {
               state.presets[index] ?? state.presets[index - 1] ?? state.presets[0];
             if (state.selectedPresetId === removed.id) state.selectedPresetId = fallback?.id ?? null;
             if (state.defaultPresetId === removed.id) state.defaultPresetId = fallback?.id ?? null;
+            for (const [modeId, presetId] of Object.entries(state.modeDefaultPresets)) {
+              if (presetId === removed.id) delete state.modeDefaultPresets[modeId];
+            }
             for (const [sessionId, binding] of Object.entries(state.bindings)) {
               if (binding?.presetId !== removed.id) continue;
               assign(state.bindings, sessionId, {
@@ -1288,6 +1315,34 @@ const chatConnection = () => {
             state.revision++;
             return { revision: state.revision, modes: selected };
           }
+          if (body.action === 'save-mode-default') {
+            if (typeof body.modeId !== 'string' || !knownModes.has(body.modeId)) throw new Error('请选择有效的 DSH 模式');
+            if (body.presetId === null) delete state.modeDefaultPresets[body.modeId];
+            else {
+              const preset = state.presets.find(record => record.id === body.presetId);
+              if (!preset) throw new Error('请选择有效的预设');
+              assign(state.modeDefaultPresets, body.modeId, preset.id);
+            }
+            state.revision++;
+            return { revision: state.revision, modeDefaultPresets: state.modeDefaultPresets };
+          }
+          if (body.action === 'select-session-preset') {
+            const sessionId = typeof body.sessionId === 'string' ? body.sessionId : '';
+            const session = sessionId && ctx.sessions.get(sessionId);
+            if (!session) throw new Error('当前会话尚未就绪，请重试');
+            const binding = ownGet(state.bindings, sessionId);
+            if (body.presetId === null) {
+              delete state.bindings[sessionId];
+              if (binding?.presetId !== defaultRecord(state, sessionModeId(session))?.id) delete state.sessions[sessionId];
+            } else {
+              validateBinding(state, { sessionId, binding: {
+                ...binding, presetId: body.presetId, enabled: true,
+                characterId: binding?.presetId === body.presetId ? binding?.characterId : null,
+              } });
+            }
+            state.revision++;
+            return { revision: state.revision };
+          }
           if (body.action === 'bind') {
             validateBinding(state, body);
             state.revision++;
@@ -1357,15 +1412,16 @@ function presetCommand(store: PresetStore) {
       const sessionKey = session.id ?? '';
       const before = (await store.read()) as PresetState;
       const explicit = ownGet(before.bindings, sessionKey);
-      const enabled = explicit?.enabled ?? (shouldAutoEnable(before, session) && !!defaultRecord(before));
+      const mode = sessionModeId(session);
+      const enabled = explicit?.enabled ?? (shouldAutoEnable(before, session) && !!defaultRecord(before, mode));
       if (input === 'status') {
-        const record = explicit?.presetId ? before.presets.find(p => p.id === explicit.presetId) : defaultRecord(before);
+        const record = explicit?.presetId ? before.presets.find(p => p.id === explicit.presetId) : defaultRecord(before, mode);
         return { kind: 'success', text: `预设注入：${enabled ? '已开启' : '已关闭'}${record ? `（${record.name}）` : ''}` };
       }
       const target = input === 'on' ? true : input === 'off' ? false : !enabled;
       return await store.transaction((state: PresetState) => {
         const current = ownGet(state.bindings, sessionKey);
-        const record = current?.presetId ? state.presets.find(p => p.id === current.presetId) : defaultRecord(state);
+        const record = current?.presetId ? state.presets.find(p => p.id === current.presetId) : defaultRecord(state, mode);
         if (target && !record) return { kind: 'error', text: '尚未保存模式默认预设，请先在预设工作台中设置。' };
         assign(state.bindings, sessionKey, {
           enabled: target,
@@ -1400,7 +1456,7 @@ function presetProtocolMismatch(
   if (connectionProtocolFor(state, connection) === 'messages') return null;
   const binding = ownGet(state.bindings, sessionId);
   const enabled = binding?.enabled ??
-    (session ? shouldAutoEnable(state, session) && !!defaultRecord(state) : false);
+    (session ? shouldAutoEnable(state, session) && !!defaultRecord(state, sessionModeId(session)) : false);
   if (!enabled) return null;
   const observed = observer.last(sessionId);
   if (!observed) return null;
@@ -1617,12 +1673,14 @@ async function resolveChatApiKey(ctx: PluginContext, ref: string): Promise<strin
   return key;
 }
 
-function defaultRecord(state: PresetState): PresetRecord | undefined {
-  return state.presets.find(p => p.id === state.selectedPresetId) ??
+function defaultRecord(state: PresetState, modeId?: string): PresetRecord | undefined {
+  const modeDefault = ownGet(state.modeDefaultPresets, modeId);
+  return state.presets.find(p => p.id === modeDefault) ??
+    state.presets.find(p => p.id === state.selectedPresetId) ??
     state.presets.find(p => p.id === state.defaultPresetId) ?? state.presets[0];
 }
-function defaultBinding(state: PresetState): PresetBinding | undefined {
-  const record = defaultRecord(state);
+function defaultBinding(state: PresetState, modeId?: string): PresetBinding | undefined {
+  const record = defaultRecord(state, modeId);
   return record ? {
     enabled: true,
     presetId: record.id,
@@ -1631,6 +1689,24 @@ function defaultBinding(state: PresetState): PresetBinding | undefined {
     markers: {},
     inherited: true,
   } : undefined;
+}
+function presetPickerPreview(record: PresetRecord, binding: PresetBinding | undefined, templates: ReturnType<typeof templateBindings>) {
+  const { preset } = record;
+  const prompts = new Map(preset.prompts.map(prompt => [prompt.identifier, prompt]));
+  return {
+    id: record.id,
+    prefix: Boolean(preset.assistant_prefill?.trim() || lastContentRole(preset, binding?.characterId, binding?.markers) === 'assistant'),
+    prefixText: preset.assistant_prefill || '',
+    entries: getOrder(preset, binding?.characterId).flatMap(({ identifier, enabled }) => {
+      const prompt = prompts.get(identifier);
+      if (!prompt) return [];
+      return [{ name: prompt.name || identifier, role: prompt.role || 'system', enabled,
+        marker: prompt.marker || identifier === 'chatHistory' || identifier === DYNAMIC_PREFILL_ID,
+        dynamic: identifier === DYNAMIC_PREFILL_ID || templates[identifier]?.mode === 'linked-dynamic',
+        depth: prompt.injection_position === 1 ? prompt.injection_depth ?? 0 : null,
+        text: identifier === 'chatHistory' ? '' : binding?.markers?.[identifier] ?? prompt.content ?? '' }];
+    }),
+  };
 }
 function sessionModeId(session: SessionLike | undefined): string {
   if (!session) return '';

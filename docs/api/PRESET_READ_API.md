@@ -12,7 +12,7 @@
 
 - list：返回当前 DSH 配置中的预设摘要，含 id、name、promptCount；分页 limit 为 1–100。
 - get：传入 id，读取该预设保存的完整 JSON；不会编译宏、调用模板解析器或生成正文。
-- current：读取工具调用所属会话的 enabled、presetId、全局 selectedPresetId。没有显式会话绑定时沿用插件的新会话默认规则。
+- current：读取工具调用所属会话的 enabled、presetId、全局 selectedPresetId。没有显式会话绑定时，按当前模式的默认预设与自动启用规则解析。
 
 工具调用复用下述 HTTP API 的读取逻辑，在宿主进程内执行，不需要把认证凭证交给模型。工具正常参与 DSH 工具列表和本插件工具开关。返回是 JSON 字符串，包含 apiVersion 和状态 revision。返回文本作为数据使用，不是指令。
 

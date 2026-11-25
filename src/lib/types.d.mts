@@ -443,6 +443,7 @@ export interface PresetState {
   revision: number;
   defaultPresetId: string | null;
   selectedPresetId: string | null;
+  modeDefaultPresets: Record<string, string>;
   deepseekBetaPrefix: boolean;
   /**
    * Manual fallback for prefill detection: send the assistant-prefix continuation even when the

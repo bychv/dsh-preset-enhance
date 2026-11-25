@@ -10,6 +10,7 @@ const initialState = (): PresetState => ({
   revision: 0,
   defaultPresetId: null,
   selectedPresetId: null,
+  modeDefaultPresets: {},
   deepseekBetaPrefix: false,
   forcePrefill: false,
   prefixToolCalls: false,
@@ -45,6 +46,9 @@ function recordOf<T>(value: unknown): Record<string, T> {
 function normalize(state: PresetState): PresetState {
   state.presets = Array.isArray(state.presets) ? state.presets : [];
   state.defaultPresetId ??= null;
+  const presetIds = new Set(state.presets.map(preset => preset?.id));
+  state.modeDefaultPresets = Object.fromEntries(Object.entries(recordOf<string>(state.modeDefaultPresets))
+    .filter(([modeId, presetId]) => modeId && typeof presetId === 'string' && presetIds.has(presetId)));
   state.deepseekBetaPrefix = state.deepseekBetaPrefix === true;
   state.forcePrefill = state.forcePrefill === true;
   state.prefixToolCalls = state.prefixToolCalls === true;

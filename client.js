@@ -44,6 +44,8 @@ window.__ModuleLoader__.load({
             }, []);
         }
         let hostSlots;
+        let composerBlocks;
+        const pickerKind = 'preset-enhance-picker';
         const keptFrames = new Map();
         const MAX_PARKED_FRAMES = 4;
         const workbenchSrc = (sessionId, modeId = '') => '/preset-enhance?sessionId=' + encodeURIComponent(sessionId) +
@@ -210,9 +212,89 @@ window.__ModuleLoader__.load({
             width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8,
             strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true,
         }, React.createElement('path', { d: 'M5 4h14v16H5z' }), React.createElement('path', { d: 'M8 8h8M8 12h5M8 16h8' }), React.createElement('path', { d: 'M16 11v4M14 13h4' }));
+        function PickerFrame({ sessionId = '' }) {
+            const frame = React.useRef(null);
+            const modeId = useInputMode(sessionId);
+            const mode = React.useRef(modeId);
+            mode.current = modeId;
+            const notifyMode = () => frame.current?.contentWindow?.postMessage({ type: 'preset-enhance:input-mode', modeId: mode.current }, window.location.origin);
+            React.useEffect(() => { notifyMode(); }, [sessionId, modeId]);
+            React.useEffect(() => {
+                if (!sessionId)
+                    return;
+                let saving = false;
+                const receive = async (event) => {
+                    const target = frame.current?.contentWindow;
+                    const data = event.data;
+                    if (event.origin !== window.location.origin || !target || event.source !== target ||
+                        data?.type !== 'preset-enhance:picker-save' || saving || !Number.isSafeInteger(data.revision) ||
+                        (data.presetId !== null && typeof data.presetId !== 'string'))
+                        return;
+                    saving = true;
+                    const blocks = composerBlocks;
+                    const block = { reason: '正在应用预设…' };
+                    let error = '';
+                    try {
+                        if (blocks && !blocks.storeFor(sessionId).getSnapshot())
+                            blocks.set(sessionId, block);
+                        const res = await fetch('/preset-enhance/api', {
+                            method: 'POST', headers: { 'content-type': 'application/json' },
+                            body: JSON.stringify({ action: 'select-session-preset', sessionId, presetId: data.presetId, revision: data.revision }),
+                        });
+                        const result = await res.json();
+                        if (!res.ok)
+                            throw Error(result.error || '预设应用失败');
+                        for (const record of keptFrames.get('session:' + sessionId) ?? []) {
+                            record.element.contentWindow?.postMessage({ type: 'preset-enhance:binding-changed' }, window.location.origin);
+                        }
+                        for (const record of keptFrames.get('main:' + sessionId) ?? []) {
+                            record.element.contentWindow?.postMessage({ type: 'preset-enhance:binding-changed' }, window.location.origin);
+                        }
+                    }
+                    catch (cause) {
+                        error = cause instanceof Error ? cause.message : String(cause);
+                    }
+                    finally {
+                        if (blocks?.storeFor(sessionId).getSnapshot() === block)
+                            blocks.set(sessionId);
+                        saving = false;
+                        target.postMessage({ type: 'preset-enhance:picker-result', error }, window.location.origin);
+                    }
+                };
+                window.addEventListener('message', receive);
+                return () => window.removeEventListener('message', receive);
+            }, [sessionId]);
+            return React.createElement('iframe', {
+                key: sessionId, ref: frame, title: '预设选择', onLoad: notifyMode,
+                src: '/preset-enhance/picker?sessionId=' + encodeURIComponent(sessionId),
+                style: { display: 'block', width: '100%', height: '100%', border: 0 },
+            });
+        }
+        const RightPicker = (props) => React.createElement(PickerFrame, { sessionId: props.sessionId ?? props.injected?.sessionId });
+        const ComposerPicker = (props) => {
+            const [open, setOpen] = React.useState(false);
+            const sessionId = props.sessionId ?? props.injected?.sessionId;
+            return React.createElement('div', null, React.createElement('button', { type: 'button', onClick: () => setOpen(!open), 'aria-expanded': open }, '预设'), open ? React.createElement('aside', {
+                'aria-label': '预设选择',
+                style: { position: 'fixed', right: 0, top: 0, bottom: 0, width: 'min(360px, 100vw)', zIndex: 10, background: 'Canvas' },
+            }, React.createElement('button', { type: 'button', onClick: () => setOpen(false) }, '关闭'), React.createElement(PickerFrame, { sessionId })) : null);
+        };
         return { inject: ['slots', 'conversation'], apply(ctx) {
                 hostSlots = ctx.slots;
+                composerBlocks = ctx.conversation?.blocks;
                 ctx.effect?.(() => clearFrames);
+                ctx.inject?.(['slots', 'sidebarRightTabs'], scoped => {
+                    scoped.effect?.(() => scoped.sidebarRightTabs.register({
+                        id: pickerKind, kind: pickerKind, title: () => '预设',
+                        guide: [{ id: pickerKind, title: () => '预设', order: 30, icon: PresetIcon }],
+                    }));
+                    scoped.slots.inject('sidebar.right.pane.tab', () => scoped.slots.register({
+                        name: 'sidebar.right.pane.tab', key: pickerKind,
+                    }, RightPicker));
+                });
+                ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
+                    name: 'conversation.input.right', id: pickerKind, order: 30,
+                }, ComposerPicker));
                 // Every registration is fiber-scoped: slots.inject()/register() run through
                 // the caller's ctx.effect (ui-renderer/src/client/registry.ts), and the loader
                 // disposes the entry fiber on disable/removal and re-materializes the factory

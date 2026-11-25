@@ -38,6 +38,7 @@ let prefillSettingsVersion = 0;
 let autoModesDirty = false;
 let autoModesVersion = 0;
 let bindingDirty = false;
+const modeDefaultDrafts = new Map();
 let bindingVersion = 0;
 // 顶部会话连接选择器直接改宿主的 provider/model：选中即切换，不参与任何自动保存。
 let connectionSwitchSaving = false;
@@ -221,7 +222,7 @@ async function reload(id) {
   renderAutoModes();
   syncDraftsWithState();
   renderToolModes(previousToolMode);
-  loadDraft(id ?? (binding.presetId || state.selectedPresetId) ?? '');
+  loadDraft(id ?? (binding.presetId || ((sessionId || inputModeId) && state.modeDefaultPresetId) || state.selectedPresetId) ?? '');
   updateSessionNote();
   status('已加载');
 }
@@ -459,6 +460,22 @@ function renderAutoModes() {
     label.append(input, text);
     $('auto-mode-list').append(label);
   }
+  const modeSelect = $('mode-default-mode');
+  if (!modeSelect) return;
+  const previous = modeSelect.value || state.sessionMode;
+  const modes = state.agentModes ?? [];
+  modeSelect.replaceChildren(...modes.map(mode => new Option(mode.name, mode.id)));
+  if (modes.some(mode => mode.id === previous)) modeSelect.value = previous;
+  renderModeDefault();
+}
+function renderModeDefault() {
+  const mode = $('mode-default-mode').value;
+  const presets = $('mode-default-preset');
+  presets.replaceChildren(new Option('跟随全局', ''),
+    ...state.presets.map(record => new Option(record.name, record.id)));
+  const saved = Object.hasOwn(state.modeDefaultPresets ?? {}, mode) ? state.modeDefaultPresets[mode] : '';
+  presets.value = modeDefaultDrafts.get(mode) ?? saved;
+  $('save-mode-default').disabled = !mode;
 }
 /* ---------- 工具预设、分组标签与草稿模型 ---------- */
 const TOOL_TABS_COLLAPSED_KEY = 'dsh-preset-enhance.tool-tabs-collapsed';
@@ -689,8 +706,9 @@ async function persistPresetDraft({ force = false } = {}) {
   if (result.binding) state.binding = structuredClone(result.binding);
   state.selectedPresetId = savedId;
   state.defaultPresetId = savedId;
-  state.modeDefaultPresetId = savedId;
-  state.modeDefaultName = savedRecord.name;
+  state.modeDefaultPresetId = Object.hasOwn(state.modeDefaultPresets ?? {}, state.sessionMode)
+    ? state.modeDefaultPresets[state.sessionMode] : savedId;
+  state.modeDefaultName = state.presets.find(record => record.id === state.modeDefaultPresetId)?.name ?? null;
 
   const sameDraft = presetDraftGeneration === generation && selectedId === recordId;
   if (sameDraft) {
@@ -821,6 +839,21 @@ async function persistAutoModesDraft() {
   else scheduleGlobalConfigAutoSave();
   return true;
 }
+async function persistModeDefaultDrafts() {
+  if (!modeDefaultDrafts.size) return false;
+  for (const [modeId, presetId] of [...modeDefaultDrafts]) {
+    const result = await configWrite({ action: 'save-mode-default', modeId, presetId: presetId || null });
+    acceptRevision(result);
+    state.modeDefaultPresets = result.modeDefaultPresets;
+    if (modeDefaultDrafts.get(modeId) === presetId) modeDefaultDrafts.delete(modeId);
+  }
+  const activeMode = state.sessionMode;
+  const selected = Object.hasOwn(state.modeDefaultPresets, activeMode) ? state.modeDefaultPresets[activeMode] : state.selectedPresetId;
+  state.modeDefaultPresetId = selected;
+  state.modeDefaultName = state.presets.find(record => record.id === selected)?.name ?? null;
+  updateSessionNote();
+  return true;
+}
 async function persistGroupDraft() {
   if (!groupsDirty) return false;
   const version = groupDraftVersion;
@@ -859,6 +892,7 @@ function runGlobalConfigAutoSave() {
     const saved = [
       await persistPrefillSettingsDraft(),
       await persistAutoModesDraft(),
+      await persistModeDefaultDrafts(),
       await persistGroupDraft(),
       await persistBindingDraft(),
     ].some(Boolean);
@@ -2468,6 +2502,16 @@ $('save-auto-modes').onclick = guard(async () => {
   await reload(selectedId);
   status('自动启用模式列表已保存，仅影响之后新建的会话');
 });
+if ($('mode-default-mode')) {
+  $('mode-default-mode').onchange = renderModeDefault;
+  $('mode-default-preset').onchange = () => {
+    modeDefaultDrafts.set($('mode-default-mode').value, $('mode-default-preset').value);
+    scheduleGlobalConfigAutoSave();
+  };
+  $('save-mode-default').onclick = guard(async () => {
+    if (await persistModeDefaultDrafts()) status('模式默认预设已保存');
+  });
+}
 $('refresh-tools').onclick = guard(async () => {
   if (!(await presetDraftReady())) return;
   await reload(selectedId);
@@ -2646,7 +2690,7 @@ $('preset-auto-save').onchange = () => {
     status('已开启全局自动保存');
     if (dirty) schedulePresetAutoSave();
     if (toolDraft.dirty) scheduleAutoSave();
-    if (groupsDirty || prefillSettingsDirty || autoModesDirty || bindingDirty) scheduleGlobalConfigAutoSave();
+    if (groupsDirty || prefillSettingsDirty || autoModesDirty || bindingDirty || modeDefaultDrafts.size) scheduleGlobalConfigAutoSave();
   } else {
     cancelPresetAutoSave();
     cancelGlobalConfigAutoSave();
@@ -3418,6 +3462,8 @@ async function refreshConnectionState() {
     const modeChanged = state.sessionMode !== latest.sessionMode;
     state.sessionMode = latest.sessionMode;
     state.presetMode = latest.presetMode;
+    state.modeDefaultPresetId = latest.modeDefaultPresetId;
+    state.modeDefaultName = latest.modeDefaultName;
     state.dshSystemTemplate = latest.dshSystemTemplate;
     state.connectionChoice = latest.connectionChoice;
     state.protocol = latest.protocol;
@@ -3429,8 +3475,14 @@ async function refreshConnectionState() {
   } catch { /* keep the last confirmed state while disconnected */ }
 }
 window.addEventListener('message', event => {
-  if (event.source !== window.parent || event.origin !== location.origin ||
-      event.data?.type !== 'preset-enhance:input-mode' || typeof event.data.modeId !== 'string') return;
+  if (event.source !== window.parent || event.origin !== location.origin) return;
+  if (event.data?.type === 'preset-enhance:binding-changed') {
+    if (state && !dirty && !bindingDirty && !groupsDirty && !prefillSettingsDirty && !autoModesDirty && !modeDefaultDrafts.size) {
+      void guard(() => reload())();
+    }
+    return;
+  }
+  if (event.data?.type !== 'preset-enhance:input-mode' || typeof event.data.modeId !== 'string') return;
   if (!sessionId && inputModeId === event.data.modeId) return;
   inputModeId = event.data.modeId;
   if (state) void refreshConnectionState().catch(error => status(error.message, true));
