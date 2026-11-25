@@ -232,9 +232,17 @@ test('client hides conversation width handles locally while keeping sidebar resi
     let mountedSession = 'conversation-session';
     const opened = [];
     const tabs = [];
+    const requestConfigForm = {};
     plugin.apply({
       slots,
       inject(names, callback) {
+        if (names.includes('configForms')) {
+          callback({ slots, configForms: { get(id) {
+            assert.equal(id, 'preset-enhance');
+            return requestConfigForm;
+          } } });
+          return;
+        }
         assert.deepEqual(names, ['slots', 'sidebarRightTabs', 'sidebarRight']);
         callback({
           slots,
@@ -247,12 +255,14 @@ test('client hides conversation width handles locally while keeping sidebar resi
         });
       },
     });
-    assert.deepEqual(injected, ['sidebar.right.pane.tab', 'conversation.input.right', 'conversation.view', 'main', 'sidebar.panellist']);
+    assert.deepEqual(injected, ['plugins.bundle.config', 'sidebar.right.pane.tab', 'conversation.input.right', 'conversation.view', 'main', 'sidebar.panellist']);
     assert.deepEqual(registered.map(x => [x.options.name, x.options.id ?? x.options.key]), [
+      ['plugins.bundle.config', 'dsh-preset-enhance'],
       ['sidebar.right.pane.tab', 'preset-enhance-picker'],
       ['conversation.input.right', 'preset-enhance-picker'],
       ['conversation.view', 'preset-enhance-editor'], ['main', 'preset-enhance-editor'], ['sidebar.panellist', 'preset-enhance-editor'],
     ]);
+    assert.equal(registered[0].component().props.form, requestConfigForm);
     const inputEntry = registered.find(entry => entry.options.name === 'conversation.input.right');
     const composer = inputEntry.component({ sessionId: 'conversation-session' });
     const button = composer.type(composer.props);

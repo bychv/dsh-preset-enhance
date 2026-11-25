@@ -323,10 +323,53 @@ window.__ModuleLoader__.load({
                     sidebar.openTab(pickerKind, { destination: 'sidebar' }); },
             }, '预设');
         }
+        function RequestUserAgentSettings({ form }) {
+            const read = () => form.getSnapshot();
+            const state = React.useSyncExternalStore(listener => form.subscribe(listener), read, read);
+            const [draft, setDraft] = React.useState(null);
+            const [saving, setSaving] = React.useState(false);
+            const [notice, setNotice] = React.useState('');
+            const saved = state.value?.requestUserAgent ?? '';
+            const value = draft ?? saved;
+            const disabled = state.status !== 'ready' || !state.writable || saving;
+            const h = React.createElement;
+            async function save(event) {
+                event.preventDefault();
+                if (disabled || value === saved)
+                    return;
+                setSaving(true);
+                setNotice('');
+                try {
+                    if (await form.set('requestUserAgent', value)) {
+                        setDraft(null);
+                        setNotice('已保存');
+                    }
+                    else
+                        setNotice('保存失败，请重试');
+                }
+                catch {
+                    setNotice('保存失败，请重试');
+                }
+                finally {
+                    setSaving(false);
+                }
+            }
+            return h('form', { onSubmit: save, style: { display: 'grid', gap: 8, paddingBlock: 12 } }, h('label', { htmlFor: 'preset-enhance-request-user-agent' }, '模型请求 User-Agent'), h(Input, {
+                id: 'preset-enhance-request-user-agent', value, disabled,
+                placeholder: '留空使用适配器默认值', pattern: '[\\x20-\\x7e]*',
+                onChange: (event) => { setDraft(event.currentTarget.value); setNotice(''); },
+            }), h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } }, h(Button, { type: 'submit', variant: 'primary', size: 'sm', disabled: disabled || value === saved }, '保存'), h('span', { role: 'status' }, state.status === 'unavailable' ? '宿主未提供此设置' : notice)));
+        }
         return { inject: ['slots', 'conversation'], apply(ctx) {
                 hostSlots = ctx.slots;
                 composerBlocks = ctx.conversation?.blocks;
                 ctx.effect?.(() => clearFrames);
+                ctx.inject?.(['slots', 'configForms'], scoped => {
+                    const form = scoped.configForms.get('preset-enhance');
+                    scoped.slots.inject('plugins.bundle.config', () => scoped.slots.register({
+                        name: 'plugins.bundle.config', key: 'dsh-preset-enhance',
+                    }, () => React.createElement(RequestUserAgentSettings, { form })));
+                });
                 ctx.inject?.(['slots', 'sidebarRightTabs', 'sidebarRight'], scoped => {
                     const sidebar = scoped.sidebarRight;
                     scoped.effect?.(() => {
