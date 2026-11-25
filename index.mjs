@@ -24,8 +24,8 @@ import { materializePresetContext } from './lib/preset-context.mjs';
 import { PRESET_CONTEXT_BLOCK } from './lib/context-files.mjs';
 import { decodePresetDocument, encodePresetPackage, attachPrefillSettings, applyPackagePrefill, ensurePackageExtractionTemplate } from './lib/preset-package.mjs';
 import { deleteLibraryEntry, presetLocks, restoreDefaultTemplates, saveLibraryEntry, setPresetLock, summarizeSPreset, syncSPresetMirror, } from './lib/s-preset-library.mjs';
-import { installDeepSeekBetaBridge, rewriteDeepSeekPrefixFetch } from './lib/deepseek-beta.mjs';
-import { withRequestUserAgent } from './lib/request-user-agent.mjs';
+import { installDeepSeekBetaBridge, rewriteDeepSeekPrefixFetch, withDeepSeekSafetyCheck } from './lib/deepseek-beta.mjs';
+import { withRequestOptions } from './lib/request-options.mjs';
 import { createProtocolObserver } from './lib/protocol.mjs';
 import { connectionSelection, selectConnection, sessionConnection, writeConnectionProtocol } from './lib/connection.mjs';
 import { installToolRestrictions } from './lib/tool-restrictions.mjs';
@@ -132,6 +132,7 @@ function degradedPayload(reason) {
         modeDefaultPresets: {},
         postToolPrefixMode: 'inherit',
         postToolPrefixText: '',
+        deepseekSafetyCheck: false,
         deepseekBetaPrefix: false,
         prefixToolCalls: false,
         prefixOutputExtraction: false,
@@ -273,9 +274,12 @@ export async function apply(ctx, config = {}) {
         }
     }
     let policySnapshot = toolPolicySnapshot();
+    let deepseekSafetyCheck = false;
     if (!startupError) {
         try {
-            policySnapshot = toolPolicySnapshot(await store.read());
+            const state = await store.read();
+            policySnapshot = toolPolicySnapshot(state);
+            deepseekSafetyCheck = state.deepseekSafetyCheck;
             // A locked file can still be read and used. A later actual commit can compact it.
             await store.maintain().catch(error => console.warn('preset-enhance: state maintenance failed', error));
         }
@@ -293,7 +297,10 @@ export async function apply(ctx, config = {}) {
         clearPresetEnhanceUnavailableReason();
     }
     const refreshPolicies = (state) => { policySnapshot = toolPolicySnapshot(state); };
-    ctx.effect(() => store.subscribe(refreshPolicies), 'preset-enhance: committed tool policies');
+    ctx.effect(() => store.subscribe(state => {
+        refreshPolicies(state);
+        deepseekSafetyCheck = state.deepseekSafetyCheck;
+    }), 'preset-enhance: committed request settings');
     const templateRegistry = createTemplateRegistry(error => console.warn('preset-enhance: template catalog listener failed', error));
     ctx.effect(() => () => templateRegistry.close(), 'preset-enhance: template registry');
     const templateServiceAvailable = !startupError && typeof ctx.provide === 'function';
@@ -332,7 +339,7 @@ export async function apply(ctx, config = {}) {
         ctx.effect(() => register(presetCommand(store)), 'preset-enhance: /preset');
     }
     async function* injectStream(options, next, onDispatch) {
-        const dispatch = (source) => withRequestUserAgent(config.requestUserAgent, source);
+        const dispatch = (source) => withRequestOptions(config.requestUserAgent, deepseekSafetyCheck, source);
         // A degraded startup never injects a partial preset: requests pass through untouched.
         if (startupError) {
             yield* dispatch(next);
@@ -771,6 +778,7 @@ export async function apply(ctx, config = {}) {
                         selectedPresetId: state.selectedPresetId ?? defaultRecord(state)?.id ?? null,
                         postToolPrefixMode: state.postToolPrefixMode,
                         postToolPrefixText: state.postToolPrefixText,
+                        deepseekSafetyCheck: state.deepseekSafetyCheck,
                         deepseekBetaPrefix: state.deepseekBetaPrefix === true,
                         forcePrefill: state.forcePrefill === true,
                         prefixToolCalls: state.prefixToolCalls === true,
@@ -895,7 +903,8 @@ export async function apply(ctx, config = {}) {
                             const rewritten = rewriteDeepSeekPrefixFetch(config.baseURL + '/chat/completions', {
                                 method: 'POST', headers: { 'x-deepseek-harness-session-id': sessionId }, body: JSON.stringify(wire),
                             }, [registry]);
-                            raw = String(rewritten.init?.body ?? JSON.stringify(wire));
+                            const outgoing = withDeepSeekSafetyCheck(rewritten.input, rewritten.init, current.deepseekSafetyCheck);
+                            raw = String((outgoing ?? rewritten.init).body ?? JSON.stringify(wire));
                             source = 'draft-wire';
                         }
                         catch {
@@ -1269,6 +1278,13 @@ export async function apply(ctx, config = {}) {
                         }
                         state.revision++;
                         return { id: fallback?.id ?? null };
+                    }
+                    if (body.action === 'set-deepseek-safety-check') {
+                        if (typeof body.enabled !== 'boolean')
+                            throw new Error('安全审核开关必须是布尔值');
+                        state.deepseekSafetyCheck = body.enabled;
+                        state.revision++;
+                        return { revision: state.revision, enabled: state.deepseekSafetyCheck };
                     }
                     if (body.action === 'set-default') {
                         const record = state.presets.find(p => p.id === body.id);

@@ -1,5 +1,5 @@
 import { DEFAULT_CHAT_CONNECTION } from '../vendor/deepseek-chat/config.mjs';
-import { REQUEST_USER_AGENT_PATTERN } from './request-user-agent.mjs';
+import { REQUEST_USER_AGENT_PATTERN } from './request-options.mjs';
 
 /** Reuse the host schema runtime; keep plain imports usable outside DSH. */
 export function createPluginConfigSchema(z: any) {

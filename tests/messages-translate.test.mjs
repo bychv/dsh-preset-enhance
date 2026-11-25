@@ -202,7 +202,7 @@ test('tool_choice and finish_reason mappings are explicit', () => {
   assert.equal(mapChatFinishReason('stop'), 'end_turn');
   assert.equal(mapChatFinishReason('length'), 'max_tokens');
   assert.equal(mapChatFinishReason('tool_calls'), 'tool_use');
-  assert.equal(mapChatFinishReason('content_filter'), 'end_turn');
+  assert.equal(mapChatFinishReason('content_filter'), 'refusal');
   assert.equal(mapChatFinishReason(undefined), 'end_turn');
 });
 

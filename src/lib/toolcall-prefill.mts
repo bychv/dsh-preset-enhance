@@ -586,6 +586,7 @@ export function transformToolCallJson(data: JsonObject, metadata: ResponseTransf
   const output = { ...data };
   output.choices = Array.isArray(data.choices) ? data.choices.map((choice: any) => {
     if (!choice || typeof choice !== 'object' || !choice.message || typeof choice.message !== 'object') return choice;
+    if (choice.finish_reason === 'content_filter') return choice;
     const result = { ...choice, message: { ...choice.message } };
     const message = result.message;
     const observedReasoning = typeof message.reasoning_content === 'string' && message.reasoning_content.length > 0;
@@ -668,6 +669,11 @@ class ChoiceState {
     if (this.finished) return choice;
     const result = { ...choice };
     const delta = { ...(choice.delta ?? {}) };
+    if (choice.finish_reason === 'content_filter') {
+      // A refused stream must not finalize buffered DSML into executable calls.
+      this.finished = true;
+      return { ...result, delta: delta.refusal == null ? {} : { refusal: delta.refusal } };
+    }
     const final = forceFinal || choice.finish_reason != null;
     const nativeReasoning = typeof delta.reasoning_content === 'string' && delta.reasoning_content.length > 0;
     let extractedReasoning = '';

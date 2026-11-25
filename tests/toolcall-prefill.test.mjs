@@ -229,6 +229,22 @@ test('stream response recognizes a split DSML marker and emits an OpenAI tool-ca
   assert.equal(payloads.at(-1), '[DONE]');
 });
 
+test('a safety refusal wins over buffered tool calls', async () => {
+  const dsml = DSML_CALLS_OPEN + '\n' + invoke('lookup_weather', [['city', 'true', 'Shanghai']]) + '\n' + DSML_CALLS_CLOSE;
+  const sse = value => 'data: ' + (value === '[DONE]' ? value : JSON.stringify(value)) + '\n\n';
+  const response = new Response(
+    sse({ choices: [{ index: 0, delta: { content: dsml }, finish_reason: null }] }) +
+    sse({ choices: [{ index: 0, delta: { refusal: 'refused' }, finish_reason: 'content_filter' }] }) +
+    sse('[DONE]'),
+    { headers: { 'content-type': 'text/event-stream' } },
+  );
+  const transformed = await transformToolCallResponse(response, {});
+  const text = await transformed.text();
+  assert.match(text, /"finish_reason":"content_filter"/u);
+  assert.match(text, /"refusal":"refused"/u);
+  assert.doesNotMatch(text, /"tool_calls":/u);
+});
+
 test('stream response captures compact whitespace-drift DSML across single-character deltas', async () => {
   const dsml = '<｜DSML｜toolcalls ><｜DSML｜ invoke name = \'lookup_weather\'>' +
     '<｜DSML｜ parameter string = \'true\' name = \'city\'>Shanghai</｜DSML｜ parameter>' +

@@ -42,6 +42,7 @@ const modeDefaultDrafts = new Map();
 let bindingVersion = 0;
 // 顶部会话连接选择器直接改宿主的 provider/model：选中即切换，不参与任何自动保存。
 let connectionSwitchSaving = false;
+let safetyCheckSaving = false;
 
 function blank() {
   return {
@@ -210,6 +211,7 @@ async function reload(id) {
   $('user').value = binding.values?.user ?? 'User';
   $('char').value = binding.values?.char ?? 'Assistant';
   $('markers').value = JSON.stringify(binding.markers ?? {}, null, 2);
+  renderSafetyCheck();
   $('deepseek-beta-prefix').checked = state.deepseekBetaPrefix === true;
   $('force-prefill').checked = state.forcePrefill === true;
   $('prefix-tool-calls').checked = state.prefixToolCalls === true;
@@ -369,6 +371,12 @@ function renderConnectionChoice() {
   $('connection-note').textContent = current
     ? `${protocolText} · ${selection.model ?? "未选择模型"}`
     : '未选择连接。';
+}
+
+function renderSafetyCheck() {
+  const toggle = $('deepseek-safety-check');
+  if (!safetyCheckSaving) toggle.checked = state.deepseekSafetyCheck === true;
+  toggle.disabled = safetyCheckSaving || Boolean(state.startupError);
 }
 /**
  * 选中即切换：走宿主自己的 provider/model 选择（sessionController），请求记录、模型能力与
@@ -2275,6 +2283,23 @@ $('connection-toggle').onclick = () => {
   const side = $('connection-switch').dataset.side;
   void selectConnectionChoice(side === 'left' ? right.provider : left.provider);
 };
+$('deepseek-safety-check').onchange = guard(async () => {
+  const enabled = $('deepseek-safety-check').checked;
+  safetyCheckSaving = true;
+  renderSafetyCheck();
+  try {
+    const result = await configWrite({ action: 'set-deepseek-safety-check', enabled });
+    acceptRevision(result);
+    state.deepseekSafetyCheck = result.enabled;
+    previewController?.abort();
+    ++previewGeneration;
+    requestPreview?.stale();
+    status(result.enabled ? '已开启 DeepSeek 官方 API 安全审核' : '已恢复 DeepSeek API 默认审核');
+  } finally {
+    safetyCheckSaving = false;
+    renderSafetyCheck();
+  }
+});
 $('prefix-tool-calls').onchange = () => {
   syncPrefixToolControls();
   markPrefillSettingsDirty();
@@ -3460,6 +3485,11 @@ async function refreshConnectionState() {
     const latest = await api();
     if (generation !== connectionRefreshGeneration || connectionSwitchSaving) return;
     const modeChanged = state.sessionMode !== latest.sessionMode;
+    const safetyChanged = !safetyCheckSaving && latest.revision >= state.revision && state.deepseekSafetyCheck !== latest.deepseekSafetyCheck;
+    if (safetyChanged) {
+      state.deepseekSafetyCheck = latest.deepseekSafetyCheck;
+      renderSafetyCheck();
+    }
     state.sessionMode = latest.sessionMode;
     state.presetMode = latest.presetMode;
     state.modeDefaultPresetId = latest.modeDefaultPresetId;
@@ -3468,7 +3498,8 @@ async function refreshConnectionState() {
     state.connectionChoice = latest.connectionChoice;
     state.protocol = latest.protocol;
     state.protocolNotes = latest.protocolNotes;
-    if (modeChanged) { previewController?.abort(); ++previewGeneration; requestPreview?.stale(); renderList(); updateSessionNote(); }
+    if (modeChanged || safetyChanged) { previewController?.abort(); ++previewGeneration; requestPreview?.stale(); }
+    if (modeChanged) { renderList(); updateSessionNote(); }
     if (isDshSystemPromptTemplate(selectedPrompt)) renderEditor();
     renderConnectionChoice();
     renderProtocolNotice();

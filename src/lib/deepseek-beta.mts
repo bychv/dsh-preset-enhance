@@ -3,7 +3,7 @@ import { emulateToolCallRequest, transformToolCallResponse } from './toolcall-pr
 import type { JsonObject, ResponseTransformMetadata } from './toolcall-prefill.mjs';
 import { classifyProtocolPath, detectProtocol, observeProtocolRequest, protocolCapability } from './protocol.mjs';
 import { captureOutgoingRequest } from './request-preview.mjs';
-import { withUserAgentHeader } from './request-user-agent.mjs';
+import { activeSafetyCheck, withUserAgentHeader } from './request-options.mjs';
 import type { LlmProtocol, ProtocolObservation, ProtocolObserver } from './protocol.mjs';
 import { messagesRequestHeadersToChat, messagesRequestToChat, translateChatResponse } from './messages-translate.mjs';
 import type { PluginContext } from '../host-types.mjs';
@@ -50,8 +50,10 @@ function parsedUrl(input: unknown): URL | null {
   try { return new URL(requestUrl(input)); } catch { return null; }
 }
 
+const OFFICIAL_API_ORIGIN = 'https://api.deepseek.com';
+
 function officialBetaUrl(url: URL | null): string | null {
-  if (!url || url.protocol !== 'https:' || url.hostname !== 'api.deepseek.com' || url.port) return null;
+  if (url?.origin !== OFFICIAL_API_ORIGIN) return null;
   if (!/^\/(?:beta\/|v1\/)?chat\/completions\/?$/u.test(url.pathname)) return null;
   const beta = new URL(DEEPSEEK_BETA_BASE_URL + '/chat/completions');
   beta.search = url.search;
@@ -66,7 +68,7 @@ export const DEEPSEEK_OFFICIAL_CHAT_URL = 'https://api.deepseek.com/chat/complet
  * endpoints are never switched, however the request was compiled.
  */
 function officialMessagesUrl(url: URL | null): boolean {
-  if (!url || url.protocol !== 'https:' || url.hostname !== 'api.deepseek.com' || url.port) return false;
+  if (url?.origin !== OFFICIAL_API_ORIGIN) return false;
   return classifyProtocolPath(url.pathname) === 'messages';
 }
 
@@ -332,6 +334,19 @@ function jsonBody(init: RequestInitLike): JsonObject | null {
   }
 }
 
+/** Apply the opt-in to the final, official inference endpoint and its JSON body. */
+export function withDeepSeekSafetyCheck(input: FetchInput, init: RequestInitLike, enabled: boolean): RequestInitLike | undefined {
+  if (!enabled || init.method?.toUpperCase() !== 'POST') return;
+  const url = parsedUrl(input);
+  if (url?.origin !== OFFICIAL_API_ORIGIN) return;
+  if (!/^\/(?:anthropic\/v1\/messages|(?:v1\/)?(?:messages|responses)|(?:v1\/|beta\/)?chat\/completions)\/?$/u.test(url.pathname)) return;
+  const body = jsonBody(init);
+  if (!body || body.safety_check?.level === 'high') return;
+  const headers = new Headers(init.headers);
+  headers.delete('content-length');
+  return { ...init, headers, body: JSON.stringify({ ...body, safety_check: { level: 'high' } }) };
+}
+
 /**
  * Switch one official Messages request to the official chat/completions
  * endpoint. Fires only when the session has an activation explicitly armed for
@@ -450,19 +465,29 @@ async function materializeRequest(input: FetchInput, init: FetchInit): Promise<{
   const RequestCtor = globalThis.Request;
   if (typeof RequestCtor === 'function' && input instanceof RequestCtor) {
     const request = input;
-    let body: string | undefined;
-    if (request.body !== null) {
+    let body = init?.body ?? undefined;
+    if (body === undefined && request.body !== null) {
       try { body = await request.clone().text(); } catch { body = undefined; }
     }
+    const text = await readableBodyText(body);
     return {
       input: request.url,
       init: {
         method: request.method,
         headers: request.headers,
-        ...(body === undefined ? {} : { body }),
         signal: request.signal,
+        credentials: request.credentials,
+        redirect: request.redirect,
+        cache: request.cache,
+        integrity: request.integrity,
+        keepalive: request.keepalive,
+        mode: request.mode,
+        referrer: request.referrer,
+        referrerPolicy: request.referrerPolicy,
+        ...init,
+        ...(body === undefined ? {} : { body: text ?? body }),
       } as FetchInit,
-      rebuilt: false,
+      rebuilt: text !== null,
     };
   }
   const text = await readableBodyText(init?.body);
@@ -519,14 +544,13 @@ function createWrapper(host: BridgeHost): FetchLike {
     }
     // Observation always sees the readable shape. The transport keeps the caller's own objects
     // unless the normalization had to consume them.
-    const captured = captureOutgoingRequest(
-      rewritten.changed ? rewritten.input : normalized.input,
-      rewritten.changed ? rewritten.init : normalized.init);
+    const safetyInit = withDeepSeekSafetyCheck(rewritten.input, rewritten.init, activeSafetyCheck());
+    const captured = captureOutgoingRequest(rewritten.input, safetyInit ?? rewritten.init);
     let response: FetchResponse;
     try {
-      const forwardNormalized = rewritten.changed || normalized.rebuilt;
+      const forwardNormalized = !!safetyInit || rewritten.changed || normalized.rebuilt;
       const forwardedInput = forwardNormalized ? rewritten.input : input;
-      const forwardedInit = forwardNormalized ? rewritten.init : init;
+      const forwardedInit = forwardNormalized ? safetyInit ?? rewritten.init : init;
       response = await Reflect.apply(host.original, this, [forwardedInput, withUserAgentHeader(forwardedInput, forwardedInit)]) as FetchResponse;
       captured?.(`HTTP ${response.status}`);
     } catch (error) { captured?.('传输失败'); throw error; }

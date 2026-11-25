@@ -29,8 +29,8 @@ import {
   deleteLibraryEntry, presetLocks, restoreDefaultTemplates, saveLibraryEntry, setPresetLock,
   summarizeSPreset, syncSPresetMirror,
 } from './lib/s-preset-library.mjs';
-import { installDeepSeekBetaBridge, rewriteDeepSeekPrefixFetch } from './lib/deepseek-beta.mjs';
-import { withRequestUserAgent } from './lib/request-user-agent.mjs';
+import { installDeepSeekBetaBridge, rewriteDeepSeekPrefixFetch, withDeepSeekSafetyCheck } from './lib/deepseek-beta.mjs';
+import { withRequestOptions } from './lib/request-options.mjs';
 import { createProtocolObserver } from './lib/protocol.mjs';
 import { connectionSelection, selectConnection, sessionConnection, writeConnectionProtocol } from './lib/connection.mjs';
 import type { ConnectionProtocol, ConnectionProtocolInfo } from './lib/connection.mjs';
@@ -160,6 +160,7 @@ function degradedPayload(reason: string): Record<string, unknown> {
     modeDefaultPresets: {},
     postToolPrefixMode: 'inherit',
     postToolPrefixText: '',
+    deepseekSafetyCheck: false,
     deepseekBetaPrefix: false,
     prefixToolCalls: false,
     prefixOutputExtraction: false,
@@ -303,9 +304,12 @@ const chatConnection = () => {
   }
 
   let policySnapshot = toolPolicySnapshot();
+  let deepseekSafetyCheck = false;
   if (!startupError) {
     try {
-      policySnapshot = toolPolicySnapshot(await store.read());
+      const state = await store.read();
+      policySnapshot = toolPolicySnapshot(state);
+      deepseekSafetyCheck = state.deepseekSafetyCheck;
       // A locked file can still be read and used. A later actual commit can compact it.
       await store.maintain().catch(error => console.warn('preset-enhance: state maintenance failed', error));
     } catch (error) {
@@ -322,7 +326,10 @@ const chatConnection = () => {
     clearPresetEnhanceUnavailableReason();
   }
   const refreshPolicies = (state: PresetState) => { policySnapshot = toolPolicySnapshot(state); };
-  ctx.effect(() => store.subscribe(refreshPolicies), 'preset-enhance: committed tool policies');
+  ctx.effect(() => store.subscribe(state => {
+    refreshPolicies(state);
+    deepseekSafetyCheck = state.deepseekSafetyCheck;
+  }), 'preset-enhance: committed request settings');
   const templateRegistry = createTemplateRegistry(error => console.warn('preset-enhance: template catalog listener failed', error));
   ctx.effect(() => () => templateRegistry.close(), 'preset-enhance: template registry');
   const templateServiceAvailable = !startupError && typeof ctx.provide === 'function';
@@ -357,7 +364,7 @@ const chatConnection = () => {
   }
 
   async function* injectStream(options: StreamOptions, next: () => AsyncIterable<unknown>, onDispatch: () => void) {
-    const dispatch = (source: () => AsyncIterable<unknown>) => withRequestUserAgent(config.requestUserAgent, source);
+    const dispatch = (source: () => AsyncIterable<unknown>) => withRequestOptions(config.requestUserAgent, deepseekSafetyCheck, source);
     // A degraded startup never injects a partial preset: requests pass through untouched.
     if (startupError) { yield* dispatch(next); return; }
     const sessionId = options.sessionId;
@@ -762,6 +769,7 @@ const chatConnection = () => {
             selectedPresetId: state.selectedPresetId ?? defaultRecord(state)?.id ?? null,
             postToolPrefixMode: state.postToolPrefixMode,
             postToolPrefixText: state.postToolPrefixText,
+            deepseekSafetyCheck: state.deepseekSafetyCheck,
             deepseekBetaPrefix: state.deepseekBetaPrefix === true,
             forcePrefill: state.forcePrefill === true,
             prefixToolCalls: state.prefixToolCalls === true,
@@ -882,7 +890,8 @@ const chatConnection = () => {
               const rewritten = rewriteDeepSeekPrefixFetch(config.baseURL + '/chat/completions', {
                 method: 'POST', headers: { 'x-deepseek-harness-session-id': sessionId }, body: JSON.stringify(wire),
               }, [registry]);
-              raw = String(rewritten.init?.body ?? JSON.stringify(wire)); source = 'draft-wire';
+              const outgoing = withDeepSeekSafetyCheck(rewritten.input, rewritten.init, current.deepseekSafetyCheck);
+              raw = String((outgoing ?? rewritten.init).body ?? JSON.stringify(wire)); source = 'draft-wire';
             } catch { result.warnings.push('附件或适配器需要发送阶段准备；当前预览为适配器输入，实际发送后可查看最终 Raw'); }
           } else result.warnings.push('当前适配器未提供纯序列化预览；显示适配器输入，实际发送后可查看最终 Raw');
           if (!agentTools) result.warnings.push('当前会话工具范围尚未建立；以发送时的工具列表为准');
@@ -1230,6 +1239,12 @@ const chatConnection = () => {
             }
             state.revision++;
             return { id: fallback?.id ?? null };
+          }
+          if (body.action === 'set-deepseek-safety-check') {
+            if (typeof body.enabled !== 'boolean') throw new Error('安全审核开关必须是布尔值');
+            state.deepseekSafetyCheck = body.enabled;
+            state.revision++;
+            return { revision: state.revision, enabled: state.deepseekSafetyCheck };
           }
           if (body.action === 'set-default') {
             const record = state.presets.find(p => p.id === body.id);

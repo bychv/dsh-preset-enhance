@@ -42,7 +42,7 @@ export interface MessagesRequestTranslation {
 }
 
 /** Anthropic stop_reason vocabulary the harness Messages adapter accepts. */
-export type AnthropicStopReason = 'end_turn' | 'stop_sequence' | 'tool_use' | 'max_tokens';
+export type AnthropicStopReason = 'end_turn' | 'stop_sequence' | 'tool_use' | 'max_tokens' | 'refusal';
 
 export interface ChatToMessagesOptions {
   /** Model id used for message_start when the upstream chunk omits one. */
@@ -408,13 +408,13 @@ export function messagesRequestHeadersToChat(headers: unknown): Record<string, s
 
 /**
  * Map a chat/completions finish_reason onto the Anthropic stop_reason set the
- * harness accepts. length -> max_tokens, tool_calls -> tool_use; content_filter
- * and unknown values become end_turn (Chat Completions has no equivalent
- * termination vocabulary).
+ * harness accepts. DeepSeek reports safety refusals as content_filter in Chat
+ * Completions and refusal in Messages.
  */
 export function mapChatFinishReason(reason: unknown): AnthropicStopReason {
   if (reason === 'length') return 'max_tokens';
   if (reason === 'tool_calls') return 'tool_use';
+  if (reason === 'content_filter') return 'refusal';
   if (reason === 'stop_sequence') return 'stop_sequence';
   return 'end_turn';
 }

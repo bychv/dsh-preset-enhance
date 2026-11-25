@@ -11,6 +11,7 @@ const initialState = (): PresetState => ({
   defaultPresetId: null,
   selectedPresetId: null,
   modeDefaultPresets: {},
+  deepseekSafetyCheck: false,
   deepseekBetaPrefix: false,
   forcePrefill: false,
   prefixToolCalls: false,
@@ -49,6 +50,7 @@ function normalize(state: PresetState): PresetState {
   const presetIds = new Set(state.presets.map(preset => preset?.id));
   state.modeDefaultPresets = Object.fromEntries(Object.entries(recordOf<string>(state.modeDefaultPresets))
     .filter(([modeId, presetId]) => modeId && typeof presetId === 'string' && presetIds.has(presetId)));
+  state.deepseekSafetyCheck = state.deepseekSafetyCheck === true;
   state.deepseekBetaPrefix = state.deepseekBetaPrefix === true;
   state.forcePrefill = state.forcePrefill === true;
   state.prefixToolCalls = state.prefixToolCalls === true;

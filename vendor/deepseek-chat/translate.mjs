@@ -11,6 +11,7 @@ export function mapFinishReason(reason) {
         case 'stop': return { kind: 'stop' };
         case 'tool_calls': return { kind: 'tool-calls' };
         case 'length': return { kind: 'max-tokens' };
+        case 'content_filter': return { kind: 'error', failure: { message: 'DeepSeek 内容安全审核拒绝了该回复', code: 'CONTENT_REFUSED' } };
         default:
             return { kind: 'error', failure: { message: 'model stopped: ' + reason, code: reason.toUpperCase() } };
     }

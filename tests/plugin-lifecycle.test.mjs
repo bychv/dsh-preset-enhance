@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Readable } from 'node:stream';
 import { apply } from '../index.mjs';
 import { PresetStore } from '../lib/store.mjs';
 
@@ -28,6 +29,7 @@ test('concurrent host disposal waits for an active stream and preserves its beta
   try {
     await new PresetStore(file).transaction(state => {
       state.deepseekBetaPrefix = true;
+      state.deepseekSafetyCheck = true;
       state.presets.push({ id: 'p', name: 'test', preset: {
         prompts: [{ identifier: 'chatHistory', marker: true }, { identifier: 'prefix', role: 'assistant', content: 'Continue:' }],
       } });
@@ -42,6 +44,7 @@ test('concurrent host disposal waits for an active stream and preserves its beta
         started.resolve();
         await finish.promise;
         await fetch('https://api.deepseek.com/chat/completions', {
+          method: 'POST',
           headers: { 'x-deepseek-harness-session-id': 's' },
           body: JSON.stringify({ messages: options.messages.map(m => ({ role: m.role, content: m.content.map(b => b.text).join('') })) }),
         });
@@ -67,6 +70,7 @@ test('concurrent host disposal waits for an active stream and preserves its beta
     await teardown;
     assert.equal(rewritten.url, 'https://api.deepseek.com/beta/chat/completions');
     assert.equal(rewritten.body.messages.at(-1).prefix, true);
+    assert.deepEqual(rewritten.body.safety_check, { level: 'high' });
     assert.equal(rewritten.userAgent, 'Preset-Test/1.0');
   } finally {
     finish.resolve();
@@ -76,23 +80,29 @@ test('concurrent host disposal waits for an active stream and preserves its beta
   }
 });
 
-test('the live User-Agent setting applies to model transports with presets disabled', async () => {
+test('live model request settings apply with presets disabled and safety review stays on official inference endpoints', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'preset-user-agent-'));
   const originalFetch = globalThis.fetch;
   const disposers = [];
   const sent = [];
+  const file = join(dir, 'state.json');
   let userAgent = 'Local Client/1.0';
+  let api;
   let intercept;
   globalThis.fetch = async (input, init) => {
     const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
-    sent.push({ url: input instanceof Request ? input.url : String(input), headers });
+    const raw = init?.body ?? (input instanceof Request ? await input.clone().text() : undefined);
+    sent.push({ url: input instanceof Request ? input.url : String(input), headers, body: raw ? JSON.parse(raw) : undefined });
     return new Response('{}');
   };
   const ctx = {
     effect(setup) { const dispose = setup(); if (typeof dispose === 'function') disposers.push(dispose); },
     on(event, handler) { if (event === 'llm/stream') intercept = handler; },
     sessions: { get: () => ({ id: 's', header: { agentPreset: 'standard' } }) },
-    webServer: { register: () => () => {} },
+    webServer: { register(definition) {
+      if (definition.path === '/preset-enhance/api') api = definition.handler;
+      return () => {};
+    } },
     llm: { async *stream() {} },
   };
   const input = new Request('https://api.deepseek.com/anthropic/v1/messages', {
@@ -101,29 +111,54 @@ test('the live User-Agent setting applies to model transports with presets disab
   const relayUrl = 'https://example.invalid/v1/responses';
   const relayHeaders = { 'USER-AGENT': 'relay/1', authorization: 'Bearer fixture' };
   const run = (options, transport) => Array.fromAsync(intercept(options, async function* () { await transport(); }));
+  const setSafety = async enabled => {
+    const before = await new PresetStore(file).read();
+    const req = Readable.from([JSON.stringify({ revision: before.revision, action: 'set-deepseek-safety-check', enabled })]);
+    Object.assign(req, { method: 'POST', url: '/preset-enhance/api', headers: { host: 'localhost', 'content-type': 'application/json' } });
+    let status, result;
+    await api(req, { writeHead: value => { status = value; }, end: value => { result = JSON.parse(value); } });
+    assert.equal(status, 200, result?.error);
+    assert.equal((await new PresetStore(file).read()).deepseekSafetyCheck, enabled);
+  };
   try {
-    await apply(ctx, { dataFile: join(dir, 'state.json'), agentPresetRoot: join(dir, 'modes'),
-      requestUserAgent: { get: () => userAgent } });
-    await run({ provider: 'deepseek-official', sessionId: 's', messages: [] }, () => fetch(input));
+    await apply(ctx, { dataFile: file, agentPresetRoot: join(dir, 'modes'), requestUserAgent: { get: () => userAgent } });
+    assert.equal((await new PresetStore(file).read()).deepseekSafetyCheck, false);
+    await setSafety(true);
+    await run({ provider: 'deepseek-official', sessionId: 's', messages: [] }, () => fetch(input, {
+      headers: { 'x-api-key': 'fixture', 'content-length': '42' }, body: '{"messages":[],"tool_choice":"auto"}',
+    }));
     assert.equal(sent[0].headers.get('user-agent'), 'Local Client/1.0');
     assert.equal(sent[0].headers.get('x-api-key'), 'fixture');
     assert.equal(input.headers.get('user-agent'), 'official/1');
+    assert.equal(sent[0].headers.get('content-length'), null);
+    assert.deepEqual(sent[0].body, { messages: [], tool_choice: 'auto', safety_check: { level: 'high' } });
 
     userAgent = 'Local Client/2.0';
-    await run({ provider: 'custom', purpose: 'title' }, () => fetch(relayUrl, { headers: relayHeaders }));
+    const relayOptions = { method: 'POST', headers: relayHeaders, body: '{"input":"fixture"}' };
+    await run({ provider: 'custom', purpose: 'title' }, () => fetch(relayUrl, relayOptions));
     assert.equal(sent[1].headers.get('user-agent'), 'Local Client/2.0');
     assert.equal(sent[1].headers.get('authorization'), 'Bearer fixture');
     assert.equal(relayHeaders['USER-AGENT'], 'relay/1');
+    assert.deepEqual(sent[1].body, { input: 'fixture' });
 
     await fetch(relayUrl, { headers: relayHeaders });
     assert.equal(sent[2].headers.get('user-agent'), 'relay/1', 'out-of-stream requests keep their own headers');
     userAgent = '';
     await run({ provider: 'custom' }, () => fetch(relayUrl, { headers: relayHeaders }));
     assert.equal(sent[3].headers.get('user-agent'), 'relay/1');
+    await run({}, () => fetch('https://api.deepseek.com/responses', relayOptions));
+    assert.deepEqual(sent[4].body, { input: 'fixture', safety_check: { level: 'high' } });
+    await run({}, () => fetch('https://api.deepseek.com/v1/files', relayOptions));
+    assert.deepEqual(sent[5].body, { input: 'fixture' });
+    await fetch('https://api.deepseek.com/responses', relayOptions);
+    assert.deepEqual(sent[6].body, { input: 'fixture' }, 'non-model requests remain outside the setting scope');
+    await setSafety(false);
+    await run({}, () => fetch('https://api.deepseek.com/responses', relayOptions));
+    assert.deepEqual(sent[7].body, { input: 'fixture' });
 
     userAgent = 'invalid\r\nInjected: value';
     await assert.rejects(run({}, () => fetch(relayUrl)), /User-Agent/);
-    assert.equal(sent.length, 4);
+    assert.equal(sent.length, 8);
   } finally {
     await Promise.all(disposers.map(dispose => dispose()));
     globalThis.fetch = originalFetch;
