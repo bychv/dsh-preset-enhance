@@ -10,6 +10,7 @@
 
 export interface PluginConfig {
   chatModels?: import('./vendor/deepseek-chat/config.mjs').ChatModelConfig[] | { get(): import('./vendor/deepseek-chat/config.mjs').ChatModelConfig[] };
+  requestUserAgent?: string | { get(): string };
   dataFile?: string;
   agentPresetRoot?: string;
   standardComposition?: string;

@@ -22,7 +22,7 @@ test('concurrent host disposal waits for an active stream and preserves its beta
   let rewritten;
   const file = join(dir, 'state.json');
   globalThis.fetch = async (url, init) => {
-    rewritten = { url, body: JSON.parse(init.body) };
+    rewritten = { url, body: JSON.parse(init.body), userAgent: new Headers(init.headers).get('user-agent') };
     return new Response('{}');
   };
   try {
@@ -48,7 +48,7 @@ test('concurrent host disposal waits for an active stream and preserves its beta
         yield 'done';
       } },
     };
-    await apply(ctx, { dataFile: file, agentPresetRoot: join(dir, 'modes') });
+    await apply(ctx, { dataFile: file, agentPresetRoot: join(dir, 'modes'), requestUserAgent: 'Preset-Test/1.0' });
     const consume = async () => {
       const values = [];
       for await (const value of intercept({ sessionId: 's', messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }] }, async function* () {})) values.push(value);
@@ -67,8 +67,64 @@ test('concurrent host disposal waits for an active stream and preserves its beta
     await teardown;
     assert.equal(rewritten.url, 'https://api.deepseek.com/beta/chat/completions');
     assert.equal(rewritten.body.messages.at(-1).prefix, true);
+    assert.equal(rewritten.userAgent, 'Preset-Test/1.0');
   } finally {
     finish.resolve();
+    await Promise.all(disposers.map(dispose => dispose()));
+    globalThis.fetch = originalFetch;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('the live User-Agent setting applies to model transports with presets disabled', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'preset-user-agent-'));
+  const originalFetch = globalThis.fetch;
+  const disposers = [];
+  const sent = [];
+  let userAgent = 'Local Client/1.0';
+  let intercept;
+  globalThis.fetch = async (input, init) => {
+    const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+    sent.push({ url: input instanceof Request ? input.url : String(input), headers });
+    return new Response('{}');
+  };
+  const ctx = {
+    effect(setup) { const dispose = setup(); if (typeof dispose === 'function') disposers.push(dispose); },
+    on(event, handler) { if (event === 'llm/stream') intercept = handler; },
+    sessions: { get: () => ({ id: 's', header: { agentPreset: 'standard' } }) },
+    webServer: { register: () => () => {} },
+    llm: { async *stream() {} },
+  };
+  const input = new Request('https://api.deepseek.com/anthropic/v1/messages', {
+    method: 'POST', headers: { 'User-Agent': 'official/1', 'x-api-key': 'fixture' }, body: '{}',
+  });
+  const relayUrl = 'https://example.invalid/v1/responses';
+  const relayHeaders = { 'USER-AGENT': 'relay/1', authorization: 'Bearer fixture' };
+  const run = (options, transport) => Array.fromAsync(intercept(options, async function* () { await transport(); }));
+  try {
+    await apply(ctx, { dataFile: join(dir, 'state.json'), agentPresetRoot: join(dir, 'modes'),
+      requestUserAgent: { get: () => userAgent } });
+    await run({ provider: 'deepseek-official', sessionId: 's', messages: [] }, () => fetch(input));
+    assert.equal(sent[0].headers.get('user-agent'), 'Local Client/1.0');
+    assert.equal(sent[0].headers.get('x-api-key'), 'fixture');
+    assert.equal(input.headers.get('user-agent'), 'official/1');
+
+    userAgent = 'Local Client/2.0';
+    await run({ provider: 'custom', purpose: 'title' }, () => fetch(relayUrl, { headers: relayHeaders }));
+    assert.equal(sent[1].headers.get('user-agent'), 'Local Client/2.0');
+    assert.equal(sent[1].headers.get('authorization'), 'Bearer fixture');
+    assert.equal(relayHeaders['USER-AGENT'], 'relay/1');
+
+    await fetch(relayUrl, { headers: relayHeaders });
+    assert.equal(sent[2].headers.get('user-agent'), 'relay/1', 'out-of-stream requests keep their own headers');
+    userAgent = '';
+    await run({ provider: 'custom' }, () => fetch(relayUrl, { headers: relayHeaders }));
+    assert.equal(sent[3].headers.get('user-agent'), 'relay/1');
+
+    userAgent = 'invalid\r\nInjected: value';
+    await assert.rejects(run({}, () => fetch(relayUrl)), /User-Agent/);
+    assert.equal(sent.length, 4);
+  } finally {
     await Promise.all(disposers.map(dispose => dispose()));
     globalThis.fetch = originalFetch;
     await rm(dir, { recursive: true, force: true });

@@ -1,4 +1,5 @@
 import { DEFAULT_CHAT_CONNECTION } from '../vendor/deepseek-chat/config.mjs';
+import { REQUEST_USER_AGENT_PATTERN } from './request-user-agent.mjs';
 
 /** Reuse the host schema runtime; keep plain imports usable outside DSH. */
 export function createPluginConfigSchema(z: any) {
@@ -7,6 +8,8 @@ export function createPluginConfigSchema(z: any) {
     agentPresetRoot: z.string(),
     standardComposition: z.string(),
     chatApiKeyEnv: z.string().role('credential-ref'),
+    requestUserAgent: z.string().pattern(REQUEST_USER_AGENT_PATTERN).default('')
+      .description('模型请求 User-Agent（留空使用适配器默认值）').volatile(),
     reroute: z.boolean(),
     chatModels: z.array(z.object({
       id: z.string().required().description('模型 ID'),

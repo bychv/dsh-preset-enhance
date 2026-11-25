@@ -30,6 +30,7 @@ import {
   summarizeSPreset, syncSPresetMirror,
 } from './lib/s-preset-library.mjs';
 import { installDeepSeekBetaBridge, rewriteDeepSeekPrefixFetch } from './lib/deepseek-beta.mjs';
+import { withRequestUserAgent } from './lib/request-user-agent.mjs';
 import { createProtocolObserver } from './lib/protocol.mjs';
 import { connectionSelection, selectConnection, sessionConnection, writeConnectionProtocol } from './lib/connection.mjs';
 import type { ConnectionProtocol, ConnectionProtocolInfo } from './lib/connection.mjs';
@@ -355,11 +356,12 @@ const chatConnection = () => {
   }
 
   async function* injectStream(options: StreamOptions, next: () => AsyncIterable<unknown>, onDispatch: () => void) {
+    const dispatch = (source: () => AsyncIterable<unknown>) => withRequestUserAgent(config.requestUserAgent, source);
     // A degraded startup never injects a partial preset: requests pass through untouched.
-    if (startupError) { yield* next(); return; }
+    if (startupError) { yield* dispatch(next); return; }
     const sessionId = options.sessionId;
     const session = sessionId ? ctx.sessions.get(sessionId) : undefined;
-    if (routed.has(options) || options.purpose || !session || !sessionId) { yield* next(); return; }
+    if (routed.has(options) || options.purpose || !session || !sessionId) { yield* dispatch(next); return; }
     const templateCatalog = templateRegistry.service.list();
 
     const connectionInfo = sessionConnection(ctx, sessionId, options.provider);
@@ -537,7 +539,11 @@ const chatConnection = () => {
     options.signal?.throwIfAborted();
     if (context !== undefined && context.imageCount > 0) await assertImageInput(ctx, options);
     const messagesChanged = compiled !== null || messages !== options.messages;
-    if (!toolsChanged && !messagesChanged) { onDispatch(); yield* traceRequest(snapshots, sessionId, options, next()); return; }
+    if (!toolsChanged && !messagesChanged) {
+      onDispatch();
+      yield* traceRequest(snapshots, sessionId, options, dispatch(next));
+      return;
+    }
 
     const spreset = compiled && requestRecord ? spresetSettings(requestRecord.preset) : undefined;
     if (spreset?.OutputPreprocessing?.enabled && spreset.OutputPreprocessing.consumeToolCalls && filteredTools.some(tool => tool.name === 'run_code')) {
@@ -554,7 +560,7 @@ const chatConnection = () => {
     const betaPrefix = connectionProtocolFor(requestState, connectionInfo) !== 'messages' &&
       betaEnabled && assistantPrefill;
     // Arm the fetch bridge only when this request actually carries an injected preset:
-    // with no preset the plugin must not intervene at all (no reroute, no translation).
+    // Endpoint and payload rewrites are limited to requests with presets.
     // The content key arms the assistant-prefix path, so it is only the plugin's own
     // trailing prefill; an empty key can never match a real assistant message and keeps
     // the bridge to the reroute/translation role for ordinary injected requests.
@@ -568,7 +574,18 @@ const chatConnection = () => {
       extractOutput: requestState.prefixOutputExtraction === true,
     }) : () => {};
     routed.add(request);
-    try { onDispatch(); yield* traceRequest(snapshots, sessionId, request, consumeSPresetStream(ctx.llm.stream(request), spreset, { provider: { source:request.provider, model:request.model }, stream:requestSettings?.stream !== false }, options.signal), compiled ? { warnings: [...compiled.warnings, ...(context?.warnings ?? [])], promptRegex: compiled.promptRegex } : undefined); } finally { releaseBeta(); routed.delete(request); }
+    try {
+      onDispatch();
+      const source = dispatch(() => ctx.llm.stream(request));
+      const content = consumeSPresetStream(source, spreset, {
+        provider: { source: request.provider, model: request.model },
+        stream: requestSettings?.stream !== false,
+      }, options.signal);
+      yield* traceRequest(snapshots, sessionId, request, content, compiled ? {
+        warnings: [...compiled.warnings, ...(context?.warnings ?? [])],
+        promptRegex: compiled.promptRegex,
+      } : undefined);
+    } finally { releaseBeta(); routed.delete(request); }
   }
 
   ctx.on('llm/stream', async function* (options: StreamOptions, next: () => AsyncIterable<unknown>) {

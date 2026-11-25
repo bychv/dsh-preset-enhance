@@ -3,6 +3,7 @@ import { emulateToolCallRequest, transformToolCallResponse } from './toolcall-pr
 import type { JsonObject, ResponseTransformMetadata } from './toolcall-prefill.mjs';
 import { classifyProtocolPath, detectProtocol, observeProtocolRequest, protocolCapability } from './protocol.mjs';
 import { captureOutgoingRequest } from './request-preview.mjs';
+import { withUserAgentHeader } from './request-user-agent.mjs';
 import type { LlmProtocol, ProtocolObservation, ProtocolObserver } from './protocol.mjs';
 import { messagesRequestHeadersToChat, messagesRequestToChat, translateChatResponse } from './messages-translate.mjs';
 import type { PluginContext } from '../host-types.mjs';
@@ -526,7 +527,7 @@ function createWrapper(host: BridgeHost): FetchLike {
       const forwardNormalized = rewritten.changed || normalized.rebuilt;
       const forwardedInput = forwardNormalized ? rewritten.input : input;
       const forwardedInit = forwardNormalized ? rewritten.init : init;
-      response = await Reflect.apply(host.original, this, [forwardedInput, forwardedInit]) as FetchResponse;
+      response = await Reflect.apply(host.original, this, [forwardedInput, withUserAgentHeader(forwardedInput, forwardedInit)]) as FetchResponse;
       captured?.(`HTTP ${response.status}`);
     } catch (error) { captured?.('传输失败'); throw error; }
     let out = rewritten.responseTransform ?
@@ -643,7 +644,7 @@ function activation(applied: boolean, reason: string, release: () => void): Deep
 
 /**
  * Install one scoped client for DeepSeek prefix completion. The shared fetch wrapper is
- * inert unless activate() holds an exact session/text pair. The activation also carries the
+ * rewrites prefixes when activate() holds an exact session/text pair. The activation also carries the
  * two tool-handling choices used by official and non-official endpoints.
  *
  * Life cycle: activate() after dispose() reports `applied: false` with a reason instead of
