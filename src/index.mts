@@ -606,8 +606,6 @@ const chatConnection = () => {
 
   const assets = new Map<string, [string, string]>([
     [BASE, ['web/index.html', 'text/html']],
-    [`${BASE}/picker`, ['web/preset-picker.html', 'text/html']],
-    [`${BASE}/preset-picker.js`, ['web/preset-picker.js', 'text/javascript']],
     [`${BASE}/preset-picker.css`, ['web/preset-picker.css', 'text/css']],
     [`${BASE}/regex-editor.js`, ['web/regex-editor.js', 'text/javascript']],
     [`${BASE}/regex-worker.js`, ['web/regex-worker.js', 'text/javascript']],

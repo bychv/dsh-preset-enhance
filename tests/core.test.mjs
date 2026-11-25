@@ -186,17 +186,19 @@ test('client hides conversation width handles locally while keeping sidebar resi
   const cleanups = [];
   const rootAttributes = new Set();
   const styles = [];
+  const pickerStyle = { remove() {} };
   globalThis.window = { __ModuleLoader__: { load(value) { definition = value; } } };
   globalThis.document = {
     documentElement: {
       setAttribute(name) { rootAttributes.add(name); },
       removeAttribute(name) { rootAttributes.delete(name); },
     },
-    head: { appendChild(style) { styles.push(style); } },
+    head: { appendChild(style) { if (style !== pickerStyle) styles.push(style); } },
     querySelector(selector) {
       return selector === 'style[data-preset-enhance-resize-lock]' ? styles[0] ?? null : null;
     },
     createElement(tag) {
+      if (tag === 'link') return pickerStyle;
       assert.equal(tag, 'style');
       const attributes = new Set();
       return {
@@ -211,7 +213,9 @@ test('client hides conversation width handles locally while keeping sidebar resi
   };
   try {
     await import('../client.js?test=' + Date.now());
+    const Button = Symbol('native Button');
     const plugin = definition.factory(name => {
+      if (name === '@deepseek-ai/dsh-client-ui-primitives') return { Button };
       assert.equal(name, 'react');
       return {
         createElement: (type, props, ...children) => ({ type, props, children }),
@@ -221,15 +225,45 @@ test('client hides conversation width handles locally while keeping sidebar resi
       };
     });
     const injected = [], registered = [];
-    plugin.apply({ slots: {
+    const slots = {
       inject(name, fn) { injected.push(name); return fn(); },
       register(options, component) { registered.push({ options, component }); return () => {}; },
-    } });
-    assert.deepEqual(injected, ['conversation.input.right', 'conversation.view', 'main', 'sidebar.panellist']);
+    };
+    let mountedSession = 'conversation-session';
+    const opened = [];
+    const tabs = [];
+    plugin.apply({
+      slots,
+      inject(names, callback) {
+        assert.deepEqual(names, ['slots', 'sidebarRightTabs', 'sidebarRight']);
+        callback({
+          slots,
+          sidebarRightTabs: { register(tab) { tabs.push(tab); } },
+          sidebarRight: {
+            mounted: { getSnapshot: () => mountedSession },
+            openTab(kind, options) { opened.push({ kind, options }); },
+          },
+          effect(callback) { callback(); },
+        });
+      },
+    });
+    assert.deepEqual(injected, ['sidebar.right.pane.tab', 'conversation.input.right', 'conversation.view', 'main', 'sidebar.panellist']);
     assert.deepEqual(registered.map(x => [x.options.name, x.options.id ?? x.options.key]), [
+      ['sidebar.right.pane.tab', 'preset-enhance-picker'],
       ['conversation.input.right', 'preset-enhance-picker'],
       ['conversation.view', 'preset-enhance-editor'], ['main', 'preset-enhance-editor'], ['sidebar.panellist', 'preset-enhance-editor'],
     ]);
+    const inputEntry = registered.find(entry => entry.options.name === 'conversation.input.right');
+    const composer = inputEntry.component({ sessionId: 'conversation-session' });
+    const button = composer.type(composer.props);
+    assert.equal(button.type, Button);
+    assert.equal(button.props.disabled, false);
+    button.props.onClick();
+    mountedSession = 'another-session';
+    assert.equal(composer.type(composer.props).props.disabled, true);
+    button.props.onClick();
+    assert.deepEqual(opened, [{ kind: tabs[0].kind, options: { destination: 'sidebar' } }]);
+    assert.equal(pickerStyle.href, '/preset-enhance/preset-picker.css');
 
     const conversationEntry = registered.find(entry => entry.options.name === 'conversation.view');
     assert.equal(conversationEntry.options.inject, undefined);

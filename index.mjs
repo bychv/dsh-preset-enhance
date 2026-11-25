@@ -597,8 +597,6 @@ export async function apply(ctx, config = {}) {
     const displayAvailability = installDisplayConfig(ctx, store, () => !startupError && !lifecycle.closing, (state, sessionId) => ownGet(state.bindings, sessionId) ?? defaultBinding(state, sessionModeId(ctx.sessions.get(sessionId))));
     const assets = new Map([
         [BASE, ['web/index.html', 'text/html']],
-        [`${BASE}/picker`, ['web/preset-picker.html', 'text/html']],
-        [`${BASE}/preset-picker.js`, ['web/preset-picker.js', 'text/javascript']],
         [`${BASE}/preset-picker.css`, ['web/preset-picker.css', 'text/css']],
         [`${BASE}/regex-editor.js`, ['web/regex-editor.js', 'text/javascript']],
         [`${BASE}/regex-worker.js`, ['web/regex-worker.js', 'text/javascript']],
