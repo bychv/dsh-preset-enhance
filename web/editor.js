@@ -374,9 +374,9 @@ function renderConnectionChoice() {
 }
 
 function renderSafetyCheck() {
-  const toggle = $('deepseek-safety-check');
-  if (!safetyCheckSaving) toggle.checked = state.deepseekSafetyCheck === true;
-  toggle.disabled = safetyCheckSaving || Boolean(state.startupError);
+  const select = $('deepseek-safety-check');
+  if (!safetyCheckSaving) select.value = state.deepseekSafetyCheck ?? 'omit';
+  select.disabled = safetyCheckSaving || Boolean(state.startupError);
 }
 /**
  * 选中即切换：走宿主自己的 provider/model 选择（sessionController），请求记录、模型能力与
@@ -2284,17 +2284,17 @@ $('connection-toggle').onclick = () => {
   void selectConnectionChoice(side === 'left' ? right.provider : left.provider);
 };
 $('deepseek-safety-check').onchange = guard(async () => {
-  const enabled = $('deepseek-safety-check').checked;
+  const level = $('deepseek-safety-check').value;
   safetyCheckSaving = true;
   renderSafetyCheck();
   try {
-    const result = await configWrite({ action: 'set-deepseek-safety-check', enabled });
+    const result = await configWrite({ action: 'set-deepseek-safety-check', level });
     acceptRevision(result);
-    state.deepseekSafetyCheck = result.enabled;
+    state.deepseekSafetyCheck = result.level;
     previewController?.abort();
     ++previewGeneration;
     requestPreview?.stale();
-    status(result.enabled ? '已开启 DeepSeek 官方 API 安全审核' : '已恢复 DeepSeek API 默认审核');
+    status('DeepSeek 官方 API 安全审核已设为 ' + (result.level === 'omit' ? '不传' : result.level));
   } finally {
     safetyCheckSaving = false;
     renderSafetyCheck();

@@ -7,6 +7,7 @@ import { activeSafetyCheck, withUserAgentHeader } from './request-options.mjs';
 import type { LlmProtocol, ProtocolObservation, ProtocolObserver } from './protocol.mjs';
 import { messagesRequestHeadersToChat, messagesRequestToChat, translateChatResponse } from './messages-translate.mjs';
 import type { PluginContext } from '../host-types.mjs';
+import type { DeepSeekSafetyCheckLevel } from './types.mjs';
 
 export const DEEPSEEK_OFFICIAL_PROVIDER = 'deepseek-official';
 export const DEEPSEEK_BETA_BASE_URL = 'https://api.deepseek.com/beta';
@@ -334,17 +335,24 @@ function jsonBody(init: RequestInitLike): JsonObject | null {
   }
 }
 
-/** Apply the opt-in to the final, official inference endpoint and its JSON body. */
-export function withDeepSeekSafetyCheck(input: FetchInput, init: RequestInitLike, enabled: boolean): RequestInitLike | undefined {
-  if (!enabled || init.method?.toUpperCase() !== 'POST') return;
+/** Apply the selected level to the official inference request after any protocol conversion. */
+export function withDeepSeekSafetyCheck(input: FetchInput, init: RequestInitLike, level: DeepSeekSafetyCheckLevel | undefined): RequestInitLike | undefined {
+  if (level === undefined || init.method?.toUpperCase() !== 'POST') return;
   const url = parsedUrl(input);
   if (url?.origin !== OFFICIAL_API_ORIGIN) return;
   if (!/^\/(?:anthropic\/v1\/messages|(?:v1\/)?(?:messages|responses)|(?:v1\/|beta\/)?chat\/completions)\/?$/u.test(url.pathname)) return;
   const body = jsonBody(init);
-  if (!body || body.safety_check?.level === 'high') return;
+  if (!body) return;
+  if (level === 'omit') {
+    if (!Object.hasOwn(body, 'safety_check')) return;
+    delete body.safety_check;
+  } else {
+    if (body.safety_check?.level === level) return;
+    body.safety_check = { level };
+  }
   const headers = new Headers(init.headers);
   headers.delete('content-length');
-  return { ...init, headers, body: JSON.stringify({ ...body, safety_check: { level: 'high' } }) };
+  return { ...init, headers, body: JSON.stringify(body) };
 }
 
 /**

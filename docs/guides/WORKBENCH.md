@@ -49,7 +49,7 @@ dsh plugin --profile web add dsh-preset-enhance@0.3.2-rc.2
 
 在 DSH 左栏打开「插件」，进入「dsh预设增强」详情页。在介绍和组件列表之间填写「模型请求 User-Agent」并保存。该值适用于各适配器经 Fetch 发送的模型请求，包括 DeepSeek 官方接口、插件自带的 Chat 接口和第三方连接。普通请求、预填充和工具续轮均生效，关闭预设注入时也可使用。清空并保存会恢复适配器默认值，改动从下一次模型请求生效。
 
-预设工作台顶部「会话连接」里的「DeepSeek 官方 API 安全审核（全局）」默认关闭，切换后立即保存。开启时，发往 `https://api.deepseek.com` 的 Messages、Responses 和 Chat Completions（含 Beta 前缀续写）请求会带上 `"safety_check": {"level": "high"}`。关闭时插件省略该字段，使用 API 默认档位。单独开启审核时，官方接口要求 `tool_choice` 为 `auto` 或 `none`。审核消耗的 Token 计入输出 Token。 [DeepSeek 模型内容安全文档](https://api-docs.deepseek.com/zh-cn/guides/safety/)
+预设工作台顶部「会话连接」里的「DeepSeek 官方 API 安全审核（全局）」可选「不传（默认）」「low」或「high」，选中后立即保存。该设置适用于发往 `https://api.deepseek.com` 的 Messages、Responses 和 Chat Completions（含 Beta 前缀续写）请求。「不传」会省略 `safety_check`，`low` 和 `high` 则会显式发送相应的 `level`。省略和 `low` 都使用官方默认检查。单独启用 `high` 时，官方接口要求 `tool_choice` 为 `auto` 或 `none`。审核消耗的 Token 计入输出 Token。 [DeepSeek 模型内容安全文档](https://api-docs.deepseek.com/zh-cn/guides/safety/)
 
 DSH 0.1.6 的官方连接默认使用 Messages，0.1.7 更移除了官方的对话补全协议。工作台顶部现在选择**会话被路由到哪个连接**：插件自带的 DeepSeek-预设增强走对话补全接口，预填充续写、工具调用转换与正文提取都在这条路径上生效；宿主的官方连接走 Messages，这些能力不适用。切换在宿主的 provider/model 配置层完成，立即生效、无需重启，也不会改写官方连接的配置字段。有当前会话时仅更新该会话的模型选择；无会话时更新宿主默认选择。
 

@@ -438,13 +438,15 @@ export interface SPresetEditorState {
   locks: Record<string, string[]>;
 }
 
+export type DeepSeekSafetyCheckLevel = 'omit' | 'low' | 'high';
+
 export interface PresetState {
   version: number;
   revision: number;
   defaultPresetId: string | null;
   selectedPresetId: string | null;
   modeDefaultPresets: Record<string, string>;
-  deepseekSafetyCheck: boolean;
+  deepseekSafetyCheck: DeepSeekSafetyCheckLevel;
   deepseekBetaPrefix: boolean;
   /**
    * Manual fallback for prefill detection: send the assistant-prefix continuation even when the

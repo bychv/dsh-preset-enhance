@@ -132,7 +132,7 @@ function degradedPayload(reason) {
         modeDefaultPresets: {},
         postToolPrefixMode: 'inherit',
         postToolPrefixText: '',
-        deepseekSafetyCheck: false,
+        deepseekSafetyCheck: 'omit',
         deepseekBetaPrefix: false,
         prefixToolCalls: false,
         prefixOutputExtraction: false,
@@ -274,7 +274,7 @@ export async function apply(ctx, config = {}) {
         }
     }
     let policySnapshot = toolPolicySnapshot();
-    let deepseekSafetyCheck = false;
+    let deepseekSafetyCheck = 'omit';
     if (!startupError) {
         try {
             const state = await store.read();
@@ -1280,11 +1280,12 @@ export async function apply(ctx, config = {}) {
                         return { id: fallback?.id ?? null };
                     }
                     if (body.action === 'set-deepseek-safety-check') {
-                        if (typeof body.enabled !== 'boolean')
-                            throw new Error('安全审核开关必须是布尔值');
-                        state.deepseekSafetyCheck = body.enabled;
+                        const level = body.level;
+                        if (level !== 'omit' && level !== 'low' && level !== 'high')
+                            throw new Error('请选择不传、low 或 high');
+                        state.deepseekSafetyCheck = level;
                         state.revision++;
-                        return { revision: state.revision, enabled: state.deepseekSafetyCheck };
+                        return { revision: state.revision, level };
                     }
                     if (body.action === 'set-default') {
                         const record = state.presets.find(p => p.id === body.id);

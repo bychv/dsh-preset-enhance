@@ -60,7 +60,7 @@ import type {
   SessionLike, StreamOptions, ToolExecution, ToolSchemaRow,
 } from './host-types.mjs';
 import type {
-  CompiledPreset, PresetBinding, PresetRecord, PresetState, SessionCompilation,
+  CompiledPreset, DeepSeekSafetyCheckLevel, PresetBinding, PresetRecord, PresetState, SessionCompilation,
   PromptRegexTarget, ToolCatalogMap, ToolCatalogRow, ToolPolicy, ToolPreset, ToolPresetDraft, ToolSelection,
 } from './lib/types.mjs';
 
@@ -160,7 +160,7 @@ function degradedPayload(reason: string): Record<string, unknown> {
     modeDefaultPresets: {},
     postToolPrefixMode: 'inherit',
     postToolPrefixText: '',
-    deepseekSafetyCheck: false,
+    deepseekSafetyCheck: 'omit',
     deepseekBetaPrefix: false,
     prefixToolCalls: false,
     prefixOutputExtraction: false,
@@ -304,7 +304,7 @@ const chatConnection = () => {
   }
 
   let policySnapshot = toolPolicySnapshot();
-  let deepseekSafetyCheck = false;
+  let deepseekSafetyCheck: DeepSeekSafetyCheckLevel = 'omit';
   if (!startupError) {
     try {
       const state = await store.read();
@@ -1241,10 +1241,11 @@ const chatConnection = () => {
             return { id: fallback?.id ?? null };
           }
           if (body.action === 'set-deepseek-safety-check') {
-            if (typeof body.enabled !== 'boolean') throw new Error('安全审核开关必须是布尔值');
-            state.deepseekSafetyCheck = body.enabled;
+            const level = body.level;
+            if (level !== 'omit' && level !== 'low' && level !== 'high') throw new Error('请选择不传、low 或 high');
+            state.deepseekSafetyCheck = level;
             state.revision++;
-            return { revision: state.revision, enabled: state.deepseekSafetyCheck };
+            return { revision: state.revision, level };
           }
           if (body.action === 'set-default') {
             const record = state.presets.find(p => p.id === body.id);
