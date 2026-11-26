@@ -704,8 +704,16 @@ test('mode defaults and picker writes resolve the first request independently pe
     await select('missing', 'C', 400);
     await select('standard', 'C');
     assert.equal(await send('standard'), 'Opening C');
+    assert.equal(await send('standard'), 'Opening C');
+    const retained = sessions.get('standard');
+    sessions.delete('standard');
+    assert.equal((await readPicker('standard')).presetId, 'C', 'a saved binding remains visible when the host temporarily releases the session');
+    sessions.set('standard', retained);
     assert.equal(await send('fresh'), 'Opening A');
     assert.equal(await send('custom'), 'hi');
+    await select('custom', 'B');
+    assert.equal(await send('custom'), 'Opening B');
+    assert.equal(await send('custom'), 'Opening B');
     assert.equal((await store.read()).selectedPresetId, 'A');
     await select('standard', null);
     assert.equal(await send('standard'), 'Opening B');

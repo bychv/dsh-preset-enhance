@@ -44,9 +44,11 @@
   list-style: none;
 }
 .dsh-preset-picker-list:empty { display: none; }
-.dsh-preset-picker-list li { min-width: 0; }
-.dsh-preset-picker-list button {
-  width: 100%;
+.dsh-preset-picker-list li { display: flex; gap: 4px; min-width: 0; }
+.dsh-preset-picker-list button { flex: none; }
+.dsh-preset-picker-list .dsh-preset-picker-choice {
+  flex: 1 1 auto;
+  min-width: 0;
   justify-content: space-between;
   text-align: left;
 }

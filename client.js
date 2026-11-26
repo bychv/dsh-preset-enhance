@@ -297,8 +297,18 @@ window.__ModuleLoader__.load({
             }
             const h = React.createElement;
             return h('section', { className: 'dsh-preset-picker', 'aria-label': '预设选择' }, h('div', { className: 'dsh-preset-picker-header' }, h('div', { className: 'dsh-preset-picker-current' }, h('strong', { title: active?.name }, active?.name ?? (data ? '未选择预设' : '正在加载…')), data && h('small', null, [data.mode, data.explicit ? '本会话' : '默认', data.enabled ? '注入已开启' : '注入已关闭'].filter(Boolean).join(' · '))), h('a', { href: workbenchSrc(sessionId, modeId), target: '_blank', rel: 'noopener' }, '打开工作台')), h(Input, { className: 'dsh-preset-picker-search', value: filter, placeholder: '搜索预设', 'aria-label': '搜索预设',
-                icon: h(IconSearchOutlineRegular, null), onChange: (event) => setFilter(event.currentTarget.value) }), h('ul', { className: 'dsh-preset-picker-list', 'aria-label': '预设列表' }, presets?.map(preset => h('li', { key: preset.id }, h(Button, { variant: 'ghost', size: 'sm', 'aria-pressed': candidate === preset.id,
-                onClick: () => { setSelection({ modeId, id: preset.id }); setNotice(''); } }, h('span', { title: preset.name }, preset.name), preset.id === data?.presetId && h(IconCheckOutlineRegular, { 'aria-label': '当前预设' }))))), presets?.length === 0 && h('small', null, filter.trim() ? '没有匹配的预设' : '尚未导入预设'), h('div', { className: 'dsh-preset-picker-actions' }, h(Button, { variant: 'primary', size: 'sm', disabled: !ready || !preview || !candidate ||
+                icon: h(IconSearchOutlineRegular, null), onChange: (event) => setFilter(event.currentTarget.value) }), h('ul', { className: 'dsh-preset-picker-list', 'aria-label': '预设列表' }, presets?.map(preset => {
+                const active = data?.enabled === true && preset.id === data.presetId;
+                return h('li', { key: preset.id }, h(Button, { className: 'dsh-preset-picker-choice', variant: 'ghost', size: 'sm', 'aria-pressed': active,
+                    disabled: !ready,
+                    onClick: () => {
+                        if (active && data.explicit)
+                            setSelection(null);
+                        else
+                            void save(preset.id);
+                    } }, h('span', { title: preset.name }, preset.name), active && h(IconCheckOutlineRegular, { 'aria-hidden': true })), h(Button, { variant: 'ghost', size: 'sm', 'aria-label': '预览 ' + preset.name, 'aria-pressed': candidate === preset.id,
+                    onClick: () => { setSelection({ modeId, id: preset.id }); setNotice(''); } }, '预览'));
+            })), presets?.length === 0 && h('small', null, filter.trim() ? '没有匹配的预设' : '尚未导入预设'), h('div', { className: 'dsh-preset-picker-actions' }, h(Button, { variant: 'primary', size: 'sm', disabled: !ready || !preview || !candidate ||
                     (data?.explicit && data.enabled && candidate === data.presetId), onClick: () => { if (candidate)
                     void save(candidate); } }, '使用此预设'), h(Button, { variant: 'outline', size: 'sm', disabled: !ready || !data?.explicit, onClick: () => { void save(null); } }, '跟随默认')), (saving || error || notice) && h('p', { role: 'status' }, saving ? '正在应用…' : error || notice), error && h(Button, { size: 'sm', variant: 'outline', onClick: () => setReload(value => value + 1) }, '重试'), preview && h('div', { className: 'dsh-preset-picker-preview' }, h('h2', null, '提示词预览'), preview.prefix && h('small', null, '包含助手预填充'), preview.entries.map((entry, index) => renderPickerEntry(entry, index)), preview.prefixText && renderPickerEntry({ name: '助手预填充', role: 'assistant', enabled: true,
                 marker: false, dynamic: false, depth: null, text: preview.prefixText }, preview.entries.length)));

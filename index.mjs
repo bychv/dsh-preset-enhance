@@ -741,7 +741,7 @@ export async function apply(ctx, config = {}) {
                     if (url.searchParams.has('picker')) {
                         const mode = inputMode || liveMode;
                         const defaultPreset = defaultRecord(state, mode);
-                        const binding = session ? lastBinding : undefined;
+                        const binding = lastBinding;
                         const presetId = binding?.presetId || defaultPreset?.id || null;
                         const picked = state.presets.find(record => record.id === (url.searchParams.get('presetId') ?? presetId));
                         const automatic = session && mode === sessionModeId(session)

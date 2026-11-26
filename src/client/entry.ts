@@ -332,10 +332,19 @@ type PickerData = {
           h('a', { href: workbenchSrc(sessionId, modeId), target: '_blank', rel: 'noopener' }, '打开工作台')),
         h(Input, { className: 'dsh-preset-picker-search', value: filter, placeholder: '搜索预设', 'aria-label': '搜索预设',
           icon: h(IconSearchOutlineRegular, null), onChange: (event: {currentTarget: HTMLInputElement}) => setFilter(event.currentTarget.value) }),
-        h('ul', { className: 'dsh-preset-picker-list', 'aria-label': '预设列表' }, presets?.map(preset =>
-          h('li', { key: preset.id }, h(Button, { variant: 'ghost', size: 'sm', 'aria-pressed': candidate === preset.id,
-            onClick: () => { setSelection({ modeId, id: preset.id }); setNotice(''); } },
-          h('span', { title: preset.name }, preset.name), preset.id === data?.presetId && h(IconCheckOutlineRegular, { 'aria-label': '当前预设' }))))),
+        h('ul', { className: 'dsh-preset-picker-list', 'aria-label': '预设列表' }, presets?.map(preset => {
+          const active = data?.enabled === true && preset.id === data.presetId;
+          return h('li', { key: preset.id },
+            h(Button, { className: 'dsh-preset-picker-choice', variant: 'ghost', size: 'sm', 'aria-pressed': active,
+              disabled: !ready,
+              onClick: () => {
+                if (active && data.explicit) setSelection(null);
+                else void save(preset.id);
+              } },
+            h('span', { title: preset.name }, preset.name), active && h(IconCheckOutlineRegular, { 'aria-hidden': true })),
+            h(Button, { variant: 'ghost', size: 'sm', 'aria-label': '预览 ' + preset.name, 'aria-pressed': candidate === preset.id,
+              onClick: () => { setSelection({ modeId, id: preset.id }); setNotice(''); } }, '预览'));
+        })),
         presets?.length === 0 && h('small', null, filter.trim() ? '没有匹配的预设' : '尚未导入预设'),
         h('div', { className: 'dsh-preset-picker-actions' },
           h(Button, { variant: 'primary', size: 'sm', disabled: !ready || !preview || !candidate ||
