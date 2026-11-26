@@ -10,7 +10,7 @@
 - **预填充与工具**：Assistant 前缀续写、DSML 转换、实验性正文提取、逐工具开关与分组。
 - **插件接入**：动态模板、酒馆 marker 关联、历史消息处理与预设只读 API。
 
-> **0.3.7-rc.2** 支持 DSH **0.2.1 和 0.2.2**。当前源码新增 DSH **0.2.3-alpha.2** 适配。详见[兼容记录](docs/README.md#兼容与验证记录)。
+> **0.3.7-rc.2** 支持 DSH **0.2.1 和 0.2.2**。**0.3.8-alpha.1** 增加对 DSH **0.2.3-alpha.2 起的 0.2.3 系列**的支持。详见[兼容记录](docs/README.md#兼容与验证记录)。
 
 ## 安装与升级
 
@@ -40,6 +40,6 @@
 | 外部插件与内部 agent 接入 | [模板 API](docs/api/TEMPLATE_API.md) · [只读 API](docs/api/PRESET_READ_API.md) |
 | 架构与开发 | [插件架构](docs/ARCHITECTURE.md) · [开发验证](docs/DEVELOPMENT.md) |
 
-文档对应 0.3.7-rc.2，包含外部动态预填充和纯正文历史接口。完整索引及兼容记录见[文档导航](docs/README.md)。
+文档对应当前源码。完整索引及各版本兼容记录见[文档导航](docs/README.md)。
 
 [MIT 许可证](LICENSE)
