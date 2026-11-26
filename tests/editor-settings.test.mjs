@@ -220,6 +220,8 @@ test('workbench exposes light mode tokens and workspace tabs in html/css', () =>
   const css = readFileSync(new URL('../web/editor.css', import.meta.url), 'utf8');
   const html = readFileSync(new URL('../web/index.html', import.meta.url), 'utf8');
   assert.match(css, /@media\s*\(prefers-color-scheme:\s*light\)/);
+  assert.match(css, /\.connection-switch-side\s*\{[^}]*white-space:\s*normal/);
+  assert.doesNotMatch(css, /\.connection-switch-side\s*\{[^}]*max-width:\s*280px/);
   assert.match(html, /id="workbench-tabs"/);
   assert.match(html, /id="tool-search"/);
   assert.match(html, /id="prompt-duplicate"/);

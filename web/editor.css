@@ -280,12 +280,11 @@ textarea.is-invalid { border-color: var(--danger); box-shadow: 0 0 0 3px var(--d
   margin: 0 0 12px;
 }
 .connection-main { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; min-width: 0; flex: 1 1 420px; }
-.connection-select-title { display: flex; align-items: baseline; gap: 8px; margin: 0; color: var(--heading); font-size: 13px; font-weight: 650; }
-.connection-switch { display: flex; align-items: center; gap: 10px; margin: 0; }
-.connection-switch-side { flex: 0 1 auto; max-width: 280px; background: none; border: 0; padding: 2px 4px; border-radius: 6px; color: var(--text-muted); font: inherit; font-size: 12.5px; line-height: 1.35; text-align: left; cursor: pointer; transition: color .15s, background .15s; }
+.connection-select-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 8px; margin: 0; min-width: 0; color: var(--heading); font-size: 13px; font-weight: 650; overflow-wrap: anywhere; }
+.connection-switch { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 0; min-width: 0; max-width: 100%; }
+.connection-switch-side { flex: 0 1 auto; min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; background: none; border: 0; padding: 3px 7px; border-radius: 6px; color: var(--text-muted); font: inherit; font-size: 12.5px; line-height: 1.35; text-align: left; cursor: pointer; transition: color .15s, background .15s; }
 .connection-switch-side:hover:not(:disabled) { background: var(--bg-hover); color: var(--text); }
-.connection-switch-side:last-child { text-align: right; }
-.connection-switch-side[aria-pressed="true"] { color: var(--text-strong); font-weight: 650; }
+.connection-switch-side[aria-pressed="true"] { color: var(--text-strong); font-weight: 600; background: var(--bg-active); }
 .connection-switch-side:disabled { opacity: .55; cursor: not-allowed; }
 .connection-switch-track { position: relative; flex: 0 0 48px; height: 24px; border-radius: 999px; border: 1px solid var(--switch-border); background: var(--bg-track); padding: 0; cursor: pointer; transition: background .18s, border-color .18s; }
 .connection-switch-track:disabled { opacity: .55; cursor: not-allowed; }
@@ -293,7 +292,7 @@ textarea.is-invalid { border-color: var(--danger); box-shadow: 0 0 0 3px var(--d
 .connection-switch[data-side="left"] .connection-switch-knob { background: var(--conn-active); }
 .connection-switch[data-side="right"] .connection-switch-knob { left: 27px; background: var(--conn-active); }
 .connection-switch[data-side="none"] .connection-switch-knob { background: var(--conn-knob); }
-#connection-note { margin: 0; }
+#connection-note { margin: 0; min-width: 0; overflow-wrap: anywhere; }
 .connection-safety { margin: 0; flex: 0 1 auto; }
 .connection-safety select { padding: 5px 8px; font-size: 12px; }
 

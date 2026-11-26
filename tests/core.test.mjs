@@ -1833,3 +1833,137 @@ test('prompt regex never rewrites a compaction checkpoint', () => {
   // The user's own message may be rewritten; the checkpoint's copy must remain intact.
   assert.equal(serialized.includes('摘要正文'), true, 'the checkpoint text survives');
 });
+
+test('picker can toggle prompt entries and apply quick inline edits with validation and version guards', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-picker-inline-'));
+  const file = join(dir, 'state.json');
+  const store = new PresetStore(file);
+  const listeners = {};
+  const calls = [];
+  const session = { id: 's1', header: { agentPreset: 'standard' } };
+  const disposers = [];
+  let api;
+  const ctx = {
+    sessions: { get: id => id === 's1' ? session : undefined },
+    agentPresets: { list: async () => [{ id: 'standard', name: 'Standard' }] },
+    on: (name, fn) => { listeners[name] = fn; },
+    effect(setup) { const dispose = setup(); if (typeof dispose === 'function') disposers.push(dispose); },
+    webServer: { register(definition) {
+      if (definition.path === '/preset-enhance/api') api = definition.handler;
+      return () => {};
+    } },
+    llm: { stream: options => listeners['llm/stream'](options, async function* () { calls.push(options); }) },
+  };
+  try {
+    await store.transaction(state => {
+      state.selectedPresetId = 'p1';
+      state.autoEnableModes.push('standard');
+      state.presets = [{
+        id: 'p1',
+        name: 'Quick Edit Preset',
+        editVersion: 'v1',
+        preset: {
+          assistant_prefill: '起始前缀',
+          prompts: [
+            { identifier: 'sys1', name: '主系统', role: 'system', content: '初始指令', injection_position: 0, injection_depth: 4, injection_order: 100 },
+            { identifier: 'note1', name: '用户备注', role: 'user', content: '附带图', contextFiles: [{ kind: 'image', name: 'img.png', mediaType: 'image/png', data: 'AQID', size: 3 }] },
+            { identifier: 'worldInfoBefore', name: '世界书前', role: 'system', marker: true },
+            { identifier: 'chatHistory', name: '聊天记录', role: 'user', marker: true },
+          ],
+          prompt_order: [{
+            character_id: 100001,
+            order: [
+              { identifier: 'sys1', enabled: true },
+              { identifier: 'note1', enabled: true },
+              { identifier: 'worldInfoBefore', enabled: true },
+              { identifier: 'chatHistory', enabled: true },
+            ],
+          }],
+        },
+      }];
+    });
+    await apply(ctx, { dataFile: file, agentPresetRoot: join(dir, 'modes') });
+    const request = async (query = '', body, expected = 200) => {
+      const req = Readable.from(body ? [JSON.stringify({ revision: (await store.read()).revision, ...body })] : []);
+      Object.assign(req, { url: '/preset-enhance/api' + query, method: body ? 'POST' : 'GET',
+        headers: { 'content-type': 'application/json', host: 'localhost' } });
+      let status, result;
+      await api(req, { writeHead: code => { status = code; }, end: value => { result = JSON.parse(String(value)); } });
+      assert.equal(status, expected, result?.error);
+      return result;
+    };
+    const initial = await request('?picker&sessionId=s1');
+    assert.equal(initial.preview.editVersion, 'v1');
+    assert.equal(initial.preview.characterId, '100001');
+    const sysMeta = initial.preview.entries.find(e => e.identifier === 'sys1');
+    assert.equal(sysMeta.canToggle, true);
+    assert.equal(sysMeta.canEdit, true);
+    assert.equal(sysMeta.rawContent, '初始指令');
+    assert.equal(initial.preview.entries.find(e => e.identifier === 'chatHistory').canEdit, false);
+    assert.equal(initial.preview.entries.find(e => e.identifier === 'note1').canEditRole, false);
+
+    // Reject stale version, marker edits, and invalid role changes for entries with context files.
+    await request('', { action: 'picker-update-prompt', sessionId: 's1', presetId: 'p1', baseVersion: 'stale', identifier: 'sys1', enabled: false }, 400);
+    await request('', { action: 'picker-update-prompt', sessionId: 's1', presetId: 'p1', baseVersion: 'v1', identifier: 'chatHistory', patch: { content: 'bad' } }, 400);
+    await request('', { action: 'picker-update-prompt', sessionId: 's1', presetId: 'p1', baseVersion: 'v1', identifier: 'worldInfoBefore', patch: { content: 'bad' } }, 400);
+    await request('', { action: 'picker-update-prompt', sessionId: 's1', presetId: 'p1', baseVersion: 'v1', identifier: 'note1', patch: { role: 'system' } }, 400);
+
+    // Inline edit sys1 name, role, depth position, and content.
+    const edited = await request('', {
+      action: 'picker-update-prompt',
+      sessionId: 's1',
+      presetId: 'p1',
+      baseVersion: 'v1',
+      characterId: '100001',
+      identifier: 'sys1',
+      patch: { name: '新系统名', role: 'user', injection_position: 1, injection_depth: 0, injection_order: 12, content: '更新后指令' },
+    });
+    assert.notEqual(edited.editVersion, 'v1');
+    const updatedSys = edited.preview.entries.find(e => e.identifier === 'sys1');
+    assert.equal(updatedSys.name, '新系统名');
+    assert.equal(updatedSys.role, 'user');
+    assert.equal(updatedSys.depth, 0);
+    assert.equal(updatedSys.text, '更新后指令');
+
+    // Toggle sys1 off and back on, verifying next compiled stream respects it.
+    const disabled = await request('', {
+      action: 'picker-update-prompt',
+      sessionId: 's1',
+      presetId: 'p1',
+      baseVersion: edited.editVersion,
+      characterId: '100001',
+      identifier: 'sys1',
+      enabled: false,
+    });
+    assert.equal(disabled.preview.entries.find(e => e.identifier === 'sys1').enabled, false);
+    for await (const _ of ctx.llm.stream({ sessionId: 's1', provider: 'mock', model: 'mock', messages: [msg('u', 'user', 'hi')] })) {}
+    assert.equal(JSON.stringify(calls.at(-1).messages).includes('更新后指令'), false);
+
+    const reenabled = await request('', {
+      action: 'picker-update-prompt',
+      sessionId: 's1',
+      presetId: 'p1',
+      baseVersion: disabled.editVersion,
+      characterId: '100001',
+      identifier: 'sys1',
+      enabled: true,
+    });
+    assert.equal(reenabled.preview.entries.find(e => e.identifier === 'sys1').enabled, true);
+    for await (const _ of ctx.llm.stream({ sessionId: 's1', provider: 'mock', model: 'mock', messages: [msg('u', 'user', 'hi')] })) {}
+    assert.equal(JSON.stringify(calls.at(-1).messages).includes('更新后指令'), true);
+
+    // Edit assistant_prefill via kind: 'prefill'.
+    const prefillEdited = await request('', {
+      action: 'picker-update-prompt',
+      sessionId: 's1',
+      presetId: 'p1',
+      baseVersion: reenabled.editVersion,
+      kind: 'prefill',
+      content: '新前缀：',
+    });
+    assert.equal(prefillEdited.preview.prefixText, '新前缀：');
+  } finally {
+    await Promise.all(disposers.map(dispose => dispose()));
+    await rm(dir, { recursive: true, force: true });
+  }
+});

@@ -216,6 +216,21 @@ window.__ModuleLoader__.load({
             width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8,
             strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true,
         }, React.createElement('path', { d: 'M5 4h14v16H5z' }), React.createElement('path', { d: 'M8 8h8M8 12h5M8 16h8' }), React.createElement('path', { d: 'M16 11v4M14 13h4' }));
+        const EditIcon = ({ size = 13 }) => React.createElement('svg', {
+            width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.9,
+            strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true,
+        }, React.createElement('path', { d: 'M12 20h9' }), React.createElement('path', { d: 'M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z' }));
+        const ChevronIcon = ({ size = 12 }) => React.createElement('svg', {
+            className: 'dsh-preset-picker-chevron', width: size, height: size, viewBox: '0 0 24 24', fill: 'none',
+            stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true,
+        }, React.createElement('path', { d: 'm9 18 6-6-6-6' }));
+        function notifyAllFrames() {
+            for (const entries of keptFrames.values()) {
+                for (const record of entries) {
+                    record.element.contentWindow?.postMessage({ type: 'preset-enhance:binding-changed' }, window.location.origin);
+                }
+            }
+        }
         function PresetPicker({ sessionId, openWorkbench }) {
             const modeId = useInputMode(sessionId);
             const [filter, setFilter] = React.useState('');
@@ -225,6 +240,9 @@ window.__ModuleLoader__.load({
             const [readError, setReadError] = React.useState(null);
             const [notice, setNotice] = React.useState('');
             const [saving, setSaving] = React.useState(false);
+            const [expanded, setExpanded] = React.useState({});
+            const [editing, setEditing] = React.useState(null);
+            const [busyEntry, setBusyEntry] = React.useState(null);
             const pendingSave = React.useRef(false);
             const selectedId = selection?.modeId === modeId ? selection.id : '';
             const query = new URLSearchParams({ picker: '', sessionId, modeId, ...(selectedId ? { presetId: selectedId } : {}) });
@@ -262,6 +280,11 @@ window.__ModuleLoader__.load({
             const previewPreset = data?.presets.find(preset => preset.id === candidate);
             const presets = data?.presets.filter(preset => preset.name.toLocaleLowerCase().includes(filter.trim().toLocaleLowerCase()));
             const preview = snapshot?.key === key ? data?.preview : null;
+            const previewId = preview?.id ?? '';
+            React.useEffect(() => {
+                setExpanded({});
+                setEditing(null);
+            }, [previewId]);
             async function save(presetId) {
                 if (!ready || !data || pendingSave.current)
                     return;
@@ -299,7 +322,238 @@ window.__ModuleLoader__.load({
                     setSaving(false);
                 }
             }
+            async function mutatePrompt(entryKey, payload, successMessage) {
+                if (!data || !preview || pendingSave.current)
+                    return false;
+                pendingSave.current = true;
+                setBusyEntry(entryKey);
+                setNotice('');
+                const blocks = composerBlocks;
+                const block = { reason: '正在更新预设…' };
+                try {
+                    if (sessionId && blocks && !blocks.storeFor(sessionId).getSnapshot())
+                        blocks.set(sessionId, block);
+                    const response = await fetch('/preset-enhance/api', {
+                        method: 'POST', headers: { 'content-type': 'application/json' },
+                        body: JSON.stringify({
+                            action: 'picker-update-prompt',
+                            sessionId,
+                            presetId: preview.id,
+                            baseVersion: preview.editVersion,
+                            characterId: preview.characterId,
+                            revision: data.revision,
+                            ...payload,
+                        }),
+                    });
+                    const result = await response.json();
+                    if (!response.ok)
+                        throw Error(result.error || '更新提示词失败');
+                    setSnapshot(current => current && current.key === key
+                        ? { ...current, data: { ...current.data, revision: result.revision, preview: result.preview } }
+                        : current);
+                    notifyAllFrames();
+                    setNotice(successMessage);
+                    return true;
+                }
+                catch (cause) {
+                    setNotice(cause.message);
+                    setReload(value => value + 1);
+                    return false;
+                }
+                finally {
+                    if (sessionId && blocks?.storeFor(sessionId).getSnapshot() === block)
+                        blocks.set(sessionId);
+                    pendingSave.current = false;
+                    setBusyEntry(null);
+                }
+            }
+            const enabledCount = preview ? preview.entries.filter(entry => entry.enabled).length : 0;
             const h = React.createElement;
+            const startEdit = (entry, entryKey, kind) => {
+                if (editing?.key === entryKey) {
+                    setEditing(null);
+                    return;
+                }
+                setExpanded(current => ({ ...current, [entryKey]: true }));
+                setEditing({
+                    key: entryKey,
+                    kind,
+                    identifier: entry.identifier,
+                    name: kind === 'prefill' ? entry.name : entry.rawName || entry.name,
+                    role: entry.role || 'system',
+                    position: entry.position === 1 ? 1 : 0,
+                    depth: String(entry.injectionDepth ?? 4),
+                    order: String(entry.injectionOrder ?? 100),
+                    content: entry.rawContent ?? entry.text ?? '',
+                    canEditRole: entry.canEditRole,
+                    canEditPosition: entry.canEditPosition,
+                });
+                setNotice('');
+            };
+            const saveEdit = async () => {
+                if (!editing)
+                    return;
+                if (editing.kind === 'prefill') {
+                    const ok = await mutatePrompt(editing.key, { kind: 'prefill', content: editing.content }, '已保存助手预填充');
+                    if (ok)
+                        setEditing(null);
+                    return;
+                }
+                const patch = {
+                    name: editing.name,
+                    content: editing.content,
+                };
+                if (editing.canEditRole)
+                    patch.role = editing.role;
+                if (editing.canEditPosition) {
+                    patch.injection_position = editing.position;
+                    if (editing.position === 1) {
+                        const depth = Number(editing.depth.trim());
+                        const order = Number(editing.order.trim());
+                        if (!Number.isInteger(depth) || depth < 0) {
+                            setNotice('深度必须是非负整数');
+                            return;
+                        }
+                        if (!Number.isInteger(order)) {
+                            setNotice('同深度顺序必须是整数');
+                            return;
+                        }
+                        patch.injection_depth = depth;
+                        patch.injection_order = order;
+                    }
+                }
+                const ok = await mutatePrompt(editing.key, {
+                    kind: 'prompt',
+                    identifier: editing.identifier,
+                    patch,
+                }, '已保存条目修改');
+                if (ok)
+                    setEditing(null);
+            };
+            const renderManagedEntry = (entry, entryKey, kind) => {
+                const isExpanded = Boolean(expanded[entryKey]);
+                const isEditing = editing?.key === entryKey;
+                const isBusy = busyEntry !== null || saving;
+                const role = { system: '系统', user: '用户', assistant: '助手', model: '模型' }[entry.role] ?? entry.role;
+                const meta = [role, entry.dynamic ? '动态模板' : entry.marker ? '标记' : '',
+                    entry.depth === null ? '' : `深度 ${entry.depth}`].filter(Boolean).join(' · ');
+                return h('div', {
+                    key: entryKey,
+                    className: 'dsh-preset-picker-entry',
+                    'data-enabled': String(entry.enabled),
+                    'data-expanded': isExpanded || isEditing ? 'true' : undefined,
+                    'data-editing': isEditing ? 'true' : undefined,
+                }, h('div', { className: 'dsh-preset-picker-entry-head' }, h('button', {
+                    type: 'button',
+                    className: 'dsh-preset-picker-entry-trigger',
+                    'aria-expanded': isExpanded || isEditing,
+                    onClick: () => {
+                        if (isEditing)
+                            return;
+                        setExpanded(current => ({ ...current, [entryKey]: !current[entryKey] }));
+                    },
+                }, h(ChevronIcon, null), h('span', { className: 'dsh-preset-picker-entry-info' }, h('span', { className: 'dsh-preset-picker-entry-title', title: entry.name }, entry.name), meta && h('small', { className: 'dsh-preset-picker-entry-meta' }, meta))), h('div', { className: 'dsh-preset-picker-entry-controls' }, entry.canEdit && h('button', {
+                    type: 'button',
+                    className: 'dsh-preset-picker-edit-btn',
+                    'aria-label': '编辑 ' + entry.name,
+                    title: '简易编辑',
+                    'aria-pressed': isEditing,
+                    disabled: isBusy,
+                    onClick: (event) => {
+                        event.stopPropagation();
+                        startEdit(entry, entryKey, kind);
+                    },
+                }, h(EditIcon, null)), entry.canToggle && h('button', {
+                    type: 'button',
+                    role: 'switch',
+                    className: 'dsh-preset-picker-switch',
+                    'aria-checked': entry.enabled,
+                    'aria-label': (entry.enabled ? '停用 ' : '启用 ') + entry.name,
+                    title: entry.enabled ? '已启用（点击停用）' : '已停用（点击启用）',
+                    disabled: isBusy,
+                    onClick: (event) => {
+                        event.stopPropagation();
+                        void mutatePrompt(entryKey, {
+                            kind: 'prompt',
+                            identifier: entry.identifier,
+                            enabled: !entry.enabled,
+                        }, entry.enabled ? `已停用「${entry.name}」` : `已启用「${entry.name}」`);
+                    },
+                }, h('span', { className: 'dsh-preset-picker-switch-knob' })))), (isExpanded || isEditing) && h('div', { className: 'dsh-preset-picker-entry-body' }, isEditing && editing
+                    ? h('div', {
+                        className: 'dsh-preset-picker-editor',
+                        onKeyDown: (event) => {
+                            if (event.key === 'Escape') {
+                                event.preventDefault();
+                                setEditing(null);
+                            }
+                            else if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+                                event.preventDefault();
+                                void saveEdit();
+                            }
+                        },
+                    }, kind === 'prompt' && h('label', { className: 'dsh-preset-picker-field' }, h('span', null, '名称'), h('input', {
+                        type: 'text',
+                        value: editing.name,
+                        disabled: isBusy,
+                        onChange: (event) => {
+                            const value = event.currentTarget.value;
+                            setEditing(current => current ? { ...current, name: value } : current);
+                        },
+                    })), kind === 'prompt' && h('div', { className: 'dsh-preset-picker-editor-grid' }, h('label', { className: 'dsh-preset-picker-field' }, h('span', null, '角色'), h('select', {
+                        value: editing.role,
+                        disabled: !editing.canEditRole || isBusy,
+                        title: entry.hasContextFiles ? '带上下文文件的条目必须使用 user 角色' : undefined,
+                        onChange: (event) => {
+                            const value = event.currentTarget.value;
+                            setEditing(current => current ? { ...current, role: value } : current);
+                        },
+                    }, h('option', { value: 'system' }, 'system'), h('option', { value: 'user' }, 'user'), h('option', { value: 'assistant' }, 'assistant'), h('option', { value: 'model' }, 'model'))), h('label', { className: 'dsh-preset-picker-field' }, h('span', null, '位置'), h('select', {
+                        value: String(editing.position),
+                        disabled: !editing.canEditPosition || isBusy,
+                        onChange: (event) => {
+                            const value = event.currentTarget.value === '1' ? 1 : 0;
+                            setEditing(current => current ? { ...current, position: value } : current);
+                        },
+                    }, h('option', { value: '0' }, '按顺序表'), h('option', { value: '1' }, '按聊天深度')))), kind === 'prompt' && editing.position === 1 && editing.canEditPosition && h('div', { className: 'dsh-preset-picker-editor-grid' }, h('label', { className: 'dsh-preset-picker-field' }, h('span', null, '深度'), h('input', {
+                        type: 'number',
+                        min: 0,
+                        value: editing.depth,
+                        disabled: isBusy,
+                        onChange: (event) => {
+                            const value = event.currentTarget.value;
+                            setEditing(current => current ? { ...current, depth: value } : current);
+                        },
+                    })), h('label', { className: 'dsh-preset-picker-field' }, h('span', null, '同深度顺序'), h('input', {
+                        type: 'number',
+                        value: editing.order,
+                        disabled: isBusy,
+                        onChange: (event) => {
+                            const value = event.currentTarget.value;
+                            setEditing(current => current ? { ...current, order: value } : current);
+                        },
+                    }))), h('label', { className: 'dsh-preset-picker-field' }, h('span', null, kind === 'prefill' ? '助手预填充正文' : '提示词正文'), h('textarea', {
+                        rows: 7,
+                        spellCheck: false,
+                        value: editing.content,
+                        disabled: isBusy,
+                        onChange: (event) => {
+                            const value = event.currentTarget.value;
+                            setEditing(current => current ? { ...current, content: value } : current);
+                        },
+                    })), h('div', { className: 'dsh-preset-picker-editor-footer' }, h('small', null, `${editing.content.length} 字符`), h('div', { className: 'dsh-preset-picker-editor-actions' }, h(Button, { variant: 'ghost', size: 'sm', disabled: isBusy, onClick: () => setEditing(null) }, '取消'), h(Button, { variant: 'primary', size: 'sm', disabled: isBusy, onClick: () => { void saveEdit(); } }, busyEntry === entryKey ? '保存中…' : '保存'))))
+                    : [
+                        h('pre', { key: 'pre' }, entry.text || (entry.marker ? '运行时读取' : '空正文')),
+                        h('div', { key: 'foot', className: 'dsh-preset-picker-entry-foot' }, entry.canEdit
+                            ? h('button', {
+                                type: 'button',
+                                className: 'dsh-preset-picker-inline-link',
+                                disabled: isBusy,
+                                onClick: () => startEdit(entry, entryKey, kind),
+                            }, '简易编辑')
+                            : entry.readOnlyReason ? h('small', null, entry.readOnlyReason) : null),
+                    ]));
+            };
             return h('section', { className: 'dsh-preset-picker' + (preview ? ' has-preview' : ''), 'aria-label': '预设选择' }, h('div', { className: 'dsh-preset-picker-header' }, h('div', { className: 'dsh-preset-picker-current' }, h('strong', { title: active?.name }, active?.name ?? (data ? '未选择预设' : '正在加载…')), data && h('small', null, [data.mode, data.explicit ? '本会话' : '默认', data.enabled ? '注入已开启' : '注入已关闭'].filter(Boolean).join(' · '))), h(Button, { variant: 'ghost', size: 'sm', onClick: openWorkbench }, '打开工作台')), h(Input, { className: 'dsh-preset-picker-search', value: filter, placeholder: '搜索预设', 'aria-label': '搜索预设',
                 icon: h(IconSearchOutlineRegular, null), onChange: (event) => setFilter(event.currentTarget.value) }), h('ul', { className: 'dsh-preset-picker-list', 'aria-label': '预设列表' }, presets?.map(preset => {
                 const isActive = data?.enabled === true && preset.id === data.presetId;
@@ -315,15 +569,28 @@ window.__ModuleLoader__.load({
                     onClick: () => { setSelection({ modeId, id: preset.id }); setNotice(''); } }, '预览'));
             })), presets?.length === 0 && h('small', null, filter.trim() ? '没有匹配的预设' : '尚未导入预设'), h('div', { className: 'dsh-preset-picker-actions' }, h(Button, { variant: 'primary', size: 'sm', disabled: !ready || !preview || !candidate ||
                     (data?.explicit && data.enabled && candidate === data.presetId), onClick: () => { if (candidate)
-                    void save(candidate); } }, '使用此预设'), h(Button, { variant: 'outline', size: 'sm', disabled: !ready || !data?.explicit, onClick: () => { void save(null); } }, '跟随默认')), (saving || error || notice) && h('p', { role: 'status' }, saving ? '正在应用…' : error || notice), error && h(Button, { size: 'sm', variant: 'outline', onClick: () => setReload(value => value + 1) }, '重试'), preview && h('div', { className: 'dsh-preset-picker-preview' }, h('h2', null, previewPreset?.name ? `提示词预览 · ${previewPreset.name}` : '提示词预览'), preview.prefix && h('small', null, '包含助手预填充'), preview.entries.map((entry, index) => renderPickerEntry(entry, index)), preview.prefixText && renderPickerEntry({ name: '助手预填充', role: 'assistant', enabled: true,
-                marker: false, dynamic: false, depth: null, text: preview.prefixText }, preview.entries.length)));
-        }
-        function renderPickerEntry(entry, index) {
-            const h = React.createElement;
-            const role = { system: '系统', user: '用户', assistant: '助手' }[entry.role] ?? entry.role;
-            const meta = [role, entry.enabled ? '' : '停用', entry.dynamic ? '动态模板' : entry.marker ? '标记' : '',
-                entry.depth === null ? '' : `深度 ${entry.depth}`].filter(Boolean).join(' · ');
-            return h('details', { key: index }, h('summary', null, h('span', null, entry.name), h('small', null, meta)), h('pre', null, entry.text || (entry.marker ? '运行时读取' : '空正文')));
+                    void save(candidate); } }, '使用此预设'), h(Button, { variant: 'outline', size: 'sm', disabled: !ready || !data?.explicit, onClick: () => { void save(null); } }, '跟随默认')), (saving || error || notice) && h('p', { role: 'status' }, saving ? '正在应用…' : error || notice), error && h(Button, { size: 'sm', variant: 'outline', onClick: () => setReload(value => value + 1) }, '重试'), preview && h('div', { className: 'dsh-preset-picker-preview' }, h('div', { className: 'dsh-preset-picker-preview-head' }, h('h2', null, previewPreset?.name ? `提示词预览 · ${previewPreset.name}` : '提示词预览'), h('span', { className: 'dsh-preset-picker-count' }, `已启用 ${enabledCount} / ${preview.entries.length}`)), preview.prefix && h('small', null, '包含助手预填充'), preview.entries.map((entry, index) => renderManagedEntry(entry, `prompt:${entry.identifier || index}`, 'prompt')), preview.prefixText && renderManagedEntry({
+                identifier: '__assistant_prefill__',
+                name: '助手预填充',
+                rawName: '助手预填充',
+                role: 'assistant',
+                enabled: true,
+                marker: false,
+                dynamic: false,
+                linked: false,
+                position: 0,
+                depth: null,
+                injectionDepth: 4,
+                injectionOrder: 100,
+                hasContextFiles: false,
+                canToggle: false,
+                canEdit: true,
+                canEditRole: false,
+                canEditPosition: false,
+                readOnlyReason: '',
+                rawContent: preview.prefixText,
+                text: preview.prefixText,
+            }, 'prefill:__assistant_prefill__', 'prefill')));
         }
         function ComposerPicker({ sidebar, ...props }) {
             const sessionId = props.sessionId ?? props.injected?.sessionId;

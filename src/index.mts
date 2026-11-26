@@ -22,7 +22,7 @@ import { RequestSnapshots, traceRequest, previewMessages, messageOrigins } from 
 import { PRESET_TEMPLATES_SERVICE } from './templates.mjs';
 import { compilePreset, validatePreset, getOrder, dshSystemPromptEnabled, lastContentRole } from './lib/preset.mjs';
 import { materializePresetContext } from './lib/preset-context.mjs';
-import { PRESET_CONTEXT_BLOCK } from './lib/context-files.mjs';
+import { PRESET_CONTEXT_BLOCK, contextFilesOf } from './lib/context-files.mjs';
 import type { ContextAdmission } from './lib/preset-context.mjs';
 import { decodePresetDocument, encodePresetPackage, attachPrefillSettings, applyPackagePrefill, ensurePackageExtractionTemplate } from './lib/preset-package.mjs';
 import {
@@ -1357,6 +1357,75 @@ const chatConnection = () => {
             state.revision++;
             return { revision: state.revision };
           }
+          if (body.action === 'picker-update-prompt') {
+            const presetId = typeof body.presetId === 'string' ? body.presetId : '';
+            const oldIndex = presetId ? state.presets.findIndex(p => p.id === presetId) : -1;
+            if (oldIndex < 0) throw new Error('找不到指定的预设');
+            const old = state.presets[oldIndex];
+            if (body.baseVersion !== undefined && body.baseVersion !== (old.editVersion ?? null)) {
+              throw new Error('当前预设已有其他修改，请刷新后重试');
+            }
+            const nextPreset = structuredClone(old.preset);
+            const templates = templateBindings(nextPreset, templateRegistry.service.list());
+            const kind = body.kind === 'prefill' ? 'prefill' : 'prompt';
+            if (kind === 'prefill') {
+              if (typeof body.content !== 'string') throw new Error('预填充正文必须是文本');
+              nextPreset.assistant_prefill = body.content;
+            } else {
+              const identifier = typeof body.identifier === 'string' ? body.identifier : '';
+              const prompt = nextPreset.prompts.find(p => p.identifier === identifier);
+              if (!prompt) throw new Error('找不到指定的提示词条目');
+              const hasToggle = typeof body.enabled === 'boolean';
+              const hasPatch = body.patch !== undefined && body.patch !== null && typeof body.patch === 'object' && !Array.isArray(body.patch);
+              if (!hasToggle && !hasPatch) throw new Error('缺少要更新的提示词字段');
+              if (hasToggle) {
+                if (!nextPreset.prompt_order?.length) {
+                  nextPreset.prompt_order = [{
+                    character_id: 100001,
+                    order: nextPreset.prompts.map(p => ({ identifier: p.identifier, enabled: p.enabled !== false })),
+                  }];
+                }
+                const characterId = body.characterId === undefined || body.characterId === '' ? null : body.characterId;
+                const group = resolveOrderGroup(nextPreset, characterId);
+                const orderItem = group?.order.find(item => item.identifier === identifier);
+                if (!orderItem) throw new Error('当前顺序表中找不到该提示词条目');
+                orderItem.enabled = body.enabled;
+              }
+              if (hasPatch) {
+                const linked = templates[identifier]?.mode === 'linked' || templates[identifier]?.mode === 'linked-dynamic';
+                if (identifier === 'chatHistory') throw new Error('chatHistory 标记不可编辑正文');
+                if (linked) throw new Error('已关联插件模板的条目请在工作台「插件模板」区管理');
+                if (prompt.marker && identifier !== DYNAMIC_PREFILL_ID) throw new Error('标记条目请在工作台编辑');
+                const patch = body.patch as Record<string, unknown>;
+                if (patch.name !== undefined) {
+                  if (typeof patch.name !== 'string') throw new Error('条目名称必须是文本');
+                  prompt.name = patch.name.slice(0, 200);
+                }
+                if (patch.content !== undefined) {
+                  if (typeof patch.content !== 'string') throw new Error('提示词正文必须是文本');
+                  prompt.content = patch.content;
+                }
+                if (identifier !== DYNAMIC_PREFILL_ID) {
+                  if (patch.role !== undefined) prompt.role = patch.role as typeof prompt.role;
+                  if (patch.injection_position !== undefined) prompt.injection_position = patch.injection_position as number;
+                  if (patch.injection_depth !== undefined) prompt.injection_depth = patch.injection_depth as number;
+                  if (patch.injection_order !== undefined) prompt.injection_order = patch.injection_order as number;
+                }
+              }
+            }
+            validatePreset(nextPreset);
+            const record: PresetRecord = { ...old, editVersion: randomUUID(), preset: nextPreset };
+            state.presets[oldIndex] = record;
+            state.revision++;
+            const sessionId = typeof body.sessionId === 'string' ? body.sessionId : '';
+            const binding = sessionId ? ownGet(state.bindings, sessionId) : undefined;
+            return {
+              revision: state.revision,
+              editVersion: record.editVersion,
+              preview: presetPickerPreview(record, binding?.presetId === record.id ? binding : undefined,
+                templateBindings(record.preset, templateRegistry.service.list())),
+            };
+          }
           if (body.action === 'bind') {
             validateBinding(state, body);
             state.revision++;
@@ -1704,21 +1773,59 @@ function defaultBinding(state: PresetState, modeId?: string): PresetBinding | un
     inherited: true,
   } : undefined;
 }
+function resolveOrderGroup(preset: import('./lib/types.mjs').SillyTavernPreset, characterId?: string | number | null) {
+  const groups = preset.prompt_order ?? [];
+  const chosen = characterId == null
+    ? groups.find(x => String(x.character_id) === '100001') ?? groups[0]
+    : groups.find(x => String(x.character_id) === String(characterId));
+  if (characterId != null && !chosen) throw new Error('所选 prompt_order 不存在');
+  return chosen;
+}
 function presetPickerPreview(record: PresetRecord, binding: PresetBinding | undefined, templates: ReturnType<typeof templateBindings>) {
   const { preset } = record;
   const prompts = new Map(preset.prompts.map(prompt => [prompt.identifier, prompt]));
+  const chosenGroup = resolveOrderGroup(preset, binding?.characterId);
   return {
     id: record.id,
+    editVersion: record.editVersion ?? null,
+    characterId: chosenGroup ? String(chosenGroup.character_id) : null,
     prefix: Boolean(preset.assistant_prefill?.trim() || lastContentRole(preset, binding?.characterId, binding?.markers) === 'assistant'),
     prefixText: preset.assistant_prefill || '',
     entries: getOrder(preset, binding?.characterId).flatMap(({ identifier, enabled }) => {
       const prompt = prompts.get(identifier);
       if (!prompt) return [];
-      return [{ name: prompt.name || identifier, role: prompt.role || 'system', enabled,
-        marker: prompt.marker || identifier === 'chatHistory' || identifier === DYNAMIC_PREFILL_ID,
+      const linked = templates[identifier]?.mode === 'linked' || templates[identifier]?.mode === 'linked-dynamic';
+      const hasContextFiles = contextFilesOf(prompt).length > 0;
+      const canEdit = identifier === DYNAMIC_PREFILL_ID ? true : (!prompt.marker && identifier !== 'chatHistory' && !linked);
+      const readOnlyReason = identifier === 'chatHistory'
+        ? '聊天记录占位标记，不可编辑正文'
+        : linked
+          ? '已关联插件模板，请在工作台「插件模板」区管理'
+          : prompt.marker && identifier !== DYNAMIC_PREFILL_ID
+            ? '标记条目请在工作台编辑'
+            : '';
+      return [{
+        identifier,
+        name: prompt.name || identifier,
+        rawName: prompt.name ?? '',
+        role: prompt.role || 'system',
+        enabled,
+        marker: Boolean(prompt.marker || identifier === 'chatHistory' || identifier === DYNAMIC_PREFILL_ID),
         dynamic: identifier === DYNAMIC_PREFILL_ID || templates[identifier]?.mode === 'linked-dynamic',
+        linked,
+        position: prompt.injection_position === 1 ? 1 : 0,
         depth: prompt.injection_position === 1 ? prompt.injection_depth ?? 0 : null,
-        text: identifier === 'chatHistory' ? '' : binding?.markers?.[identifier] ?? prompt.content ?? '' }];
+        injectionDepth: prompt.injection_depth ?? 4,
+        injectionOrder: prompt.injection_order ?? 100,
+        hasContextFiles,
+        canToggle: true,
+        canEdit,
+        canEditRole: canEdit && identifier !== DYNAMIC_PREFILL_ID && !hasContextFiles,
+        canEditPosition: canEdit && identifier !== DYNAMIC_PREFILL_ID,
+        readOnlyReason,
+        rawContent: prompt.content ?? '',
+        text: identifier === 'chatHistory' ? '' : binding?.markers?.[identifier] ?? prompt.content ?? '',
+      }];
     }),
   };
 }
