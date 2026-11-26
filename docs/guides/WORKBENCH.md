@@ -47,7 +47,7 @@ dsh plugin --profile web add dsh-preset-enhance@0.3.2-rc.2
 
 ## 连接协议与能力范围
 
-在 DSH 左栏打开「插件」，进入「dsh预设增强」详情页。在介绍和组件列表之间填写「模型请求 User-Agent」并保存。该值适用于各适配器经 Fetch 发送的模型请求，包括 DeepSeek 官方接口、插件自带的 Chat 接口和第三方连接。普通请求、预填充和工具续轮均生效，关闭预设注入时也可使用。清空并保存会恢复适配器默认值，改动从下一次模型请求生效。
+在 DSH 左栏打开「插件」，进入「dsh预设增强」详情页。在介绍和组件列表之间填写「模型请求 User-Agent」并保存。该值适用于各适配器经 Fetch 发送的模型请求，包括 DeepSeek 官方接口、插件自带的 Chat 接口和第三方连接。普通请求、预填充和工具续轮均生效，关闭预设注入时也可使用。清空并保存会恢复适配器默认值。点击「恢复继承值」并保存可清除当前配置层的覆盖。改动从下一次模型请求生效。
 
 预设工作台顶部「会话连接」里的「DeepSeek 官方 API 安全审核（全局）」可选「不传（默认）」「low」或「high」，选中后立即保存。该设置适用于发往 `https://api.deepseek.com` 的 Messages、Responses 和 Chat Completions（含 Beta 前缀续写）请求。「不传」会省略 `safety_check`，`low` 和 `high` 则会显式发送相应的 `level`。省略和 `low` 都使用官方默认检查。单独启用 `high` 时，官方接口要求 `tool_choice` 为 `auto` 或 `none`。审核消耗的 Token 计入输出 Token。 [DeepSeek 模型内容安全文档](https://api-docs.deepseek.com/zh-cn/guides/safety/)
 

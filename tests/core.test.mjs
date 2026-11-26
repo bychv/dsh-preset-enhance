@@ -214,8 +214,23 @@ test('client hides conversation width handles locally while keeping sidebar resi
   try {
     await import('../client.js?test=' + Date.now());
     const Button = Symbol('native Button');
+    const SettingsForm = Symbol('native SettingsForm');
+    const SettingsValueField = Symbol('native SettingsValueField');
+    const requestConfigForm = {};
+    class SettingsFormModel {
+      constructor(form, fields) {
+        assert.equal(form, requestConfigForm);
+        assert.equal(fields[0].field, 'requestUserAgent');
+        assert.deepEqual(fields[0].parse(''), { kind: 'set', value: '' });
+        assert.equal(fields[0].parse('无效'), undefined);
+      }
+      shell() { return { available: true, writable: true, saving: false }; }
+      field() { return { text: '', invalid: false, overridden: false }; }
+      bind(read) { return { getSnapshot: read }; }
+      actions() { return {}; }
+    }
     const plugin = definition.factory(name => {
-      if (name === '@deepseek-ai/dsh-client-ui-primitives') return { Button };
+      if (name === '@deepseek-ai/dsh-client-ui-primitives') return { Button, SettingsForm, SettingsValueField, SettingsFormModel };
       assert.equal(name, 'react');
       return {
         createElement: (type, props, ...children) => ({ type, props, children }),
@@ -232,7 +247,6 @@ test('client hides conversation width handles locally while keeping sidebar resi
     let mountedSession = 'conversation-session';
     const opened = [];
     const tabs = [];
-    const requestConfigForm = {};
     plugin.apply({
       slots,
       inject(names, callback) {
@@ -262,7 +276,10 @@ test('client hides conversation width handles locally while keeping sidebar resi
       ['conversation.input.right', 'preset-enhance-picker'],
       ['conversation.view', 'preset-enhance-editor'], ['main', 'preset-enhance-editor'], ['sidebar.panellist', 'preset-enhance-editor'],
     ]);
-    assert.equal(registered[0].component().props.form, requestConfigForm);
+    const requestSettings = registered[0].component();
+    const requestForm = requestSettings.type(requestSettings.props);
+    assert.equal(requestForm.type, SettingsForm);
+    assert.equal(requestForm.children[0].type, SettingsValueField);
     const inputEntry = registered.find(entry => entry.options.name === 'conversation.input.right');
     const composer = inputEntry.component({ sessionId: 'conversation-session' });
     const button = composer.type(composer.props);

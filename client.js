@@ -2,7 +2,9 @@ window.__ModuleLoader__.load({
     id: 'dsh-preset-enhance',
     factory: (require) => {
         const React = require('react');
-        const { Button, Input, IconCheckOutlineRegular, IconSearchOutlineRegular } = require('@deepseek-ai/dsh-client-ui-primitives');
+        const { Button, Input, IconCheckOutlineRegular, IconSearchOutlineRegular, SettingsForm, SettingsValueField, SettingsFormModel: HostSettingsFormModel } = require('@deepseek-ai/dsh-client-ui-primitives');
+        const SettingsFormModel = HostSettingsFormModel;
+        const userAgentField = 'requestUserAgent';
         const LOCK_STYLE_ATTRIBUTE = 'data-preset-enhance-resize-lock';
         const LOCK_STATE_KEY = '__dshPresetEnhanceResizeLock';
         const WORKBENCH_TITLE = '预设查看与编辑';
@@ -333,42 +335,24 @@ window.__ModuleLoader__.load({
                     sidebar.openTab(pickerKind, { destination: 'sidebar' }); },
             }, '预设');
         }
-        function RequestUserAgentSettings({ form }) {
-            const read = () => form.getSnapshot();
-            const state = React.useSyncExternalStore(listener => form.subscribe(listener), read, read);
-            const [draft, setDraft] = React.useState(null);
-            const [saving, setSaving] = React.useState(false);
-            const [notice, setNotice] = React.useState('');
-            const saved = state.value?.requestUserAgent ?? '';
-            const value = draft ?? saved;
-            const disabled = state.status !== 'ready' || !state.writable || saving;
-            const h = React.createElement;
-            async function save(event) {
-                event.preventDefault();
-                if (disabled || value === saved)
-                    return;
-                setSaving(true);
-                setNotice('');
-                try {
-                    if (await form.set('requestUserAgent', value)) {
-                        setDraft(null);
-                        setNotice('已保存');
-                    }
-                    else
-                        setNotice('保存失败，请重试');
-                }
-                catch {
-                    setNotice('保存失败，请重试');
-                }
-                finally {
-                    setSaving(false);
-                }
-            }
-            return h('form', { onSubmit: save, style: { display: 'grid', gap: 8, paddingBlock: 12 } }, h('label', { htmlFor: 'preset-enhance-request-user-agent' }, '模型请求 User-Agent'), h(Input, {
-                id: 'preset-enhance-request-user-agent', value, disabled,
-                placeholder: '留空使用适配器默认值', pattern: '[\\x20-\\x7e]*',
-                onChange: (event) => { setDraft(event.currentTarget.value); setNotice(''); },
-            }), h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } }, h(Button, { type: 'submit', variant: 'primary', size: 'sm', disabled: disabled || value === saved }, '保存'), h('span', { role: 'status' }, state.status === 'unavailable' ? '宿主未提供此设置' : notice)));
+        function RequestUserAgentSettings({ store, actions }) {
+            const read = () => store.getSnapshot();
+            const state = React.useSyncExternalStore(listener => store.subscribe(listener), read, read);
+            return React.createElement(SettingsForm, {
+                state, onSave: actions.save, onDiscard: actions.discard,
+                labels: { unavailable: '宿主未提供此设置', readOnly: '配置为只读', saveFailed: '保存失败，请重试', save: '保存', saving: '保存中…' },
+            }, React.createElement(SettingsValueField, {
+                ...state.field,
+                id: 'preset-enhance-request-user-agent',
+                label: '模型请求 User-Agent',
+                placeholder: '留空使用适配器默认值',
+                overriddenLabel: '已覆盖',
+                resetLabel: '恢复继承值',
+                invalidLabel: '请输入可打印的 ASCII 字符',
+                disabled: !state.writable || state.saving,
+                onEdit: (text) => actions.edit(userAgentField, text),
+                onReset: () => actions.resetField(userAgentField),
+            }));
         }
         return { inject: ['slots', 'conversation'], apply(ctx) {
                 hostSlots = ctx.slots;
@@ -376,9 +360,17 @@ window.__ModuleLoader__.load({
                 ctx.effect?.(() => clearFrames);
                 ctx.inject?.(['slots', 'configForms'], scoped => {
                     const form = scoped.configForms.get('preset-enhance');
+                    const model = new SettingsFormModel(form, [{
+                            field: userAgentField,
+                            format: value => typeof value === 'string' ? value : '',
+                            parse: text => /^[\x20-\x7e]*$/u.test(text) ? { kind: 'set', value: text } : undefined,
+                        }]);
+                    const store = model.bind(() => ({ ...model.shell(), field: model.field(userAgentField) }));
+                    const actions = model.actions();
+                    scoped.effect?.(() => () => model.dispose());
                     scoped.slots.inject('plugins.bundle.config', () => scoped.slots.register({
                         name: 'plugins.bundle.config', key: 'dsh-preset-enhance',
-                    }, () => React.createElement(RequestUserAgentSettings, { form })));
+                    }, () => React.createElement(RequestUserAgentSettings, { store, actions })));
                 });
                 ctx.inject?.(['slots', 'sidebarRightTabs', 'sidebarRight'], scoped => {
                     const sidebar = scoped.sidebarRight;
