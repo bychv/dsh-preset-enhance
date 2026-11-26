@@ -1771,6 +1771,7 @@ function renderPromptItem(prompt, item, used, term, parent) {
   const nameSpan = document.createElement('span');
   nameSpan.className = 'entry-name';
   nameSpan.textContent = prompt.name ?? prompt.identifier;
+  nameSpan.title = prompt.name ?? prompt.identifier;
   const [badgeLabel, badgeRole] = promptRoleBadge(prompt, fixed);
   const badge = document.createElement('span');
   badge.className = `entry-badge role-${badgeRole}`;

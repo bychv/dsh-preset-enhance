@@ -1,14 +1,32 @@
-.plugin-template-panel { margin: 12px 0; padding: 12px 14px; border: 1px solid var(--border, #3a4a54); border-radius: 9px; background: var(--bg-elevated, #131d24); min-width: 0; }
-.plugin-template-panel summary { cursor: pointer; font-weight: 650; color: var(--heading, #b9d9d2); }
+.plugin-template-panel {
+  margin: 12px 0;
+  padding: 13px 15px;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.09));
+  border-radius: 12px;
+  background: var(--bg-elevated, #1a1c21);
+  box-shadow: var(--shadow-card, none);
+  min-width: 0;
+}
+.plugin-template-panel summary { cursor: pointer; font-weight: 650; color: var(--heading, #f3f5fa); }
 .plugin-template-panel p { font-size: 12px; overflow-wrap: anywhere; }
 .plugin-template-panel select { width: 100%; margin: 8px 0; }
 .plugin-template-panel button { margin: 4px 6px 4px 0; }
-.plugin-template-text { max-height: 180px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; padding: 8px; border-radius: 6px; border: 1px solid var(--border-subtle, #293a43); background: var(--bg-code, #0d141a); }
-.plugin-template-binding { padding: 10px 0; border-top: 1px solid var(--border, #2a3942); }
+.plugin-template-text {
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+  padding: 9px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.09));
+  background: var(--bg-code, #0f1115);
+}
+.plugin-template-binding { padding: 10px 0; border-top: 1px solid var(--border, rgba(255, 255, 255, 0.09)); }
 .library > .plugin-template-panel { flex: 0 0 auto; max-height: 45vh; overflow: auto; margin: 10px; }
 @media (prefers-color-scheme: light) {
-  .plugin-template-panel { border-color: var(--border, #d6dfe3); background: var(--bg-elevated, #fff); }
-  .plugin-template-panel summary { color: var(--heading, #245448); }
-  .plugin-template-text { border-color: var(--border-subtle, #dce4e8); background: var(--bg-code, #f3f6f7); }
-  .plugin-template-binding { border-top-color: var(--border, #d6dfe3); }
+  .plugin-template-panel { border-color: var(--border, #e5e8ef); background: var(--bg-elevated, #fff); }
+  .plugin-template-panel summary { color: var(--heading, #141821); }
+  .plugin-template-text { border-color: var(--border, #e5e8ef); background: var(--bg-code, #f4f6fa); }
+  .plugin-template-binding { border-top-color: var(--border, #e5e8ef); }
 }

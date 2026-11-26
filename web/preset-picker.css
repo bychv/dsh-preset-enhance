@@ -33,9 +33,10 @@
   gap: 3px;
   max-height: 220px;
   margin: 0;
-  padding: 0;
+  padding: 0 2px 0 0;
   overflow: auto;
   list-style: none;
+  scrollbar-width: thin;
 }
 .dsh-preset-picker:not(.has-preview) .dsh-preset-picker-list {
   flex: 1 1 auto;
@@ -49,7 +50,8 @@
   min-width: 0;
   border-radius: var(--dsw-radius-sm);
   border-left: 2px solid transparent;
-  padding-inline-start: 2px;
+  padding: 1px 2px 1px 4px;
+  transition: background .14s, border-color .14s;
 }
 .dsh-preset-picker-list li[data-previewing='true'] {
   background: var(--dsw-alias-interactive-bg-hover);
@@ -67,20 +69,25 @@
 .dsh-preset-picker-list button svg { flex: none; color: var(--dsw-alias-state-business-primary); }
 
 .dsh-preset-picker [role='status'] { margin: 0; overflow-wrap: anywhere; }
+.dsh-preset-picker-preview {
+  border-top: 1px solid var(--dsw-alias-border-l3);
+  padding-top: 10px;
+}
 .dsh-preset-picker-preview h2 { font-size: 13px; font-weight: 600; margin: 0 0 4px; }
 .dsh-preset-picker-preview > small { display: block; margin-bottom: 4px; }
 .dsh-preset-picker-preview details { border-top: 0.5px solid var(--dsw-alias-border-l3); }
 .dsh-preset-picker-preview summary {
-  padding: 7px 4px;
+  padding: 7px 6px;
   border-radius: var(--dsw-radius-sm);
   cursor: pointer;
   overflow-wrap: anywhere;
+  transition: background .12s;
 }
 .dsh-preset-picker-preview summary:hover { background: var(--dsw-alias-interactive-bg-hover); }
 .dsh-preset-picker-preview summary small { margin-inline-start: 6px; }
 .dsh-preset-picker-preview pre {
   margin: 0 0 8px;
-  padding: 8px;
+  padding: 8px 10px;
   border-radius: var(--dsw-radius-sm);
   background: var(--dsw-alias-bg-layer-1);
   font: inherit;
