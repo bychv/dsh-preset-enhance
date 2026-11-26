@@ -51,6 +51,17 @@ function blank() {
     prompt_order: [{ character_id: 100001, order: [{ identifier: 'chatHistory', enabled: true }] }],
   };
 }
+function syncSaveIndicators() {
+  const autoOn = $('preset-auto-save')?.checked === true;
+  document.body?.classList?.toggle?.('autosave-active', autoOn);
+  $('save')?.classList?.toggle?.('is-dirty', dirty);
+  $('bind')?.classList?.toggle?.('is-dirty', bindingDirty);
+  $('save-tools')?.classList?.toggle?.('is-dirty', toolDraft.dirty);
+  $('group-save')?.classList?.toggle?.('is-dirty', groupsDirty);
+  $('save-auto-modes')?.classList?.toggle?.('is-dirty', autoModesDirty);
+  $('save-mode-default')?.classList?.toggle?.('is-dirty', modeDefaultDrafts.size > 0);
+  $('save-deepseek-beta')?.classList?.toggle?.('is-dirty', prefillSettingsDirty);
+}
 function status(text, error = false) {
   // 无关的保存/刷新不再丢弃未保存的工具草稿，因此成功提示需要附带待保存提醒。
   const pending = [];
@@ -61,7 +72,8 @@ function status(text, error = false) {
   if (bindingDirty) pending.push('会话设置尚未应用');
   const suffix = !error && pending.length && !text.includes('尚未保存') ? ` · ${pending.join('；')}` : '';
   $('status').textContent = `${text}${suffix}`;
-  $('status').className = error ? 'error' : '';
+  $('status').className = error ? 'error' : (dirty || pending.length ? 'dirty' : '');
+  syncSaveIndicators();
 }
 function updateDefaultButton() {
   const active = !!selectedId && selectedId === state.selectedPresetId;
@@ -189,6 +201,7 @@ function loadDraft(id) {
   renderRegexPanel();
   updateDefaultButton();
   renderPackageTools(record);
+  syncSaveIndicators();
   void refreshPrefillWarning();
 }
 function renderPresetLibrary() {
@@ -211,6 +224,7 @@ async function reload(id) {
   $('user').value = binding.values?.user ?? 'User';
   $('char').value = binding.values?.char ?? 'Assistant';
   $('markers').value = JSON.stringify(binding.markers ?? {}, null, 2);
+  validateMarkersInput();
   renderSafetyCheck();
   $('deepseek-beta-prefix').checked = state.deepseekBetaPrefix === true;
   $('force-prefill').checked = state.forcePrefill === true;
@@ -729,6 +743,7 @@ async function persistPresetDraft({ force = false } = {}) {
     renderPresetLibrary();
     updateDefaultButton();
     updateSessionNote();
+    syncSaveIndicators();
     if (!dirty) void refreshPrefillWarning();
   }
   return { ok: true, id: savedId, version, saved: document };
@@ -1357,7 +1372,11 @@ function renderToolGroupPanel(panel) {
   const list = document.createElement('div');
   list.className = 'check-list tools';
   list.id = 'tool-list';
-  for (const name of tab.tools) {
+  const searchTerm = String($('tool-search')?.value ?? '').trim().toLowerCase();
+  const visibleTools = searchTerm
+    ? tab.tools.filter(name => name.toLowerCase().includes(searchTerm) || (descriptions.get(name) ?? '').toLowerCase().includes(searchTerm))
+    : tab.tools;
+  for (const name of visibleTools) {
     const entry = isToolEntry(name);
     const label = document.createElement('label');
     label.className = entry ? 'check-entry locked' : 'check-entry';
@@ -1381,15 +1400,22 @@ function renderToolGroupPanel(panel) {
     label.append(input, text);
     list.append(label);
   }
+  if (searchTerm && visibleTools.length === 0) {
+    const empty = document.createElement('p');
+    empty.className = 'muted';
+    empty.textContent = `没有匹配“${searchTerm}”的工具。`;
+    list.append(empty);
+  }
   listWrap.append(listSummary, list);
   panel.append(summary, listWrap);
-  updateToolGroupSummary(panel);
+  updateToolGroupSummary(panel, visibleTools.length, searchTerm);
 }
-function updateToolGroupSummary(panel) {
+function updateToolGroupSummary(panel, visibleCount, searchTerm = String($('tool-search')?.value ?? '').trim()) {
   const tab = toolView.tabs.find(item => item.id === panel?.dataset.group);
   if (!tab) return;
   const enabled = toolGroupEnabledCount(tab);
   const total = tab.tools.length;
+  const shown = typeof visibleCount === 'number' ? visibleCount : total;
   const toggle = panel.querySelector('.group-switch');
   if (toggle) {
     toggle.checked = total > 0 && enabled === total;
@@ -1399,7 +1425,7 @@ function updateToolGroupSummary(panel) {
   const stat = panel.querySelector('.group-stat');
   if (stat) stat.textContent = `已启用 ${enabled}/${total}`;
   const listSummary = panel.querySelector('.tool-list-toggle>summary');
-  if (listSummary) listSummary.textContent = `工具列表（${total} 个）`;
+  if (listSummary) listSummary.textContent = searchTerm ? `工具列表（显示 ${shown} / 共 ${total} 个）` : `工具列表（${total} 个）`;
   const restorable = !!restoreToolReference();
   for (const button of panel.querySelectorAll('[data-op]')) {
     if (button.dataset.op === 'restore') {
@@ -1706,6 +1732,21 @@ function renderList() {
   for (const entry of used) renderPromptItem(entry.prompt, entry.item, true, term, $('used-prompts'));
   for (const entry of unused) renderPromptItem(entry.prompt, null, false, term, $('unused-prompts'));
 }
+function moveOrderEntry(identifier, delta) {
+  const items = order();
+  const index = items.findIndex(entry => entry.identifier === identifier);
+  const target = index + delta;
+  if (index < 0 || target < 0 || target >= items.length) return;
+  [items[index], items[target]] = [items[target], items[index]];
+  markDirty();
+  renderList();
+}
+function promptRoleBadge(prompt, fixed) {
+  if (fixed) return ['DSH', 'dsh'];
+  if (prompt.marker) return ['标记', 'marker'];
+  const role = prompt.role === 'model' ? 'assistant' : prompt.role ?? 'system';
+  return [role === 'user' ? 'USR' : role === 'assistant' ? 'AST' : 'SYS', role];
+}
 function renderPromptItem(prompt, item, used, term, parent) {
   if (!`${prompt.name ?? ''} ${prompt.identifier} ${prompt.content ?? ''}`.toLowerCase().includes(term)) return;
   const div = document.createElement('div');
@@ -1725,15 +1766,44 @@ function renderPromptItem(prompt, item, used, term, parent) {
   }
   const button = document.createElement('button');
   button.className = 'entry';
+  button.type = 'button';
   button.dataset.promptId = prompt.identifier;
-  button.textContent = fixed ? `${prompt.name} · 内置模板` :
-    `${prompt.name ?? prompt.identifier} · ${prompt.marker ? '标记' : prompt.role ?? 'system'}`;
+  const nameSpan = document.createElement('span');
+  nameSpan.className = 'entry-name';
+  nameSpan.textContent = prompt.name ?? prompt.identifier;
+  const [badgeLabel, badgeRole] = promptRoleBadge(prompt, fixed);
+  const badge = document.createElement('span');
+  badge.className = `entry-badge role-${badgeRole}`;
+  badge.textContent = badgeLabel;
+  button.append(nameSpan, badge);
   button.disabled = !fixed && !preset.prompts.some(entry => entry.identifier === prompt.identifier);
   button.onclick = () => {
     selectedPrompt = prompt.identifier;
     renderList();
     renderEditor();
   };
+  div.append(button);
+  if (used && !fixed) {
+    const items = order();
+    const orderIndex = items.findIndex(entry => entry.identifier === prompt.identifier);
+    const reorder = document.createElement('span');
+    reorder.className = 'item-reorder';
+    for (const [symbol, label, delta, disabled] of [
+      ['↑', '上移', -1, orderIndex <= 0],
+      ['↓', '下移', 1, orderIndex < 0 || orderIndex >= items.length - 1],
+    ]) {
+      const move = document.createElement('button');
+      move.type = 'button';
+      move.className = 'item-move';
+      move.textContent = symbol;
+      move.title = `${label} ${prompt.name ?? prompt.identifier}`;
+      move.setAttribute('aria-label', move.title);
+      move.disabled = disabled;
+      move.onclick = () => moveOrderEntry(prompt.identifier, delta);
+      reorder.append(move);
+    }
+    div.append(reorder);
+  }
   const membership = document.createElement('button');
   membership.className = 'membership';
   membership.type = 'button';
@@ -1746,7 +1816,7 @@ function renderPromptItem(prompt, item, used, term, parent) {
     renderList();
     renderEditor();
   };
-  div.append(button, membership);
+  div.append(membership);
   parent.append(div);
 }
 function setEnabled(id, enabled) {
@@ -1779,12 +1849,26 @@ function removeFromOrder(id) {
     markDirty();
   }
 }
+function updateContentCounter(text = $('content').value) {
+  const counter = $('content-counter');
+  if (!counter) return;
+  const value = String(text ?? '');
+  const lines = value ? value.split('\n').length : 0;
+  counter.textContent = `${value.length.toLocaleString('en-US')} 字符 · ${lines.toLocaleString('en-US')} 行`;
+}
+function syncPositionFields(fixed, dynamicPrefill) {
+  const byDepth = String($('position').value) === '1';
+  const disabled = fixed || dynamicPrefill || !byDepth;
+  $('depth').disabled = disabled;
+  $('priority').disabled = disabled;
+  $('depth-fields')?.classList?.toggle?.('is-inactive', disabled);
+}
 function renderEditor() {
   pluginTemplatePanel?.render();
   const prompt = current();
   $('editor').hidden = !prompt;
   $('empty').hidden = !!prompt;
-  if (!prompt) { renderContextFileField(null); return; }
+  if (!prompt) { renderContextFileField(null); updateContentCounter(''); return; }
   const item = order().find(entry => entry.identifier === prompt.identifier);
   const fixed = isDshSystemPromptTemplate(prompt);
   const used = fixed || !!item;
@@ -1798,9 +1882,11 @@ function renderEditor() {
   const templateRef = globalThis.PresetPluginTemplates?.bindings(preset)?.[prompt.identifier];
   $('content').value = chatHistory ? '此内容从当前聊天记录读取' : templateRef?.target === 'marker' && !dynamicPrefill ? templateRef.contentSnapshot ?? '' : prompt.content ?? '';
   for (const id of ['prompt-name', 'role', 'position', 'depth', 'priority']) $(id).disabled = fixed || (dynamicPrefill && id !== 'prompt-name');
+  syncPositionFields(fixed, dynamicPrefill);
   $('content').disabled = fixed ? !state.dshSystemTemplate?.available || !dshSectionEditor : !dynamicPrefill && (!!prompt.marker || isLinkedTemplate(prompt.identifier));
   const wholeDshTemplate = Object.hasOwn(preset.dsh_system_prompt_templates ?? {}, state.sessionMode ?? '');
   if ($('content-field')) $('content-field').hidden = fixed && !wholeDshTemplate && !!dshSectionEditor;
+  updateContentCounter($('content').value);
   renderContextFileField(prompt);
   $('dsh-template-controls').hidden = !fixed;
   if (fixed) {
@@ -1813,6 +1899,8 @@ function renderEditor() {
   $('prompt-enabled').disabled = !used;
   $('up').disabled = fixed || !used;
   $('down').disabled = fixed || !used;
+  if ($('prompt-duplicate')) $('prompt-duplicate').disabled = fixed || !!prompt.marker || chatHistory || isLinkedTemplate(prompt.identifier);
+  if ($('prompt-delete')) $('prompt-delete').disabled = fixed || !!prompt.marker || chatHistory;
   $('marker-note').textContent = fixed ?
     `DSH 模式：${(state.agentModes ?? []).find(m => m.id === state.sessionMode)?.name ?? state.sessionMode ?? '默认'} · 动态宏在每次发送和预览时更新。${state.presetMode ? '专用预设模式不注入 DSH 提示词。' : ''}${state.dshSystemTemplate?.available ? '' : '当前无法读取模式模板。'}` : dynamicPrefill ? '静态回退前缀。外部模板可在插件模板区配置。' : prompt.marker ?
     (templateRef?.target === 'marker' ? `标记 ${prompt.identifier}：正文由插件模板提供；可在插件模板区恢复原标记。` : `标记 ${prompt.identifier}：chatHistory 展开真实会话；其他标记在下方 JSON 中填写。`) :
@@ -2182,9 +2270,17 @@ for (const [id, key, numeric] of [
     }
     if (isLinkedTemplate(selectedPrompt) && (key === 'role' || (key === 'content' && !isDynamicPrefill(selectedPrompt)))) return;
     current()[key] = numeric ? Number($(id).value) : $(id).value;
+    if (id === 'position') syncPositionFields(false, isDynamicPrefill(selectedPrompt));
+    if (id === 'content') updateContentCounter($(id).value);
     markDirty();
     if (id === 'prompt-name' || id === 'role') renderList();
   };
+}
+function syncTokenPresetChips(value) {
+  for (const button of document.querySelectorAll?.('#request-token-presets [data-token-preset]') ?? []) {
+    const presetValue = Number(button.dataset?.tokenPreset);
+    button.setAttribute?.('aria-pressed', String(presetValue === value));
+  }
 }
 function renderRequestSettings() {
   const value = preset.dsh_request?.max_tokens ?? 0;
@@ -2192,6 +2288,7 @@ function renderRequestSettings() {
   $('request-max-tokens-range').value = String(value);
   $('request-max-tokens-range').style.setProperty('--token-progress', (value / 10000) + '%');
   $('request-stream').checked = preset.dsh_request?.stream !== false;
+  syncTokenPresetChips(value);
 }
 function updateMaxTokens(id) {
   const number = Number($(id).value);
@@ -2201,9 +2298,16 @@ function updateMaxTokens(id) {
   $('request-max-tokens').value = String(value);
   $('request-max-tokens-range').value = String(value);
   $('request-max-tokens-range').style.setProperty('--token-progress', (value / 10000) + '%');
+  syncTokenPresetChips(value);
   markDirty();
 }
 for (const id of ['request-max-tokens', 'request-max-tokens-range']) $(id).oninput = () => updateMaxTokens(id);
+if ($('request-token-presets')) $('request-token-presets').onclick = event => {
+  const button = event.target?.closest?.('[data-token-preset]');
+  if (!button) return;
+  $('request-max-tokens').value = button.dataset.tokenPreset;
+  updateMaxTokens('request-max-tokens');
+};
 $('request-stream').onchange = () => {
   preset.dsh_request = { ...preset.dsh_request, stream: $('request-stream').checked };
   markDirty();
@@ -2309,7 +2413,28 @@ $('prefix-output-extraction').onchange = () => {
   markPrefillSettingsDirty();
 };
 $('prefix-nonofficial-remove-tools').onchange = markPrefillSettingsDirty;
-for (const id of ['user', 'char', 'markers']) $(id).oninput = markBindingDirty;
+function validateMarkersInput() {
+  const field = $('markers');
+  const errorBox = $('markers-error');
+  if (!field || !errorBox) return true;
+  try {
+    const parsed = JSON.parse(field.value || '{}');
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('角色标记内容必须是 JSON 对象');
+    field.classList?.remove?.('is-invalid');
+    errorBox.textContent = '';
+    errorBox.hidden = true;
+    return true;
+  } catch (error) {
+    field.classList?.add?.('is-invalid');
+    errorBox.textContent = `JSON 格式错误：${error.message}`;
+    errorBox.hidden = false;
+    return false;
+  }
+}
+for (const id of ['user', 'char', 'markers']) $(id).oninput = () => {
+  if (id === 'markers') validateMarkersInput();
+  markBindingDirty();
+};
 $('enabled').onchange = markBindingDirty;
 function insertOutputExtractionTemplate() {
   const identifier = 'dsh-output-extraction-template';
@@ -2364,14 +2489,41 @@ function showImportedExtractionNotice() {
   box.replaceChildren(title, text, dismiss);
 }
 
-for (const [id, delta] of [['up', -1], ['down', 1]]) $(id).onclick = () => {
+for (const [id, delta] of [['up', -1], ['down', 1]]) $(id).onclick = () => moveOrderEntry(selectedPrompt, delta);
+if ($('prompt-duplicate')) $('prompt-duplicate').onclick = () => {
+  const source = current();
+  if (!source || isDshSystemPromptTemplate(source) || source.marker || source.identifier === 'chatHistory' || isLinkedTemplate(source.identifier)) return;
+  const identifier = crypto.randomUUID();
+  const clone = { ...structuredClone(source), identifier, name: (source.name || source.identifier) + ' 副本' };
+  preset.prompts.push(clone);
   const items = order();
-  const index = items.findIndex(item => item.identifier === selectedPrompt);
-  const target = index + delta;
-  if (index < 0 || target < 0 || target >= items.length) return;
-  [items[index], items[target]] = [items[target], items[index]];
+  const index = items.findIndex(item => item.identifier === source.identifier);
+  items.splice(index >= 0 ? index + 1 : items.length, 0, { identifier, enabled: index >= 0 ? items[index].enabled : true });
+  selectedPrompt = identifier;
   markDirty();
   renderList();
+  renderEditor();
+};
+if ($('prompt-delete')) $('prompt-delete').onclick = () => {
+  const source = current();
+  if (!source || isDshSystemPromptTemplate(source) || source.marker || source.identifier === 'chatHistory') return;
+  const label = source.name || source.identifier;
+  if (!confirm(`确定删除条目「${label}」？将从当前预设及所有顺序表中移除。`)) return;
+  const identifier = source.identifier;
+  preset.prompts = preset.prompts.filter(item => item.identifier !== identifier);
+  for (const group of preset.prompt_order ?? []) {
+    group.order = (group.order ?? []).filter(item => item.identifier !== identifier);
+  }
+  const settings = preset.extensions?.['dsh-preset-enhance'];
+  if (settings?.templateBindings) delete settings.templateBindings[identifier];
+  if (Array.isArray(settings?.autoTemplateDisabled)) {
+    settings.autoTemplateDisabled = settings.autoTemplateDisabled.filter(item => item !== identifier);
+  }
+  selectedPrompt = order()[0]?.identifier ?? preset.prompts[0]?.identifier ?? '';
+  markDirty();
+  renderList();
+  renderEditor();
+  status(`已删除条目「${label}」`);
 };
 $('add').onclick = () => {
   selectedPrompt = crypto.randomUUID();
@@ -2531,6 +2683,7 @@ if ($('mode-default-mode')) {
   $('mode-default-mode').onchange = renderModeDefault;
   $('mode-default-preset').onchange = () => {
     modeDefaultDrafts.set($('mode-default-mode').value, $('mode-default-preset').value);
+    syncSaveIndicators();
     scheduleGlobalConfigAutoSave();
   };
   $('save-mode-default').onclick = guard(async () => {
@@ -2735,6 +2888,10 @@ $('tool-auto-save').onchange = () => {
     status('已关闭工具开关自动保存，改动需要点击“保存工具开关”');
   }
   renderToolPanel();
+};
+if ($('tool-search')) $('tool-search').oninput = () => {
+  const panel = activeToolPanel();
+  if (panel) renderToolGroupPanel(panel);
 };
 $('tool-tabs-toggle').onclick = () => {
   const collapsed = storageGet(TOOL_TABS_COLLAPSED_KEY, '0') === '1';
@@ -3454,6 +3611,64 @@ $('regex-test-target').onchange = () => {
   if ($('regex-test-target').value === 'prefill') $('regex-test-depth').value = String(REGEX_PREFILL_DEPTH);
 };
 
+const WORKBENCH_PANES = ['prompts', 'tools', 'interface', 'regex', 'templates'];
+const WORKBENCH_PANE_KEY = 'dsh-preset-enhance.workbench-pane:' + (sessionId || 'global');
+let activeWorkbenchPane = 'prompts';
+function activateWorkbenchPane(paneId, { persist = true, focus = false } = {}) {
+  const target = WORKBENCH_PANES.includes(paneId) ? paneId : 'prompts';
+  activeWorkbenchPane = target;
+  for (const tab of document.querySelectorAll?.('[data-workbench-tab]') ?? []) {
+    const selected = tab.dataset?.workbenchTab === target;
+    tab.setAttribute?.('aria-selected', String(selected));
+    tab.tabIndex = selected ? 0 : -1;
+    if (selected && focus) tab.focus?.();
+  }
+  for (const pane of document.querySelectorAll?.('[data-workbench-pane]') ?? []) {
+    pane.hidden = pane.dataset?.workbenchPane !== target;
+  }
+  if (persist) {
+    try { globalThis.sessionStorage?.setItem?.(WORKBENCH_PANE_KEY, target); } catch { /* ignore */ }
+  }
+}
+if ($('workbench-tabs')) {
+  $('workbench-tabs').onclick = event => {
+    const button = event.target?.closest?.('[data-workbench-tab]');
+    if (!button) return;
+    activateWorkbenchPane(button.dataset.workbenchTab);
+  };
+  $('workbench-tabs').onkeydown = event => {
+    const tabs = [...(document.querySelectorAll?.('[data-workbench-tab]') ?? [])];
+    const index = tabs.indexOf(document.activeElement);
+    if (index < 0) return;
+    let next = -1;
+    if (event.key === 'ArrowRight') next = (index + 1) % tabs.length;
+    else if (event.key === 'ArrowLeft') next = (index - 1 + tabs.length) % tabs.length;
+    else if (event.key === 'Home') next = 0;
+    else if (event.key === 'End') next = tabs.length - 1;
+    else return;
+    event.preventDefault();
+    activateWorkbenchPane(tabs[next].dataset.workbenchTab, { focus: true });
+  };
+  let savedPane = 'prompts';
+  try { savedPane = globalThis.sessionStorage?.getItem?.(WORKBENCH_PANE_KEY) || 'prompts'; } catch { /* ignore */ }
+  activateWorkbenchPane(savedPane, { persist: false });
+}
+const navMoreMenu = $('nav-more-menu');
+if (navMoreMenu) {
+  navMoreMenu.addEventListener?.('click', event => {
+    if (event.target?.closest?.('button')) navMoreMenu.open = false;
+  });
+  document.addEventListener?.('click', event => {
+    if (navMoreMenu.open && !navMoreMenu.contains?.(event.target)) navMoreMenu.open = false;
+  });
+  document.addEventListener?.('keydown', event => {
+    if (event.key === 'Escape' && navMoreMenu.open) {
+      navMoreMenu.open = false;
+      navMoreMenu.querySelector?.('summary')?.focus?.();
+    }
+  });
+}
+
 // 在工作台自己的 iframe 内切换页面，保留宿主导航。
 $('spreset-open').onclick = () => {
   const url = '/preset-enhance/editor' + (sessionId ? '?sessionId=' + encodeURIComponent(sessionId) : '');
@@ -3463,6 +3678,7 @@ $('spreset-open').onclick = () => {
 $('preset-auto-save').checked = storageGet(PRESET_AUTO_SAVE_KEY, '1') !== '0';
 $('tool-auto-save').checked = storageGet(TOOL_AUTO_SAVE_KEY, '0') === '1';
 $('tool-auto-save').disabled = presetAutoSaveIsOn();
+syncSaveIndicators();
 $('tool-scope').querySelector('option[value="session"]').disabled = !sessionId;
 $('tool-scope').value = sessionId ? 'session' : 'mode';
 window.addEventListener('beforeunload', event => {
@@ -3523,8 +3739,8 @@ pluginTemplatePanel = globalThis.PresetPluginTemplates?.mount($('plugin-template
   api, getPreset: () => preset, getPresetId: () => selectedId, getCharacterId: () => $('order').value,
   getOrder: order, isLocked: id => (state.sPresetEditor?.locks?.[selectedId] ?? []).includes(id),
   onCatalog: () => { renderList(); renderEditor(); },
-  onSelect: id => { selectedPrompt = id; renderList(); renderEditor(); },
-  onChange: (draft, id) => { preset = draft; ensureGroups(); selectedPrompt = id; markDirty(); renderList(); renderEditor(); },
+  onSelect: id => { selectedPrompt = id; renderList(); renderEditor(); activateWorkbenchPane('prompts'); },
+  onChange: (draft, id) => { preset = draft; ensureGroups(); selectedPrompt = id; markDirty(); renderList(); renderEditor(); activateWorkbenchPane('prompts'); },
 });
 await guard(() => reload())();
 if (typeof rememberWorkbenchScroll === 'function') workbenchScroll = rememberWorkbenchScroll(document, () => encodeURIComponent(sessionId || 'global') + ':' + encodeURIComponent(selectedId || 'new'));

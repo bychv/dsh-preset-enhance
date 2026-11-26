@@ -286,11 +286,11 @@ function renderLibraryCard(row) {
   );
   top.append(actions);
   card.append(top, el('p', 'preview', short(row.content, 90) || '（空内容）'));
-  if (row.kind !== 'prompt' || promptOf(row.id)) card.onclick = () => { selection = { kind: row.kind, id: row.id }; renderAll(); };
+  if (row.kind !== 'prompt' || promptOf(row.id)) card.onclick = () => { selection = { kind: row.kind, id: row.id }; setNarrowPane('inspector'); renderAll(); };
   return card;
 }
 function libraryMenu(row) {
-  const items = [['在检视器中打开', () => { selection = { kind: row.kind, id: row.id }; renderAll(); }]];
+  const items = [['在检视器中打开', () => { selection = { kind: row.kind, id: row.id }; setNarrowPane('inspector'); renderAll(); }]];
   if (row.kind === 'library') {
     items.push(['加入当前预设链', () => insertIntoChain(row)]);
     items.push(['删除模板', () => removeLibraryEntry(row.id)]);
@@ -336,7 +336,7 @@ function renderChainRow(item, index) {
   row.draggable = false;
   // Selecting the row is what opens the INSPECTOR. The row actions below stop propagation, so
   // copy/edit/power/… keep their own behaviour and a click anywhere else in the row selects.
-  const select = () => { selection = { kind: 'chain', id: item.identifier }; renderAll(); };
+  const select = () => { selection = { kind: 'chain', id: item.identifier }; setNarrowPane('inspector'); renderAll(); };
   row.onclick = select;
   row.title = '点击在 INSPECTOR 中查看';
   row.tabIndex = 0;
@@ -1423,6 +1423,23 @@ function renderAll() {
 
 /* ------------------------------------------------------------------- init */
 
+function setNarrowPane(pane) {
+  const view = $('prompt-view');
+  if (view?.dataset) view.dataset.narrowPane = pane;
+  view?.setAttribute?.('data-narrow-pane', pane);
+  for (const name of ['library', 'chain', 'inspector']) {
+    const tab = $('narrow-tab-' + name);
+    if (!tab) continue;
+    const active = name === pane;
+    tab.classList?.toggle?.('active', active);
+    tab.setAttribute?.('aria-selected', String(active));
+  }
+}
+for (const name of ['library', 'chain', 'inspector']) {
+  const tab = $('narrow-tab-' + name);
+  if (tab) tab.onclick = () => setNarrowPane(name);
+}
+
 $('back-workbench').href = '/preset-enhance' + (sessionId ? '?sessionId=' + encodeURIComponent(sessionId) : '');
 $('save-preset').onclick = guard(savePreset);
 try { $('regex-auto-save').checked = localStorage.getItem('dsh-preset-enhance.preset-auto-save') !== '0'; } catch {}
@@ -1434,6 +1451,7 @@ globalThis.addEventListener?.('storage', event => {
 });
 $('preset-select').onchange = guard(async () => {
   await saveChain.catch(() => {});
+  if ($('regex-auto-save').checked && presetDirty) await savePreset();
   if (presetDirty && !confirm('放弃尚未保存的预设修改？')) { $('preset-select').value = presetId; return; }
   loadPreset($('preset-select').value);
   status('已保存');

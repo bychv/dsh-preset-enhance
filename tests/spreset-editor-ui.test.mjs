@@ -500,3 +500,22 @@ test('an available marker stays idle until joined to the selected SPreset order'
   assert.ok(byText(ui.get('chain-list'), marker.name));
   assert.equal(bodyArea(ui).disabled, false);
 });
+
+test('switching presets flushes pending autosave without confirm, and narrow tabs track selection', async () => {
+  let confirmed = 0;
+  const ui = editor({ confirm: () => { confirmed++; return true; } });
+  await flush();
+  ui.get('regex-auto-save').checked = true;
+  chainRow(ui, 'main').click();
+  assert.equal(ui.get('prompt-view').dataset.narrowPane, 'inspector');
+  ui.get('narrow-tab-library').click();
+  assert.equal(ui.get('prompt-view').dataset.narrowPane, 'library');
+
+  bodyArea(ui).value = '待自动保存的改动';
+  bodyArea(ui).oninput();
+  ui.get('preset-select').value = 'p1';
+  await ui.get('preset-select').onchange();
+  await flush();
+  assert.equal(confirmed, 0, 'autosave flushes cleanly before switching');
+  assert.equal(ui.requests.some(body => body.action === 'save'), true);
+});

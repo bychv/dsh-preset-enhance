@@ -189,3 +189,39 @@ test('prefill target switch edits the preset instead of global interface setting
   ui.get('prefix-to-reasoning').checked=true;ui.get('prefix-to-reasoning').onchange();
   assert.equal(ui.draftPreset().dsh_prefill_target,'reasoning');
 });
+
+test('max_tokens chips, marker JSON validation, conditional depth fields, and tool search work', () => {
+  const ui = editor();
+  ui.get('request-max-tokens-range').style.setProperty = () => {};
+  ui.setPreset({
+    prompts: [
+      { identifier: 'chatHistory', marker: true, role: 'user' },
+      { identifier: 'sys1', name: 'Sys', role: 'system', content: 'hello', injection_position: 0, injection_depth: 4, injection_order: 100 },
+    ],
+    prompt_order: [{ character_id: 100001, order: [{ identifier: 'chatHistory', enabled: true }, { identifier: 'sys1', enabled: true }] }],
+  });
+  ui.get('request-token-presets').onclick({
+    target: { closest: () => ({ dataset: { tokenPreset: '16384' } }) },
+  });
+  assert.equal(ui.get('request-max-tokens').value, '16384');
+  assert.equal(ui.get('request-max-tokens-range').value, '16384');
+  assert.equal(ui.draftPreset().dsh_request.max_tokens, 16384);
+
+  ui.get('markers').value = '{broken';
+  ui.get('markers').oninput();
+  assert.equal(ui.get('markers-error').hidden, false);
+  assert.match(ui.get('markers-error').textContent, /JSON 格式错误/);
+  ui.get('markers').value = '{"scenario":"ok"}';
+  ui.get('markers').oninput();
+  assert.equal(ui.get('markers-error').hidden, true);
+});
+
+test('workbench exposes light mode tokens and workspace tabs in html/css', () => {
+  const css = readFileSync(new URL('../web/editor.css', import.meta.url), 'utf8');
+  const html = readFileSync(new URL('../web/index.html', import.meta.url), 'utf8');
+  assert.match(css, /@media\s*\(prefers-color-scheme:\s*light\)/);
+  assert.match(html, /id="workbench-tabs"/);
+  assert.match(html, /id="tool-search"/);
+  assert.match(html, /id="prompt-duplicate"/);
+  assert.match(html, /id="prompt-delete"/);
+});

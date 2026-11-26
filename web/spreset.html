@@ -13,7 +13,12 @@
 </div>
 </header>
 
-<main id="prompt-view" class="columns">
+<main id="prompt-view" class="columns" data-narrow-pane="chain">
+<div id="narrow-tabs" class="narrow-tabs" role="tablist" aria-label="编辑栏切换">
+<button type="button" id="narrow-tab-library" class="narrow-tab" role="tab" aria-selected="false">资源库</button>
+<button type="button" id="narrow-tab-chain" class="narrow-tab active" role="tab" aria-selected="true">提示词链</button>
+<button type="button" id="narrow-tab-inspector" class="narrow-tab" role="tab" aria-selected="false">检视器</button>
+</div>
 <section class="col library">
 <div class="col-head"><h2>资源库</h2><span class="en">LIBRARY</span><button id="library-add" class="icon" title="新建模板">＋</button></div>
 <div class="segmented" role="tablist">

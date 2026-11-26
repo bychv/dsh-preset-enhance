@@ -30,15 +30,31 @@
 .dsh-preset-picker-list {
   display: grid;
   flex: none;
-  gap: 2px;
-  max-height: 168px;
+  gap: 3px;
+  max-height: 220px;
   margin: 0;
   padding: 0;
   overflow: auto;
   list-style: none;
 }
+.dsh-preset-picker:not(.has-preview) .dsh-preset-picker-list {
+  flex: 1 1 auto;
+  min-height: 120px;
+  max-height: none;
+}
 .dsh-preset-picker-list:empty { display: none; }
-.dsh-preset-picker-list li { display: flex; gap: 4px; min-width: 0; }
+.dsh-preset-picker-list li {
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+  border-radius: var(--dsw-radius-sm);
+  border-left: 2px solid transparent;
+  padding-inline-start: 2px;
+}
+.dsh-preset-picker-list li[data-previewing='true'] {
+  background: var(--dsw-alias-interactive-bg-hover);
+  border-left-color: var(--dsw-alias-state-business-primary);
+}
 .dsh-preset-picker-list button { flex: none; }
 .dsh-preset-picker-list .dsh-preset-picker-choice {
   flex: 1 1 auto;
