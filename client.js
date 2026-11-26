@@ -193,7 +193,7 @@ window.__ModuleLoader__.load({
             const modeId = useInputMode(sessionId);
             const frame = useWorkbenchFrame({ sessionId, modeId }, 'session');
             if (!sessionId) {
-                return React.createElement('p', { className: 'muted' }, '未识别当前会话，暂不能编辑会话级设置；请从会话视图或侧边栏面板打开预设工作台。');
+                return React.createElement('p', { className: 'muted' }, '未检测到当前会话，暂不可编辑会话设置；请从对话页面或左侧「预设工作台」打开。');
             }
             return frame;
         };
@@ -309,7 +309,7 @@ window.__ModuleLoader__.load({
                         }
                     }
                     setSelection(null);
-                    setNotice(presetId === null ? '已恢复跟随默认' : '已应用');
+                    setNotice(presetId === null ? '已恢复使用默认预设' : '已应用到当前会话');
                 }
                 catch (cause) {
                     setNotice(cause.message);
@@ -394,7 +394,7 @@ window.__ModuleLoader__.load({
                 if (!editing)
                     return;
                 if (editing.kind === 'prefill') {
-                    const ok = await mutatePrompt(editing.key, { kind: 'prefill', content: editing.content }, '已保存助手预填充');
+                    const ok = await mutatePrompt(editing.key, { kind: 'prefill', content: editing.content }, '已保存助手预填充并同步');
                     if (ok)
                         setEditing(null);
                     return;
@@ -415,7 +415,7 @@ window.__ModuleLoader__.load({
                             return;
                         }
                         if (!Number.isInteger(order)) {
-                            setNotice('同深度顺序必须是整数');
+                            setNotice('同深度排序必须是整数');
                             return;
                         }
                         patch.injection_depth = depth;
@@ -426,7 +426,7 @@ window.__ModuleLoader__.load({
                     kind: 'prompt',
                     identifier: editing.identifier,
                     patch,
-                }, '已保存条目修改');
+                }, '已保存并同步到预设');
                 if (ok)
                     setEditing(null);
             };
@@ -456,7 +456,7 @@ window.__ModuleLoader__.load({
                     type: 'button',
                     className: 'dsh-preset-picker-edit-btn',
                     'aria-label': '编辑 ' + entry.name,
-                    title: '简易编辑',
+                    title: '编辑条目',
                     'aria-pressed': isEditing,
                     disabled: isBusy,
                     onClick: (event) => {
@@ -508,14 +508,14 @@ window.__ModuleLoader__.load({
                             const value = event.currentTarget.value;
                             setEditing(current => current ? { ...current, role: value } : current);
                         },
-                    }, h('option', { value: 'system' }, 'system'), h('option', { value: 'user' }, 'user'), h('option', { value: 'assistant' }, 'assistant'), h('option', { value: 'model' }, 'model'))), h('label', { className: 'dsh-preset-picker-field' }, h('span', null, '位置'), h('select', {
+                    }, h('option', { value: 'system' }, '系统 (system)'), h('option', { value: 'user' }, '用户 (user)'), h('option', { value: 'assistant' }, '助手 (assistant)'), h('option', { value: 'model' }, '模型 (model)'))), h('label', { className: 'dsh-preset-picker-field' }, h('span', null, '位置'), h('select', {
                         value: String(editing.position),
                         disabled: !editing.canEditPosition || isBusy,
                         onChange: (event) => {
                             const value = event.currentTarget.value === '1' ? 1 : 0;
                             setEditing(current => current ? { ...current, position: value } : current);
                         },
-                    }, h('option', { value: '0' }, '按顺序表'), h('option', { value: '1' }, '按聊天深度')))), kind === 'prompt' && editing.position === 1 && editing.canEditPosition && h('div', { className: 'dsh-preset-picker-editor-grid' }, h('label', { className: 'dsh-preset-picker-field' }, h('span', null, '深度'), h('input', {
+                    }, h('option', { value: '0' }, '按顺序表位置'), h('option', { value: '1' }, '按聊天深度插入')))), kind === 'prompt' && editing.position === 1 && editing.canEditPosition && h('div', { className: 'dsh-preset-picker-editor-grid' }, h('label', { className: 'dsh-preset-picker-field' }, h('span', null, '插入深度'), h('input', {
                         type: 'number',
                         min: 0,
                         value: editing.depth,
@@ -524,7 +524,7 @@ window.__ModuleLoader__.load({
                             const value = event.currentTarget.value;
                             setEditing(current => current ? { ...current, depth: value } : current);
                         },
-                    })), h('label', { className: 'dsh-preset-picker-field' }, h('span', null, '同深度顺序'), h('input', {
+                    })), h('label', { className: 'dsh-preset-picker-field' }, h('span', null, '同深度排序'), h('input', {
                         type: 'number',
                         value: editing.order,
                         disabled: isBusy,
@@ -541,20 +541,20 @@ window.__ModuleLoader__.load({
                             const value = event.currentTarget.value;
                             setEditing(current => current ? { ...current, content: value } : current);
                         },
-                    })), h('div', { className: 'dsh-preset-picker-editor-footer' }, h('small', null, `${editing.content.length} 字符`), h('div', { className: 'dsh-preset-picker-editor-actions' }, h(Button, { variant: 'ghost', size: 'sm', disabled: isBusy, onClick: () => setEditing(null) }, '取消'), h(Button, { variant: 'primary', size: 'sm', disabled: isBusy, onClick: () => { void saveEdit(); } }, busyEntry === entryKey ? '保存中…' : '保存'))))
+                    })), h('div', { className: 'dsh-preset-picker-editor-footer' }, h('small', null, `${editing.content.length} 字`), h('div', { className: 'dsh-preset-picker-editor-actions' }, h(Button, { variant: 'ghost', size: 'sm', disabled: isBusy, onClick: () => setEditing(null) }, '取消'), h(Button, { variant: 'primary', size: 'sm', disabled: isBusy, onClick: () => { void saveEdit(); } }, busyEntry === entryKey ? '保存中…' : '保存'))))
                     : [
-                        h('pre', { key: 'pre' }, entry.text || (entry.marker ? '运行时读取' : '空正文')),
+                        h('pre', { key: 'pre' }, entry.text || (entry.marker ? '（运行时动态填充）' : '（暂无内容）')),
                         h('div', { key: 'foot', className: 'dsh-preset-picker-entry-foot' }, entry.canEdit
                             ? h('button', {
                                 type: 'button',
                                 className: 'dsh-preset-picker-inline-link',
                                 disabled: isBusy,
                                 onClick: () => startEdit(entry, entryKey, kind),
-                            }, '简易编辑')
+                            }, '编辑内容')
                             : entry.readOnlyReason ? h('small', null, entry.readOnlyReason) : null),
                     ]));
             };
-            return h('section', { className: 'dsh-preset-picker' + (preview ? ' has-preview' : ''), 'aria-label': '预设选择' }, h('div', { className: 'dsh-preset-picker-header' }, h('div', { className: 'dsh-preset-picker-current' }, h('strong', { title: active?.name }, active?.name ?? (data ? '未选择预设' : '正在加载…')), data && h('small', null, [data.mode, data.explicit ? '本会话' : '默认', data.enabled ? '注入已开启' : '注入已关闭'].filter(Boolean).join(' · '))), h(Button, { variant: 'ghost', size: 'sm', onClick: openWorkbench }, '打开工作台')), h(Input, { className: 'dsh-preset-picker-search', value: filter, placeholder: '搜索预设', 'aria-label': '搜索预设',
+            return h('section', { className: 'dsh-preset-picker' + (preview ? ' has-preview' : ''), 'aria-label': '预设选择' }, h('div', { className: 'dsh-preset-picker-header' }, h('div', { className: 'dsh-preset-picker-current' }, h('strong', { title: active?.name }, active?.name ?? (data ? '未选择预设' : '正在加载…')), data && h('small', null, [data.mode, data.explicit ? '当前会话' : '跟随默认', data.enabled ? '注入已开启' : '注入已关闭'].filter(Boolean).join(' · '))), h(Button, { variant: 'ghost', size: 'sm', onClick: openWorkbench }, '打开工作台')), h(Input, { className: 'dsh-preset-picker-search', value: filter, placeholder: '搜索预设', 'aria-label': '搜索预设',
                 icon: h(IconSearchOutlineRegular, null), onChange: (event) => setFilter(event.currentTarget.value) }), h('ul', { className: 'dsh-preset-picker-list', 'aria-label': '预设列表' }, presets?.map(preset => {
                 const isActive = data?.enabled === true && preset.id === data.presetId;
                 const isPreviewing = candidate === preset.id;
@@ -569,7 +569,7 @@ window.__ModuleLoader__.load({
                     onClick: () => { setSelection({ modeId, id: preset.id }); setNotice(''); } }, '预览'));
             })), presets?.length === 0 && h('small', null, filter.trim() ? '没有匹配的预设' : '尚未导入预设'), h('div', { className: 'dsh-preset-picker-actions' }, h(Button, { variant: 'primary', size: 'sm', disabled: !ready || !preview || !candidate ||
                     (data?.explicit && data.enabled && candidate === data.presetId), onClick: () => { if (candidate)
-                    void save(candidate); } }, '使用此预设'), h(Button, { variant: 'outline', size: 'sm', disabled: !ready || !data?.explicit, onClick: () => { void save(null); } }, '跟随默认')), (saving || error || notice) && h('p', { role: 'status' }, saving ? '正在应用…' : error || notice), error && h(Button, { size: 'sm', variant: 'outline', onClick: () => setReload(value => value + 1) }, '重试'), preview && h('div', { className: 'dsh-preset-picker-preview' }, h('div', { className: 'dsh-preset-picker-preview-head' }, h('h2', null, previewPreset?.name ? `提示词预览 · ${previewPreset.name}` : '提示词预览'), h('span', { className: 'dsh-preset-picker-count' }, `已启用 ${enabledCount} / ${preview.entries.length}`)), preview.prefix && h('small', null, '包含助手预填充'), preview.entries.map((entry, index) => renderManagedEntry(entry, `prompt:${entry.identifier || index}`, 'prompt')), preview.prefixText && renderManagedEntry({
+                    void save(candidate); } }, '应用此预设'), h(Button, { variant: 'outline', size: 'sm', disabled: !ready || !data?.explicit, onClick: () => { void save(null); } }, '恢复默认')), (saving || error || notice) && h('p', { role: 'status' }, saving ? '正在应用…' : error || notice), error && h(Button, { size: 'sm', variant: 'outline', onClick: () => setReload(value => value + 1) }, '重试'), preview && h('div', { className: 'dsh-preset-picker-preview' }, h('div', { className: 'dsh-preset-picker-preview-head' }, h('h2', null, previewPreset?.name ? `提示词管理 · ${previewPreset.name}` : '提示词管理'), h('span', { className: 'dsh-preset-picker-count' }, `已启用 ${enabledCount} / ${preview.entries.length}`)), h('small', null, preview.prefix ? '改动直接保存到预设并与工作台同步 · 含助手预填充' : '改动直接保存到预设并与工作台同步'), preview.entries.map((entry, index) => renderManagedEntry(entry, `prompt:${entry.identifier || index}`, 'prompt')), preview.prefixText && renderManagedEntry({
                 identifier: '__assistant_prefill__',
                 name: '助手预填充',
                 rawName: '助手预填充',

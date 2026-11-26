@@ -285,7 +285,7 @@ function renderLibraryCard(row) {
     button('…', '更多', event => openMenu(event.currentTarget, libraryMenu(row))),
   );
   top.append(actions);
-  card.append(top, el('p', 'preview', short(row.content, 90) || '（空内容）'));
+  card.append(top, el('p', 'preview', short(row.content, 90) || '（暂无内容）'));
   if (row.kind !== 'prompt' || promptOf(row.id)) card.onclick = () => { selection = { kind: row.kind, id: row.id }; setNarrowPane('inspector'); renderAll(); };
   return card;
 }
@@ -932,7 +932,7 @@ function contextFileEditor(source, textarea) {
   zone.setAttribute('aria-label', '粘贴图片或拖拽文件到此处');
   zone.append(el('p', '', '粘贴图片或拖拽文件到此处'));
   zone.append(el('p', 'context-paste-hint',
-    '支持 PNG / JPEG / WebP / GIF 与 PDF / TXT / JSON；单个不超过 8 MiB，合计不超过 24 MiB（按 base64 编码后计）、最多 ' + CONTEXT_MAX_ITEMS + ' 项。保存请求总上限 32 MiB；Chat 图片请放在用户条目。'));
+    '支持常见图片（PNG / JPEG / WebP / GIF）与文档（PDF / TXT / JSON）；单文件 ≤ 8 MiB，总计 ≤ 24 MiB（最多 ' + CONTEXT_MAX_ITEMS + ' 项）。图片请添加到「用户」条目。'));
   const actions = el('div', 'context-paste-actions');
   const input = el('input');
   input.type = 'file';
@@ -1215,7 +1215,7 @@ function renderChainRowInPlace(identifier) {
   const row = $('chain-list').querySelector('[data-id="' + CSS.escape(String(identifier)) + '"]');
   if (!row || !prompt) return;
   row.querySelector('.name').textContent = prompt.name || identifier;
-  row.querySelector('.preview').textContent = short(prompt.content, 90) || '（空内容）';
+  row.querySelector('.preview').textContent = short(prompt.content, 90) || '（暂无内容）';
 }
 function numberField(labelText, value, fallback, onCommit) {
   const input = el('input');
@@ -1226,10 +1226,10 @@ function numberField(labelText, value, fallback, onCommit) {
 }
 function injectionTab(prompt) {
   const wrap = el('div', 'field');
-  wrap.append(el('p', 'muted', 'injection_position = 1 时按 injection_depth / injection_order 注入；0 表示按顺序表进入上下文。'));
+  wrap.append(el('p', 'muted', '按顺序表插入时（injection_position = 0）遵循列表位置；按深度插入时（injection_position = 1）由下方深度与排序决定。'));
   wrap.append(
-    numberField('injection_depth（深度）', prompt.injection_depth, 4, value => { prompt.injection_depth = value; markPreset(); }),
-    numberField('injection_order（同深度顺序）', prompt.injection_order, 100, value => { prompt.injection_order = value; markPreset(); }),
+    numberField('插入深度 (injection_depth)', prompt.injection_depth, 4, value => { prompt.injection_depth = value; markPreset(); }),
+    numberField('同深度排序 (injection_order)', prompt.injection_order, 100, value => { prompt.injection_order = value; markPreset(); }),
   );
   const trigger = el('input');
   trigger.value = (prompt.injection_trigger ?? []).join(',');
@@ -1239,15 +1239,15 @@ function injectionTab(prompt) {
     if (values.length) prompt.injection_trigger = values; else delete prompt.injection_trigger;
     markPreset();
   };
-  wrap.append(field('injection_trigger（逗号分隔，只有 normal 会命中）', trigger));
+  wrap.append(field('触发条件 (injection_trigger，逗号分隔，仅 normal 生效)', trigger));
   return wrap;
 }
 function templateInjectionTab(entry) {
   const wrap = el('div', 'field');
   wrap.append(el('p', 'muted', '这些值会在模板加入提示词链时写进新条目。'));
   wrap.append(
-    numberField('injection_depth（深度）', entry.injectionDepth, 4, value => { entry.injectionDepth = value; templateDirty = true; status('模板未保存', 'dirty'); }),
-    numberField('injection_order（同深度顺序）', entry.injectionOrder, 100, value => { entry.injectionOrder = value; templateDirty = true; status('模板未保存', 'dirty'); }),
+    numberField('插入深度 (injection_depth)', entry.injectionDepth, 4, value => { entry.injectionDepth = value; templateDirty = true; status('模板未保存', 'dirty'); }),
+    numberField('同深度排序 (injection_order)', entry.injectionOrder, 100, value => { entry.injectionOrder = value; templateDirty = true; status('模板未保存', 'dirty'); }),
   );
   const trigger = el('input');
   trigger.value = (entry.injectionTrigger ?? []).join(',');
@@ -1258,7 +1258,7 @@ function templateInjectionTab(entry) {
     templateDirty = true;
     status('模板未保存', 'dirty');
   };
-  wrap.append(field('injection_trigger（逗号分隔）', trigger));
+  wrap.append(field('触发条件 (injection_trigger，逗号分隔)', trigger));
   return wrap;
 }
 function readOnlyBlock(title, value, note = NOT_IMPLEMENTED) {

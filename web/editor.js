@@ -86,8 +86,8 @@ function modeName(id) {
 }
 function updateSessionNote() {
   const chosen = state.modeDefaultName ? `“${state.modeDefaultName}”` : '尚未设置';
-  if (!sessionId) $('session-note').textContent = `侧边栏工作台 · 新会话自动注入使用：${chosen}`;
-  else $('session-note').textContent = `当前会话模式：${modeName(state.sessionMode)} · 预设注入可用 /preset 随时切换`;
+  if (!sessionId) $('session-note').textContent = `全局工作台 · 默认预设：${chosen}`;
+  else $('session-note').textContent = `当前模式：${modeName(state.sessionMode)} · 对话中可用 /preset 随时切换注入`;
 }
 function markDirty() {
   ++previewGeneration; previewController?.abort();
@@ -179,8 +179,9 @@ function loadDraft(id) {
   const packaged = record?.sharePackage;
   $('apply-package-prefill').hidden = !packaged?.prefill;
   $('package-note').textContent = packaged
-    ? '分享包的接口设置在导入时恢复到全局，可再次应用。工具配置需另行导入。'
-    : '分享文件为单个 .dsh-preset.json，包含预设与已保存接口设置，并预留工具预设和分组。';
+    ? '来自 .dsh-preset.json 分享包：导入时已恢复接口设置，可按需重新应用；工具配置请在「工具策略」中导入。'
+    : '';
+  $('package-note').hidden = !packaged;
   ensureGroups();
   // 旧的单数 contextFile 在读入时就迁移成 contextFiles，保存路径只写数组。
   migrateContextFiles(preset);
@@ -255,7 +256,7 @@ async function refreshPrefillWarning() {
     if (recordId !== selectedId) return;
     if (result.pending) {
       $('prefill-warning').hidden = false;
-      $('prefill-warning-text').textContent = '动态模板预填充状态待解析。';
+      $('prefill-warning-text').textContent = '动态模板的预填充状态需在实际解析后确认。';
       return;
     }
     const detected = result.assistantPrefix?.active === true;
@@ -264,7 +265,7 @@ async function refreshPrefillWarning() {
     if (!active) return;
     if (!detected) {
       $('prefill-warning-text').textContent =
-        '已强制启用预填充：本预设未被识别为 assistant 结尾，仍会按预填充续写发送。若末条不是 assistant，请求会按普通请求发出。';
+        '已开启强制预填充：未自动检测到 assistant 结尾，发送时仍将尝试按预填充续写处理。';
       return;
     }
     if (state.forcePrefill === true || state.deepseekBetaPrefix === true) {
@@ -272,12 +273,12 @@ async function refreshPrefillWarning() {
         '工具调用会通过 DSML 转换并恢复为标准 tool_calls。' :
         state.prefixNonOfficialRemoveTools !== false ?
           '官方与非官方接口都会移除原生工具字段。' :
-          '官方 Beta 会移除原生工具字段，非官方接口会将其原样发送。';
+          '官方 Beta 会移除原生工具字段，非官方接口会保留原生工具字段。';
       $('prefill-warning-text').textContent =
-        '此预设的最终注入消息是 assistant，属于预填充续写。官方地址会切换到 Beta，非官方适配器地址保持不变。' + tools;
+        '当前预设以 assistant 结尾，将按预填充续写发送（官方接口自动切换 Beta，非官方地址不变）。' + tools;
     } else {
       $('prefill-warning-text').textContent =
-        '此预设的最终注入消息是 assistant，属于预填充续写。请使用支持 assistant prefix 的接口，或在下方开启预填充自动兼容。';
+        '当前预设以 assistant 结尾，属于预填充续写。请使用支持预填充的对话补全接口，或在「请求与接口」中开启自动兼容。';
     }
   } catch {
     if (recordId === selectedId) $('prefill-warning').hidden = true;
@@ -361,17 +362,17 @@ function renderConnectionChoice() {
   $('prefill-settings').disabled = messages;
   $('prefill-disabled-note').hidden = !messages;
   if (!selection) {
-    $('connection-note').textContent = '未能从宿主读取连接信息：工作台无法列出会话可用的连接，也无法切换。';
+    $('connection-note').textContent = '无法读取连接信息，暂不可切换。';
     return;
   }
   if (!rows.length) {
     $('connection-note').textContent = selection.canSwitch === true
-      ? '未能从宿主读取连接信息：宿主没有返回任何可选连接，无法切换。'
-      : '当前 DSH 不支持切换会话模型。';
+      ? '宿主未返回可用连接，暂不可切换。'
+      : '当前 DSH 版本不支持切换会话连接。';
     return;
   }
   if (selection.canSwitch !== true) {
-    $('connection-note').textContent = '当前 DSH 不支持切换会话模型。';
+    $('connection-note').textContent = '当前 DSH 版本不支持切换会话连接。';
     return;
   }
   if (connectionSwitchSaving) {
@@ -380,7 +381,7 @@ function renderConnectionChoice() {
   }
   const protocol = currentConnectionProtocol();
   const protocolText = protocol === 'unknown'
-    ? '协议未知（无法确认该连接是否支持对话补全兼容路径）'
+    ? '协议未知（无法确认是否支持对话补全）'
     : connectionProtocolLabel(protocol);
   $('connection-note').textContent = current
     ? `${protocolText} · ${selection.model ?? "未选择模型"}`
@@ -436,19 +437,19 @@ function renderProtocolNotice() {
   if (currentProtocol === 'messages') {
     const head = document.createElement('strong');
     const body = document.createElement('p');
-    head.textContent = '当前连接使用 Messages 协议：预设兼容路径不适用';
+    head.textContent = '当前连接使用 Messages 接口：预填充与兼容能力暂不生效';
     const target = chatCompletionChoice();
-    body.textContent = '预填充续写、工具调用转换与正文提取只在对话补全接口下生效，插件不会改写该请求。' +
+    body.textContent = '预填充续写、工具调用转换与思考正文分离仅在对话补全接口下生效。' +
       (target
-        ? `如需这些能力，请在页面顶部的“会话连接”里切换到「${target.label || target.provider}」（对话补全接口）。`
-        : '如需这些能力，请切换到提供对话补全接口的连接。');
+        ? `如需使用，请在顶部“会话连接”中切换至「${target.label || target.provider}」。`
+        : '如需使用，请切换至支持对话补全的连接。');
     parts.push(head, body);
   }
   if (notes.length) {
     const head = document.createElement('strong');
     const intro = document.createElement('p');
-    head.textContent = 'Messages 协议无法保留的能力';
-    intro.textContent = '以下内容不会被转换或恢复：';
+    head.textContent = 'Messages 接口暂不支持以下能力';
+    intro.textContent = '以下内容将保持原样，不会转换：';
     const list = document.createElement('ul');
     for (const note of notes) {
       const item = document.createElement('li');
