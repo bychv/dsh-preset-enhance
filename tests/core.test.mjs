@@ -246,6 +246,7 @@ test('client hides conversation width handles locally while keeping sidebar resi
     };
     let mountedSession = 'conversation-session';
     const opened = [];
+    const panels = [];
     const tabs = [];
     plugin.apply({
       slots,
@@ -257,9 +258,10 @@ test('client hides conversation width handles locally while keeping sidebar resi
           } } });
           return;
         }
-        assert.deepEqual(names, ['slots', 'sidebarRightTabs', 'sidebarRight']);
+        assert.deepEqual(names, ['slots', 'sidebarRightTabs', 'sidebarRight', 'layout']);
         callback({
           slots,
+          layout: { selectPanel(id) { panels.push(id); } },
           sidebarRightTabs: { register(tab) { tabs.push(tab); } },
           sidebarRight: {
             mounted: { getSnapshot: () => mountedSession },
@@ -280,6 +282,10 @@ test('client hides conversation width handles locally while keeping sidebar resi
     const requestForm = requestSettings.type(requestSettings.props);
     assert.equal(requestForm.type, SettingsForm);
     assert.equal(requestForm.children[0].type, SettingsValueField);
+    const rightEntry = registered.find(entry => entry.options.name === 'sidebar.right.pane.tab');
+    const picker = rightEntry.component({ sessionId: 'conversation-session' });
+    picker.props.openWorkbench();
+    assert.deepEqual(panels, [registered.find(entry => entry.options.name === 'main').options.key]);
     const inputEntry = registered.find(entry => entry.options.name === 'conversation.input.right');
     const composer = inputEntry.component({ sessionId: 'conversation-session' });
     const button = composer.type(composer.props);

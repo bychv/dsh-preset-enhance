@@ -25,12 +25,6 @@
 .dsh-preset-picker-current strong { display: block; font-size: 14px; overflow-wrap: anywhere; }
 .dsh-preset-picker small,
 .dsh-preset-picker [role='status'] { color: var(--dsw-alias-label-secondary); font-size: 12px; }
-.dsh-preset-picker-header a {
-  color: var(--dsw-alias-state-business-primary);
-  font-size: 12px;
-  text-decoration: none;
-}
-.dsh-preset-picker-header a:hover { text-decoration: underline; }
 .dsh-preset-picker-search { flex: none; }
 
 .dsh-preset-picker-list {

@@ -49,6 +49,7 @@ window.__ModuleLoader__.load({
         let hostSlots;
         let composerBlocks;
         const pickerKind = 'preset-enhance-picker';
+        const workbenchPanelId = 'preset-enhance-editor';
         const keptFrames = new Map();
         const MAX_PARKED_FRAMES = 4;
         const workbenchSrc = (sessionId, modeId = '') => '/preset-enhance?sessionId=' + encodeURIComponent(sessionId) +
@@ -215,7 +216,7 @@ window.__ModuleLoader__.load({
             width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8,
             strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true,
         }, React.createElement('path', { d: 'M5 4h14v16H5z' }), React.createElement('path', { d: 'M8 8h8M8 12h5M8 16h8' }), React.createElement('path', { d: 'M16 11v4M14 13h4' }));
-        function PresetPicker({ sessionId }) {
+        function PresetPicker({ sessionId, openWorkbench }) {
             const modeId = useInputMode(sessionId);
             const [filter, setFilter] = React.useState('');
             const [selection, setSelection] = React.useState(null);
@@ -298,7 +299,7 @@ window.__ModuleLoader__.load({
                 }
             }
             const h = React.createElement;
-            return h('section', { className: 'dsh-preset-picker', 'aria-label': '预设选择' }, h('div', { className: 'dsh-preset-picker-header' }, h('div', { className: 'dsh-preset-picker-current' }, h('strong', { title: active?.name }, active?.name ?? (data ? '未选择预设' : '正在加载…')), data && h('small', null, [data.mode, data.explicit ? '本会话' : '默认', data.enabled ? '注入已开启' : '注入已关闭'].filter(Boolean).join(' · '))), h('a', { href: workbenchSrc(sessionId, modeId), target: '_blank', rel: 'noopener' }, '打开工作台')), h(Input, { className: 'dsh-preset-picker-search', value: filter, placeholder: '搜索预设', 'aria-label': '搜索预设',
+            return h('section', { className: 'dsh-preset-picker', 'aria-label': '预设选择' }, h('div', { className: 'dsh-preset-picker-header' }, h('div', { className: 'dsh-preset-picker-current' }, h('strong', { title: active?.name }, active?.name ?? (data ? '未选择预设' : '正在加载…')), data && h('small', null, [data.mode, data.explicit ? '本会话' : '默认', data.enabled ? '注入已开启' : '注入已关闭'].filter(Boolean).join(' · '))), h(Button, { variant: 'ghost', size: 'sm', onClick: openWorkbench }, '打开工作台')), h(Input, { className: 'dsh-preset-picker-search', value: filter, placeholder: '搜索预设', 'aria-label': '搜索预设',
                 icon: h(IconSearchOutlineRegular, null), onChange: (event) => setFilter(event.currentTarget.value) }), h('ul', { className: 'dsh-preset-picker-list', 'aria-label': '预设列表' }, presets?.map(preset => {
                 const active = data?.enabled === true && preset.id === data.presetId;
                 return h('li', { key: preset.id }, h(Button, { className: 'dsh-preset-picker-choice', variant: 'ghost', size: 'sm', 'aria-pressed': active,
@@ -321,10 +322,6 @@ window.__ModuleLoader__.load({
             const meta = [role, entry.enabled ? '' : '停用', entry.dynamic ? '动态模板' : entry.marker ? '标记' : '',
                 entry.depth === null ? '' : `深度 ${entry.depth}`].filter(Boolean).join(' · ');
             return h('details', { key: index }, h('summary', null, h('span', null, entry.name), h('small', null, meta)), h('pre', null, entry.text || (entry.marker ? '运行时读取' : '空正文')));
-        }
-        function RightPicker(props) {
-            const sessionId = props.sessionId ?? props.injected?.sessionId ?? '';
-            return React.createElement(PresetPicker, { key: sessionId, sessionId });
         }
         function ComposerPicker({ sidebar, ...props }) {
             const sessionId = props.sessionId ?? props.injected?.sessionId;
@@ -372,8 +369,9 @@ window.__ModuleLoader__.load({
                         name: 'plugins.bundle.config', key: 'dsh-preset-enhance',
                     }, () => React.createElement(RequestUserAgentSettings, { store, actions })));
                 });
-                ctx.inject?.(['slots', 'sidebarRightTabs', 'sidebarRight'], scoped => {
+                ctx.inject?.(['slots', 'sidebarRightTabs', 'sidebarRight', 'layout'], scoped => {
                     const sidebar = scoped.sidebarRight;
+                    const openWorkbench = () => scoped.layout.selectPanel(workbenchPanelId);
                     scoped.effect?.(() => {
                         const stylesheet = document.createElement('link');
                         stylesheet.rel = 'stylesheet';
@@ -387,7 +385,10 @@ window.__ModuleLoader__.load({
                     }));
                     scoped.slots.inject('sidebar.right.pane.tab', () => scoped.slots.register({
                         name: 'sidebar.right.pane.tab', key: pickerKind,
-                    }, RightPicker));
+                    }, (props) => {
+                        const sessionId = props.sessionId ?? props.injected?.sessionId ?? '';
+                        return React.createElement(PresetPicker, { key: sessionId, sessionId, openWorkbench });
+                    }));
                     scoped.slots.inject('conversation.input.right', () => scoped.slots.register({
                         name: 'conversation.input.right', id: pickerKind, order: 30,
                     }, (props) => React.createElement(ComposerPicker, { ...props, sidebar })));
@@ -398,14 +399,14 @@ window.__ModuleLoader__.load({
                 // on reload. One registration per apply, released with the fiber, is what keeps
                 // sidebar buttons, editors and the resize lock from accumulating.
                 ctx.slots.inject('conversation.view', () => ctx.slots.register({
-                    name: 'conversation.view', id: 'preset-enhance-editor', order: 25,
+                    name: 'conversation.view', id: workbenchPanelId, order: 25,
                     label: '预设',
                 }, SessionFrame));
                 ctx.slots.inject('main', () => ctx.slots.register({
-                    name: 'main', key: 'preset-enhance-editor',
+                    name: 'main', key: workbenchPanelId,
                 }, MainPanelFrame));
                 ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
-                    name: 'sidebar.panellist', id: 'preset-enhance-editor', order: 30, label: '预设工作台',
+                    name: 'sidebar.panellist', id: workbenchPanelId, order: 30, label: '预设工作台',
                 }, PresetIcon));
             } };
     },

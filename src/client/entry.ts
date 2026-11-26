@@ -37,6 +37,7 @@ type RequestFormModel = {
 };
 type ClientContext = {
   slots: HostSlots; sidebarRightTabs?: RightTabs; sidebarRight?: RightSidebar; conversation?: { blocks?: ComposerBlocks };
+  layout?: { selectPanel(panelId: string): void };
   configForms?: { get(entryId: string): RequestConfigForm };
   inject?(names: string[], callback: (context: ClientContext) => void): unknown;
   effect?(callback:()=>()=>void):unknown;
@@ -105,6 +106,7 @@ type PickerData = {
     let hostSlots: HostSlots | undefined;
     let composerBlocks: ComposerBlocks | undefined;
     const pickerKind = 'preset-enhance-picker';
+    const workbenchPanelId = 'preset-enhance-editor';
     const keptFrames = new Map<string, KeptFrame[]>();
     const MAX_PARKED_FRAMES = 4;
     const workbenchSrc = (sessionId: string, modeId = '') => '/preset-enhance?sessionId=' + encodeURIComponent(sessionId) +
@@ -269,7 +271,7 @@ type PickerData = {
     React.createElement('path', { d: 'M8 8h8M8 12h5M8 16h8' }),
     React.createElement('path', { d: 'M16 11v4M14 13h4' }));
 
-    function PresetPicker({ sessionId }: { sessionId: string }) {
+    function PresetPicker({ sessionId, openWorkbench }: { sessionId: string; openWorkbench: () => void }) {
       const modeId = useInputMode(sessionId);
       const [filter, setFilter] = React.useState('');
       const [selection, setSelection] = React.useState<{modeId: string; id: string} | null>(null);
@@ -347,7 +349,7 @@ type PickerData = {
           h('div', { className: 'dsh-preset-picker-current' },
             h('strong', { title: active?.name }, active?.name ?? (data ? '未选择预设' : '正在加载…')),
             data && h('small', null, [data.mode, data.explicit ? '本会话' : '默认', data.enabled ? '注入已开启' : '注入已关闭'].filter(Boolean).join(' · '))),
-          h('a', { href: workbenchSrc(sessionId, modeId), target: '_blank', rel: 'noopener' }, '打开工作台')),
+          h(Button, { variant: 'ghost', size: 'sm', onClick: openWorkbench }, '打开工作台')),
         h(Input, { className: 'dsh-preset-picker-search', value: filter, placeholder: '搜索预设', 'aria-label': '搜索预设',
           icon: h(IconSearchOutlineRegular, null), onChange: (event: {currentTarget: HTMLInputElement}) => setFilter(event.currentTarget.value) }),
         h('ul', { className: 'dsh-preset-picker-list', 'aria-label': '预设列表' }, presets?.map(preset => {
@@ -385,10 +387,6 @@ type PickerData = {
       return h('details', { key: index },
         h('summary', null, h('span', null, entry.name), h('small', null, meta)),
         h('pre', null, entry.text || (entry.marker ? '运行时读取' : '空正文')));
-    }
-    function RightPicker(props: FrameProps) {
-      const sessionId = props.sessionId ?? props.injected?.sessionId ?? '';
-      return React.createElement(PresetPicker, { key: sessionId, sessionId });
     }
     function ComposerPicker({ sidebar, ...props }: FrameProps & { sidebar: RightSidebar }) {
       const sessionId = props.sessionId ?? props.injected?.sessionId;
@@ -439,8 +437,9 @@ type PickerData = {
           name: 'plugins.bundle.config', key: 'dsh-preset-enhance',
         }, () => React.createElement(RequestUserAgentSettings, { store, actions })));
       });
-      ctx.inject?.(['slots', 'sidebarRightTabs', 'sidebarRight'], scoped => {
+      ctx.inject?.(['slots', 'sidebarRightTabs', 'sidebarRight', 'layout'], scoped => {
         const sidebar = scoped.sidebarRight!;
+        const openWorkbench = () => scoped.layout!.selectPanel(workbenchPanelId);
         scoped.effect?.(() => {
           const stylesheet = document.createElement('link');
           stylesheet.rel = 'stylesheet';
@@ -454,7 +453,10 @@ type PickerData = {
         }));
         scoped.slots.inject('sidebar.right.pane.tab', () => scoped.slots.register({
           name: 'sidebar.right.pane.tab', key: pickerKind,
-        }, RightPicker));
+        }, (props: FrameProps) => {
+          const sessionId = props.sessionId ?? props.injected?.sessionId ?? '';
+          return React.createElement(PresetPicker, { key: sessionId, sessionId, openWorkbench });
+        }));
         scoped.slots.inject('conversation.input.right', () => scoped.slots.register({
           name: 'conversation.input.right', id: pickerKind, order: 30,
         }, (props: FrameProps) => React.createElement(ComposerPicker, { ...props, sidebar })));
@@ -465,14 +467,14 @@ type PickerData = {
       // on reload. One registration per apply, released with the fiber, is what keeps
       // sidebar buttons, editors and the resize lock from accumulating.
       ctx.slots.inject('conversation.view', () => ctx.slots.register({
-        name: 'conversation.view', id: 'preset-enhance-editor', order: 25,
+        name: 'conversation.view', id: workbenchPanelId, order: 25,
         label: '预设',
       }, SessionFrame));
       ctx.slots.inject('main', () => ctx.slots.register({
-        name: 'main', key: 'preset-enhance-editor',
+        name: 'main', key: workbenchPanelId,
       }, MainPanelFrame));
       ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
-        name: 'sidebar.panellist', id: 'preset-enhance-editor', order: 30, label: '预设工作台',
+        name: 'sidebar.panellist', id: workbenchPanelId, order: 30, label: '预设工作台',
       }, PresetIcon));
     } };
   },
