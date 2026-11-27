@@ -447,6 +447,7 @@ export interface PresetState {
   selectedPresetId: string | null;
   modeDefaultPresets: Record<string, string>;
   deepseekSafetyCheck: DeepSeekSafetyCheckLevel;
+  stripHarnessHeaders: boolean;
   deepseekBetaPrefix: boolean;
   /**
    * Manual fallback for prefill detection: send the assistant-prefix continuation even when the

@@ -226,4 +226,30 @@ test('workbench exposes light mode tokens and workspace tabs in html/css', () =>
   assert.match(html, /id="tool-search"/);
   assert.match(html, /id="prompt-duplicate"/);
   assert.match(html, /id="prompt-delete"/);
+  assert.match(html, /id="strip-harness-headers"/);
+});
+
+test('strip-harness-headers toggle saves global preference and updates state', async () => {
+  const requests = [];
+  const ui = editor(new Map(), async (_url, init) => {
+    const body = JSON.parse(init.body);
+    requests.push(body);
+    return {
+      ok: true,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ revision: body.revision + 1, enabled: body.enabled }),
+    };
+  });
+  const toggle = ui.get('strip-harness-headers');
+  toggle.checked = true;
+  await toggle.onchange();
+  assert.equal(requests.at(-1).action, 'set-strip-harness-headers');
+  assert.equal(requests.at(-1).enabled, true);
+  assert.equal(ui.get('strip-harness-headers').checked, true);
+  assert.match(ui.get('status').textContent, /已开启移除内置适配器/);
+
+  toggle.checked = false;
+  await toggle.onchange();
+  assert.equal(requests.at(-1).enabled, false);
+  assert.match(ui.get('status').textContent, /已关闭移除内置适配器/);
 });

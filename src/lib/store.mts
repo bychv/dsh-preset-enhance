@@ -12,6 +12,7 @@ const initialState = (): PresetState => ({
   selectedPresetId: null,
   modeDefaultPresets: {},
   deepseekSafetyCheck: 'omit',
+  stripHarnessHeaders: false,
   deepseekBetaPrefix: false,
   forcePrefill: false,
   prefixToolCalls: false,
@@ -52,6 +53,7 @@ function normalize(state: PresetState): PresetState {
     .filter(([modeId, presetId]) => modeId && typeof presetId === 'string' && presetIds.has(presetId)));
   const safetyCheck: unknown = state.deepseekSafetyCheck;
   state.deepseekSafetyCheck = safetyCheck === true || safetyCheck === 'high' ? 'high' : safetyCheck === 'low' ? 'low' : 'omit';
+  state.stripHarnessHeaders = state.stripHarnessHeaders === true;
   state.deepseekBetaPrefix = state.deepseekBetaPrefix === true;
   state.forcePrefill = state.forcePrefill === true;
   state.prefixToolCalls = state.prefixToolCalls === true;

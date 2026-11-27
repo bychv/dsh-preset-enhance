@@ -90,6 +90,8 @@ export interface ProtocolObserver {
 export interface ProtocolDetectOptions {
   /** Clock used for `observedAt`; injectable for deterministic tests. */
   now?: () => number;
+  /** Active stream session id when the outbound request omits the harness session header. */
+  sessionId?: string;
 }
 
 export interface ProtocolObserveOptions extends ProtocolDetectOptions {
@@ -230,7 +232,10 @@ export function detectProtocol(
     protocol = 'messages';
     determinedBy = 'headers';
   }
-  const sessionId = headerValue(headers, SESSION_ID_HEADER);
+  const headerSession = headerValue(headers, SESSION_ID_HEADER);
+  const sessionId = headerSession !== ''
+    ? headerSession
+    : (protocol !== 'unknown' && options.sessionId ? options.sessionId : '');
   return {
     protocol,
     capability: protocolCapability(protocol),

@@ -161,6 +161,7 @@ function degradedPayload(reason: string): Record<string, unknown> {
     postToolPrefixMode: 'inherit',
     postToolPrefixText: '',
     deepseekSafetyCheck: 'omit',
+    stripHarnessHeaders: false,
     deepseekBetaPrefix: false,
     prefixToolCalls: false,
     prefixOutputExtraction: false,
@@ -231,7 +232,6 @@ const chatConnection = () => {
     ...(chatErrorFactory ? { createError: chatErrorFactory } : {}),
     ...(chatAttribution ? { attributionHeaders: chatAttribution } : {}),
     resolveApiKey: async () => resolveChatApiKey(ctx, config.chatApiKeyEnv ?? DEFAULT_CHAT_API_KEY_ENV),
-    resolveUserId: () => 'preset-enhance',
     // Images keep going through the host's attachment service: we only turn the
     // retained references into the bytes the provider request needs.
     resolveRequestImages: async (options, signal) => buildRequestImages(ctx, chatConnection, options, signal),
@@ -305,11 +305,13 @@ const chatConnection = () => {
 
   let policySnapshot = toolPolicySnapshot();
   let deepseekSafetyCheck: DeepSeekSafetyCheckLevel = 'omit';
+  let stripHarnessHeaders = false;
   if (!startupError) {
     try {
       const state = await store.read();
       policySnapshot = toolPolicySnapshot(state);
       deepseekSafetyCheck = state.deepseekSafetyCheck;
+      stripHarnessHeaders = state.stripHarnessHeaders === true;
       // A locked file can still be read and used. A later actual commit can compact it.
       await store.maintain().catch(error => console.warn('preset-enhance: state maintenance failed', error));
     } catch (error) {
@@ -329,6 +331,7 @@ const chatConnection = () => {
   ctx.effect(() => store.subscribe(state => {
     refreshPolicies(state);
     deepseekSafetyCheck = state.deepseekSafetyCheck;
+    stripHarnessHeaders = state.stripHarnessHeaders === true;
   }), 'preset-enhance: committed request settings');
   const templateRegistry = createTemplateRegistry(error => console.warn('preset-enhance: template catalog listener failed', error));
   ctx.effect(() => () => templateRegistry.close(), 'preset-enhance: template registry');
@@ -364,7 +367,15 @@ const chatConnection = () => {
   }
 
   async function* injectStream(options: StreamOptions, next: () => AsyncIterable<unknown>, onDispatch: () => void) {
-    const dispatch = (source: () => AsyncIterable<unknown>) => withRequestOptions(config.requestUserAgent, deepseekSafetyCheck, source);
+    const dispatch = (source: () => AsyncIterable<unknown>) => withRequestOptions(
+      config.requestUserAgent,
+      deepseekSafetyCheck,
+      source,
+      {
+        stripHarnessHeaders,
+        ...(typeof options.sessionId === 'string' && options.sessionId ? { sessionId: options.sessionId } : {}),
+      },
+    );
     // A degraded startup never injects a partial preset: requests pass through untouched.
     if (startupError) { yield* dispatch(next); return; }
     const sessionId = options.sessionId;
@@ -770,6 +781,7 @@ const chatConnection = () => {
             postToolPrefixMode: state.postToolPrefixMode,
             postToolPrefixText: state.postToolPrefixText,
             deepseekSafetyCheck: state.deepseekSafetyCheck,
+            stripHarnessHeaders: state.stripHarnessHeaders === true,
             deepseekBetaPrefix: state.deepseekBetaPrefix === true,
             forcePrefill: state.forcePrefill === true,
             prefixToolCalls: state.prefixToolCalls === true,
@@ -1246,6 +1258,12 @@ const chatConnection = () => {
             state.deepseekSafetyCheck = level;
             state.revision++;
             return { revision: state.revision, level };
+          }
+          if (body.action === 'set-strip-harness-headers') {
+            if (typeof body.enabled !== 'boolean') throw new Error('请求头移除开关值无效');
+            state.stripHarnessHeaders = body.enabled;
+            state.revision++;
+            return { revision: state.revision, enabled: state.stripHarnessHeaders };
           }
           if (body.action === 'set-default') {
             const record = state.presets.find(p => p.id === body.id);

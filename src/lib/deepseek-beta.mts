@@ -3,7 +3,7 @@ import { emulateToolCallRequest, transformToolCallResponse } from './toolcall-pr
 import type { JsonObject, ResponseTransformMetadata } from './toolcall-prefill.mjs';
 import { classifyProtocolPath, detectProtocol, observeProtocolRequest, protocolCapability } from './protocol.mjs';
 import { captureOutgoingRequest } from './request-preview.mjs';
-import { activeSafetyCheck, withUserAgentHeader } from './request-options.mjs';
+import { activeSafetyCheck, activeSessionId, withUserAgentHeader } from './request-options.mjs';
 import type { LlmProtocol, ProtocolObservation, ProtocolObserver } from './protocol.mjs';
 import { messagesRequestHeadersToChat, messagesRequestToChat, translateChatResponse } from './messages-translate.mjs';
 import type { PluginContext } from '../host-types.mjs';
@@ -211,10 +211,11 @@ export interface DeepSeekPrefixRewrite {
  * pretending the compatibility path applied.
  */
 export function rewriteDeepSeekPrefixFetch(
-  input: FetchInput, init: RequestInitLike = {}, registries: readonly SessionRegistry[] = [], options: { reroute?: boolean } = {},
+  input: FetchInput, init: RequestInitLike = {}, registries: readonly SessionRegistry[] = [], options: { reroute?: boolean; sessionId?: string } = {},
 ): DeepSeekPrefixRewrite {
+  const detectOpts = options.sessionId ? { sessionId: options.sessionId } : undefined;
   const rewritten = rewritePrefixFetch(input, init, registries, options);
-  const sessionId = detectProtocol(input, init).sessionId;
+  const sessionId = detectProtocol(input, init, detectOpts).sessionId;
   if (!sessionId || (rewritten.protocol !== 'chat-completions' && rewritten.protocol !== 'messages')) return rewritten;
   const body = jsonBody(rewritten.init);
   if (!body) return rewritten;
@@ -237,9 +238,9 @@ export function rewriteDeepSeekPrefixFetch(
 
 function rewritePrefixFetch(
   input: FetchInput, init: RequestInitLike = {}, registries: readonly SessionRegistry[] = [],
-  options: { reroute?: boolean } = {},
+  options: { reroute?: boolean; sessionId?: string } = {},
 ): DeepSeekPrefixRewrite {
-  const detected = detectProtocol(input, init);
+  const detected = detectProtocol(input, init, options.sessionId ? { sessionId: options.sessionId } : undefined);
   const untouched: DeepSeekPrefixRewrite = {
     input, init, changed: false, mode: 'none', protocol: detected.protocol,
   };
@@ -525,11 +526,16 @@ function createWrapper(host: BridgeHost): FetchLike {
     const observers = [...host.observers];
     const seen: Array<{ observer: ProtocolObserver; observation: ProtocolObservation }> = [];
     const normalized = await materializeRequest(input, init);
+    const scopedSessionId = activeSessionId();
+    const detectOpts = scopedSessionId ? { sessionId: scopedSessionId } : undefined;
     for (const observer of observers) {
-      const observation = observeProtocolRequest(normalized.input, normalized.init, observer);
+      const observation = observeProtocolRequest(normalized.input, normalized.init, observer, detectOpts);
       if (observation) seen.push({ observer, observation });
     }
-    const rewritten = rewriteDeepSeekPrefixFetch(normalized.input, normalized.init, registries, { reroute: host.reroute });
+    const rewritten = rewriteDeepSeekPrefixFetch(normalized.input, normalized.init, registries, {
+      reroute: host.reroute,
+      ...(scopedSessionId ? { sessionId: scopedSessionId } : {}),
+    });
     if (rewritten.skipped) {
       for (const { observer, observation } of seen) {
         observer.record({ ...observation, skipped: true, skippedReason: rewritten.skipped.reason });

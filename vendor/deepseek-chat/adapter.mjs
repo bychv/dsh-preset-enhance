@@ -162,9 +162,6 @@ export class DeepSeekChatAdapter {
             'content-type': 'application/json',
             accept: 'text/event-stream',
             ...attribution,
-            'x-deepseek-harness-user-id': this.dependencies.resolveUserId?.() ?? 'preset-enhance',
-            ...options.sessionId === undefined ? {} : { 'x-deepseek-harness-session-id': String(options.sessionId) },
-            ...options.purpose === 'compaction' ? { 'x-deepseek-harness-compact': '1' } : {},
         };
         const defaults = {
             ...connection.thinking === undefined ? {} : { thinking: connection.thinking },

@@ -43,6 +43,7 @@ let bindingVersion = 0;
 // 顶部会话连接选择器直接改宿主的 provider/model：选中即切换，不参与任何自动保存。
 let connectionSwitchSaving = false;
 let safetyCheckSaving = false;
+let stripHarnessHeadersSaving = false;
 
 function blank() {
   return {
@@ -227,6 +228,7 @@ async function reload(id) {
   $('markers').value = JSON.stringify(binding.markers ?? {}, null, 2);
   validateMarkersInput();
   renderSafetyCheck();
+  renderStripHarnessHeaders();
   $('deepseek-beta-prefix').checked = state.deepseekBetaPrefix === true;
   $('force-prefill').checked = state.forcePrefill === true;
   $('prefix-tool-calls').checked = state.prefixToolCalls === true;
@@ -392,6 +394,12 @@ function renderSafetyCheck() {
   const select = $('deepseek-safety-check');
   if (!safetyCheckSaving) select.value = state.deepseekSafetyCheck ?? 'omit';
   select.disabled = safetyCheckSaving || Boolean(state.startupError);
+}
+function renderStripHarnessHeaders() {
+  const toggle = $('strip-harness-headers');
+  if (!toggle) return;
+  if (!stripHarnessHeadersSaving) toggle.checked = state.stripHarnessHeaders === true;
+  toggle.disabled = stripHarnessHeadersSaving || Boolean(state.startupError);
 }
 /**
  * 选中即切换：走宿主自己的 provider/model 选择（sessionController），请求记录、模型能力与
@@ -2406,6 +2414,24 @@ $('deepseek-safety-check').onchange = guard(async () => {
     renderSafetyCheck();
   }
 });
+if ($('strip-harness-headers')) {
+  $('strip-harness-headers').onchange = guard(async () => {
+    const enabled = $('strip-harness-headers').checked === true;
+    stripHarnessHeadersSaving = true;
+    renderStripHarnessHeaders();
+    try {
+      const result = await configWrite({ action: 'set-strip-harness-headers', enabled });
+      acceptRevision(result);
+      state.stripHarnessHeaders = result.enabled === true;
+      status(state.stripHarnessHeaders
+        ? '已开启移除内置适配器 x-deepseek-harness 请求头'
+        : '已关闭移除内置适配器 x-deepseek-harness 请求头');
+    } finally {
+      stripHarnessHeadersSaving = false;
+      renderStripHarnessHeaders();
+    }
+  });
+}
 $('prefix-tool-calls').onchange = () => {
   syncPrefixToolControls();
   markPrefillSettingsDirty();
@@ -3707,6 +3733,12 @@ async function refreshConnectionState() {
     if (safetyChanged) {
       state.deepseekSafetyCheck = latest.deepseekSafetyCheck;
       renderSafetyCheck();
+    }
+    const stripHeadersChanged = !stripHarnessHeadersSaving && latest.revision >= state.revision &&
+      Boolean(state.stripHarnessHeaders) !== Boolean(latest.stripHarnessHeaders);
+    if (stripHeadersChanged) {
+      state.stripHarnessHeaders = latest.stripHarnessHeaders === true;
+      renderStripHarnessHeaders();
     }
     state.sessionMode = latest.sessionMode;
     state.presetMode = latest.presetMode;

@@ -293,6 +293,8 @@ textarea.is-invalid { border-color: var(--danger); box-shadow: 0 0 0 3px var(--d
 .connection-switch[data-side="right"] .connection-switch-knob { left: 27px; background: var(--conn-active); }
 .connection-switch[data-side="none"] .connection-switch-knob { background: var(--conn-knob); }
 #connection-note { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.connection-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; flex: 0 1 auto; }
+.connection-strip-headers { margin: 0; padding: 2px 0; font-size: 12px; }
 .connection-safety { margin: 0; flex: 0 1 auto; }
 .connection-safety select { padding: 5px 8px; font-size: 12px; }
 

@@ -125,8 +125,9 @@ test('one plain-text request completes end to end and carries attribution', asyn
   assert.equal(parts.requests[0].headers.authorization, 'Bearer ' + KEY);
   assert.equal(parts.requests[0].headers['content-type'], 'application/json');
   assert.equal(parts.requests[0].headers.accept, 'text/event-stream');
-  assert.equal(parts.requests[0].headers['x-deepseek-harness-user-id'], 'tester');
-  assert.equal(parts.requests[0].headers['x-deepseek-harness-session-id'], 'session-42');
+  assert.equal(parts.requests[0].headers['x-deepseek-harness-user-id'], undefined);
+  assert.equal(parts.requests[0].headers['x-deepseek-harness-session-id'], undefined);
+  assert.equal(parts.requests[0].headers['x-deepseek-harness-compact'], undefined);
   assert.equal(parts.requests[0].body.model, 'deepseek-flash');
   assert.equal(parts.requests[0].body.stream, true);
   assert.deepEqual(parts.requests[0].body.stream_options, { include_usage: true });
@@ -147,10 +148,11 @@ test('the key resolver runs once per request and is never cached', async () => {
   const parts = makeAdapter(() => sseResponse([textChunk('ok'), { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }, '[DONE]']));
   const options = { provider: DEEPSEEK_CHAT_PROVIDER_ID, model: 'deepseek-flash', messages: [{ role: 'user', content: [{ type: 'text', text: 'a' }] }] };
   await collect(parts.adapter.stream(options));
-  await collect(parts.adapter.stream({ ...options, sessionId: 'second' }));
+  await collect(parts.adapter.stream({ ...options, sessionId: 'second', purpose: 'compaction' }));
   assert.equal(parts.requests.length, 2);
   assert.deepEqual(parts.keys.map(entry => entry.sessionId), [undefined, 'second']);
-  assert.equal(parts.requests[1].headers['x-deepseek-harness-session-id'], 'second');
+  assert.equal(parts.requests[1].headers['x-deepseek-harness-session-id'], undefined);
+  assert.equal(parts.requests[1].headers['x-deepseek-harness-compact'], undefined);
 });
 
 test('message role order is preserved, including a system prompt after chatHistory', () => {

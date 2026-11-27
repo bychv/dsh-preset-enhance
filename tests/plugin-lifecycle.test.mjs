@@ -173,6 +173,148 @@ test('live model request settings apply with presets disabled and safety review 
   }
 });
 
+test('stripHarnessHeaders removes built-in x-deepseek-harness headers while plugin chat adapter works without them', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'preset-strip-harness-'));
+  const originalFetch = globalThis.fetch;
+  const disposers = [];
+  const sent = [];
+  const file = join(dir, 'state.json');
+  let api;
+  let intercept;
+  let chatAdapter;
+  globalThis.fetch = async (input, init) => {
+    const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+    const raw = init?.body ?? (input instanceof Request ? await input.clone().text() : undefined);
+    sent.push({
+      url: input instanceof Request ? input.url : String(input),
+      headers,
+      body: raw ? JSON.parse(raw) : undefined,
+    });
+    return new Response(
+      'data: {"id":"r","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+      { status: 200, headers: { 'content-type': 'text/event-stream' } },
+    );
+  };
+  await new PresetStore(file).transaction(state => {
+    state.selectedPresetId = 'p1';
+    state.autoEnableModes.push('standard');
+    state.deepseekBetaPrefix = true;
+    state.presets = [{
+      id: 'p1',
+      name: 'Prefill',
+      preset: {
+        assistant_prefill: '继续写',
+        prompts: [
+          { identifier: 'sys', role: 'system', content: '系统设定' },
+          { identifier: 'chatHistory', role: 'user', marker: true },
+        ],
+        prompt_order: [{ character_id: 100001, order: [{ identifier: 'sys', enabled: true }, { identifier: 'chatHistory', enabled: true }] }],
+      },
+    }];
+  });
+  const ctx = {
+    effect(setup) { const dispose = setup(); if (typeof dispose === 'function') disposers.push(dispose); },
+    on(event, handler) { if (event === 'llm/stream') intercept = handler; },
+    sessions: {
+      get: id => id === 's1'
+        ? { id: 's1', header: { agentPreset: 'standard' } }
+        : id === 's-builtin'
+          ? { id: 's-builtin', header: { agentPreset: 'minimal' } }
+          : undefined,
+    },
+    webServer: { register(definition) {
+      if (definition.path === '/preset-enhance/api') api = definition.handler;
+      return () => {};
+    } },
+    llm: {
+      registerAdapter(_ids, adapter) { chatAdapter = adapter; return () => {}; },
+      async *stream(options) { yield* chatAdapter.stream(options); },
+    },
+  };
+  const callApi = async (body, expected = 200) => {
+    const req = Readable.from([JSON.stringify({ revision: (await new PresetStore(file).read()).revision, ...body })]);
+    Object.assign(req, { method: 'POST', url: '/preset-enhance/api', headers: { host: 'localhost', 'content-type': 'application/json' } });
+    let status, result;
+    await api(req, { writeHead: value => { status = value; }, end: value => { result = JSON.parse(value); } });
+    assert.equal(status, expected, result?.error);
+    return result;
+  };
+  const runBuiltIn = (options, transport) => Array.fromAsync(intercept(options, async function* () { await transport(); }));
+  try {
+    process.env.DEEPSEEK_API_KEY = 'fixture-key';
+    await apply(ctx, { dataFile: file, agentPresetRoot: join(dir, 'modes') });
+    assert.equal((await new PresetStore(file).read()).stripHarnessHeaders, false);
+
+    // Reject invalid non-boolean payload.
+    await callApi({ action: 'set-strip-harness-headers', enabled: 'yes' }, 400);
+
+    // Default (false): built-in adapter keeps x-deepseek-harness-* headers.
+    const officialReq = new Request('https://api.deepseek.com/anthropic/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': 'fixture',
+        'user-agent': 'dsh/test',
+        'x-deepseek-harness-user-id': 'u-1',
+        'x-deepseek-harness-session-id': 's1',
+        'x-deepseek-harness-compact': '1',
+      },
+      body: '{}',
+    });
+    await runBuiltIn({ provider: 'deepseek-official', purpose: 'compaction', messages: [] }, () => fetch(officialReq));
+    assert.equal(sent[0].headers.get('x-deepseek-harness-user-id'), 'u-1');
+    assert.equal(sent[0].headers.get('x-deepseek-harness-session-id'), 's1');
+    assert.equal(sent[0].headers.get('x-deepseek-harness-compact'), '1');
+
+    // Enable stripping: built-in Requests and init objects strip all x-deepseek-harness-* without mutating inputs.
+    const toggled = await callApi({ action: 'set-strip-harness-headers', enabled: true });
+    assert.equal(toggled.enabled, true);
+    assert.equal((await new PresetStore(file).read()).stripHarnessHeaders, true);
+
+    await runBuiltIn({ provider: 'deepseek-official', purpose: 'compaction', messages: [] }, () => fetch(officialReq));
+    assert.equal(sent[1].headers.get('x-deepseek-harness-user-id'), null);
+    assert.equal(sent[1].headers.get('x-deepseek-harness-session-id'), null);
+    assert.equal(sent[1].headers.get('x-deepseek-harness-compact'), null);
+    assert.equal(sent[1].headers.get('x-api-key'), 'fixture');
+    assert.equal(sent[1].headers.get('user-agent'), 'dsh/test');
+    assert.equal(officialReq.headers.get('x-deepseek-harness-user-id'), 'u-1', 'original Request must stay intact');
+
+    const initHeaders = { 'X-DeepSeek-Harness-Session-Id': 's-init', 'X-DeepSeek-Harness-User-Id': 'u-init', authorization: 'Bearer k' };
+    await runBuiltIn({ provider: 'deepseek-official', sessionId: 's-builtin', messages: [] }, () =>
+      fetch('https://api.deepseek.com/anthropic/v1/messages', { method: 'POST', headers: initHeaders, body: '{}' }));
+    assert.equal(sent[2].headers.get('x-deepseek-harness-session-id'), null);
+    assert.equal(sent[2].headers.get('x-deepseek-harness-user-id'), null);
+    assert.equal(sent[2].headers.get('authorization'), 'Bearer k');
+    assert.equal(initHeaders['X-DeepSeek-Harness-Session-Id'], 's-init', 'caller headers object must stay intact');
+
+    // Out-of-stream requests are untouched.
+    await fetch('https://api.deepseek.com/responses', { method: 'POST', headers: { 'x-deepseek-harness-user-id': 'outside' }, body: '{}' });
+    assert.equal(sent[3].headers.get('x-deepseek-harness-user-id'), 'outside');
+
+    // Plugin chat adapter emits no x-deepseek-harness-* headers yet still triggers prefill beta rewrite via session scope.
+    await Array.fromAsync(intercept({
+      provider: 'preset-deepseek-chat',
+      model: 'deepseek-flash',
+      sessionId: 's1',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }],
+    }, () => ctx.llm.stream({
+      provider: 'preset-deepseek-chat',
+      model: 'deepseek-flash',
+      sessionId: 's1',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }],
+    })));
+    assert.equal(sent[4].url, 'https://api.deepseek.com/beta/chat/completions');
+    assert.equal(sent[4].body.messages.at(-1).prefix, true);
+    for (const key of sent[4].headers.keys()) {
+      assert.equal(key.startsWith('x-deepseek-harness'), false, 'plugin chat adapter must not send ' + key);
+    }
+  } finally {
+    delete process.env.DEEPSEEK_API_KEY;
+    await Promise.all(disposers.map(dispose => dispose()));
+    globalThis.fetch = originalFetch;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('activation registers the chat provider and the preset mode once and releases both', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'preset-registration-'));
   const file = join(dir, 'state.json');

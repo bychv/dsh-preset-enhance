@@ -15,11 +15,14 @@
     <div class="connection-switch" id="connection-switch" role="group" aria-label="会话使用的连接"><button type="button" class="connection-switch-side" id="connection-side-left" aria-pressed="false"></button><button type="button" class="connection-switch-track" id="connection-toggle" role="switch" aria-checked="false" aria-describedby="connection-note"><span class="connection-switch-knob"></span></button><button type="button" class="connection-switch-side" id="connection-side-right" aria-pressed="false"></button></div>
     <p id="connection-note" class="muted"></p>
   </div>
-  <label class="switch-row connection-safety" for="deepseek-safety-check" title="DeepSeek 官方 API 安全审核等级（全局生效）"><span>官方安全审核（全局）</span><select id="deepseek-safety-check" disabled>
-    <option value="omit">默认（不指定）</option>
-    <option value="low">宽松 (low)</option>
-    <option value="high">严格 (high)</option>
-  </select></label>
+  <div class="connection-controls">
+    <label class="toggle connection-strip-headers" for="strip-harness-headers" title="开启后移除 DSH 内置适配器发送的 x-deepseek-harness-* 请求头；插件自带对话补全适配器已默认移除"><input type="checkbox" id="strip-harness-headers" disabled><span>移除内置适配器 DSH 请求头（全局）</span></label>
+    <label class="switch-row connection-safety" for="deepseek-safety-check" title="DeepSeek 官方 API 安全审核等级（全局生效）"><span>官方安全审核（全局）</span><select id="deepseek-safety-check" disabled>
+      <option value="omit">默认（不指定）</option>
+      <option value="low">宽松 (low)</option>
+      <option value="high">严格 (high)</option>
+    </select></label>
+  </div>
 </section>
 
 <nav class="workbench-nav" aria-label="预设库操作">
